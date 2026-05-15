@@ -24,7 +24,8 @@ import { TableNode } from './components/TableNode'
 import { SidePanel } from './components/SidePanel'
 import { AddTableDialog } from './components/AddTableDialog'
 import type { OntObjectType, OntLinkType, ErNode, ErEdge, ImportProgressResponse, PbitTablePreview } from '@/types/api'
-import { MotionFade, DataLoader } from '@/lib/motion'
+import { DataLoader } from '@/lib/motion'
+import { motion, useReducedMotion } from 'motion/react'
 import { Plus, Network } from 'lucide-react'
 
 const nodeTypes: NodeTypes = {
@@ -63,6 +64,7 @@ function layoutGraph(nodes: Node[], edges: Edge[]): Node[] {
 export default function ErDiagramPageMinimal() {
   const t = useTranslations('er')
   const industrial = useStyleMode().mode === 'industrial'
+  const reduce = useReducedMotion()
   const { currentProject } = useProject()
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
@@ -252,18 +254,17 @@ export default function ErDiagramPageMinimal() {
     return null
   }, [selectedNode, selectedEdge])
 
-  if (!currentProject) {
-    return (
-      <div className="flex items-center justify-center h-full p-8">
-        <div className="text-sm text-gray-400">No project selected.</div>
-      </div>
-    )
-  }
-
   return (
     <div className="flex h-full flex-col">
       {/* Header — h-14 to align with Sidebar brand row; industrial uses 2px ink rule */}
-      <MotionFade className={`flex h-14 items-center justify-between bg-white px-6 ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-100'}`}>
+      <motion.header
+        initial={reduce ? undefined : { opacity: 0, y: -4 }}
+        animate={reduce ? undefined : { opacity: 1, y: 0 }}
+        transition={{ duration: 0.2, ease: 'easeOut' }}
+        className={`flex h-14 flex-shrink-0 items-center justify-between gap-3 bg-white px-6 ${
+          industrial ? 'border-b-2 border-ink' : 'border-b border-border shadow-sm'
+        }`}
+      >
         <div className="flex items-center gap-3">
           {industrial ? (
             <span className="font-mono text-[11px] tracking-[0.22em] text-ink-ghost">
@@ -276,44 +277,67 @@ export default function ErDiagramPageMinimal() {
               </div>
               <div>
                 <h1 className="font-sans text-sm font-semibold text-gray-900">Lakehouse ER Diagram</h1>
-                {!loading && (
+                {!loading && currentProject && (
                   <p className="text-xs text-gray-400">{nodes.length} tables · {edges.length} relationships</p>
                 )}
               </div>
             </>
           )}
-          {industrial && !loading && (
+          {industrial && !loading && currentProject && (
             <span className="font-mono text-[10px] tracking-[0.14em] text-ink-muted tabular-nums">
               {nodes.length} TABLES · {edges.length} RELATIONSHIPS
             </span>
           )}
-          <div className={`flex items-center gap-3 ml-2 pl-3 ${industrial ? 'border-l border-ink/30' : 'border-l border-gray-100'}`}>
-            {[
-              ['PBIX',    industrial ? 'bg-ink'      : 'bg-blue-200'],
-              ['EXCEL',   industrial ? 'bg-ink/60'   : 'bg-green-200'],
-              ['DERIVED', industrial ? 'bg-ink/30'   : 'bg-gray-300'],
-            ].map(([label, dotCls]) => (
-              <div key={label} className="flex items-center gap-1">
-                <span className={`inline-block h-2 w-2 ${industrial ? '' : 'rounded-full'} ${dotCls}`} />
-                <span className={industrial ? 'font-mono text-[9px] tracking-[0.18em] text-ink-muted' : 'text-[9px] text-gray-400'}>
-                  {industrial ? label : label.charAt(0) + label.slice(1).toLowerCase()}
-                </span>
-              </div>
-            ))}
-          </div>
+          {currentProject && (
+            <div className={`flex items-center gap-3 ml-2 pl-3 ${industrial ? 'border-l border-ink/30' : 'border-l border-gray-100'}`}>
+              {[
+                ['PBIX',    industrial ? 'bg-ink'      : 'bg-blue-200'],
+                ['EXCEL',   industrial ? 'bg-ink/60'   : 'bg-green-200'],
+                ['DERIVED', industrial ? 'bg-ink/30'   : 'bg-gray-300'],
+              ].map(([label, dotCls]) => (
+                <div key={label} className="flex items-center gap-1">
+                  <span className={`inline-block h-2 w-2 ${industrial ? '' : 'rounded-full'} ${dotCls}`} />
+                  <span className={industrial ? 'font-mono text-[9px] tracking-[0.18em] text-ink-muted' : 'text-[9px] text-gray-400'}>
+                    {industrial ? label : label.charAt(0) + label.slice(1).toLowerCase()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <Button variant={hideIslands ? 'primary' : 'ghost'} size="sm" onClick={() => setHideIslands((v) => !v)}>
+          <Button variant={hideIslands ? 'primary' : 'ghost'} size="sm" onClick={() => setHideIslands((v) => !v)} disabled={!currentProject}>
             {hideIslands ? t('show_all') : t('hide_islands')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={fetchDiagram} disabled={loading}>Refresh</Button>
-          <Button variant="primary" size="sm" onClick={() => setAddOpen(true)} disabled={loading}>
+          <Button variant="ghost" size="sm" onClick={fetchDiagram} disabled={loading || !currentProject}>Refresh</Button>
+          <Button variant="primary" size="sm" onClick={() => setAddOpen(true)} disabled={loading || !currentProject}>
             <Plus size={14} /> Add Table
           </Button>
         </div>
-      </MotionFade>
+      </motion.header>
 
-      {error && (
+      {/* Empty state when no project selected — keeps header visible for visual consistency */}
+      {!currentProject && (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+          {industrial ? (
+            <>
+              <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-ink-ghost">
+                // NO PROJECT SELECTED
+              </span>
+              <span className="font-mono text-[11px] tracking-[0.04em] text-ink-muted">
+                Use the project switcher in the sidebar, or create a new project.
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-medium text-ink-muted">No project selected</span>
+              <span className="text-xs text-ink-ghost">Use the project switcher in the sidebar, or create a new project.</span>
+            </>
+          )}
+        </div>
+      )}
+
+      {currentProject && error && (
         <div
           className={`px-6 py-2 text-xs text-red-600 ${
             industrial ? 'border-b-2 border-danger bg-danger/5 font-mono tracking-[0.06em]' : 'border-b border-red-100 bg-red-50'
@@ -323,53 +347,57 @@ export default function ErDiagramPageMinimal() {
         </div>
       )}
 
-      <DataLoader loading={loading} message={t('loading')} minHeight="50vh">
-      <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 relative">
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onNodeClick={handleNodeClick}
-            onEdgeClick={handleEdgeClick}
-            onPaneClick={handlePaneClick}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            minZoom={0.1}
-            maxZoom={2}
-          >
-            <Background gap={16} color="#F3F4F6" />
-            <Controls />
-            <MiniMap
-              nodeColor={(n) => {
-                const origin = (n.data as unknown as ErNode).origin
-                if (origin === 'pbix-data') return '#BFDBFE'
-                if (origin === 'manual-upload') return '#0A0A0A'
-                if (origin === 'derived-view') return '#D1D5DB'
-                return '#E5E7EB'
-              }}
-              style={{ border: '1px solid #E5E7EB', borderRadius: 8 }}
+      {currentProject && (
+        <DataLoader loading={loading} message={t('loading')} minHeight="50vh">
+        <div className="flex flex-1 overflow-hidden">
+          <div className="flex-1 relative">
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={handleEdgeClick}
+              onPaneClick={handlePaneClick}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              minZoom={0.1}
+              maxZoom={2}
+            >
+              <Background gap={16} color="#F3F4F6" />
+              <Controls />
+              <MiniMap
+                nodeColor={(n) => {
+                  const origin = (n.data as unknown as ErNode).origin
+                  if (origin === 'pbix-data') return '#BFDBFE'
+                  if (origin === 'manual-upload') return '#0A0A0A'
+                  if (origin === 'derived-view') return '#D1D5DB'
+                  return '#E5E7EB'
+                }}
+                style={{ border: '1px solid #E5E7EB', borderRadius: 8 }}
+              />
+            </ReactFlow>
+          </div>
+
+          {sidePanelSelected && (
+            <SidePanel
+              selected={sidePanelSelected}
+              onClose={() => { setSelectedNode(null); setSelectedEdge(null) }}
             />
-          </ReactFlow>
+          )}
         </div>
+        </DataLoader>
+      )}
 
-        {sidePanelSelected && (
-          <SidePanel
-            selected={sidePanelSelected}
-            onClose={() => { setSelectedNode(null); setSelectedEdge(null) }}
-          />
-        )}
-      </div>
-      </DataLoader>
-
-      <AddTableDialog
-        open={addOpen}
-        projectId={currentProject.id}
-        onClose={() => setAddOpen(false)}
-        onSuccess={fetchDiagram}
-      />
+      {currentProject && (
+        <AddTableDialog
+          open={addOpen}
+          projectId={currentProject.id}
+          onClose={() => setAddOpen(false)}
+          onSuccess={fetchDiagram}
+        />
+      )}
     </div>
   )
 }
