@@ -83,20 +83,26 @@ Detailed architecture and design rationale: [**Design Philosophy**](./docs/spec/
 
 **Prerequisites:** Docker (with `docker compose` v2+).
 
+Five commands. Five minutes. Schema auto-applies on first start. Default admin is `admin / admin` for local trial — rotate before exposing the instance beyond localhost.
+
 ```bash
-# 1. Copy example envs (defaults work out-of-the-box for local trial;
-#    change POSTGRES_PASSWORD / INTERNAL_TOKEN / GRAFANA_ADMIN_PASSWORD
-#    before any real deployment)
-cp .env.example .env
+# 1. clone
+git clone https://github.com/agentofreef/text2ontology
+cd text2ontology
+
+# 2. configure (defaults work; rotate secrets before deploy)
 cp .env.shared.example .env.shared
 
-# 2. Build & start everything (schema auto-applies, takes 1-3 min first time)
+# 3. start everything (schema auto-applies, ~1-3 min first time)
 docker compose --env-file .env.shared up -d
 
-# 3. Wait ~30s for services to boot, then probe health
+# 4. verify all 7 services are healthy
 for p in 18080 18090 18092 18093 18094 18095 18096; do
-  printf "  $p: "; curl -fsS localhost:$p/healthz || echo "(starting)"
+  curl -fsS localhost:$p/healthz
 done
+
+# 5. open
+open http://localhost:18080
 ```
 
 Open `http://localhost:18080` in a browser.
