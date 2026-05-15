@@ -12,18 +12,13 @@ frontend/tsconfig.tsbuildinfo
 backend/lakehouse2ontology-server
 services/*/server
 
-# Go workspace vendor is committed (~254MB) so docker compose build works
-# without `go mod download`. Reproducible builds, no network dependency at
-# build time. Regenerate locally with `go work vendor` if needed.
-
 # Python
 __pycache__/
 *.pyc
 .venv/
 mcp-server/.venv/
 
-# Environment — real credential files MUST NOT be committed.
-# Only the *.example templates ship in this public repo.
+# Environment
 .env
 .env.shared
 .env.local
@@ -47,66 +42,38 @@ Thumbs.db
 # Logs
 *.log
 
-# OMC state (auto-generated, session-specific)
-.omc/state/
-**/.omc/state/
-.omc/sessions/
-**/.omc/sessions/
-.omc/handoffs/
-**/.omc/handoffs/
+# OMC state
+.omc/
+**/.omc/
 
-# Runtime cancel/state signals (root-level)
+# Runtime cancel/state signals
 /state/
 
-# Regression test run outputs — timestamped subdirs (e.g. *-20260503T182043Z/).
-# Core fixtures (README, AGENTS, golden-prompts.json, baseline-*.json,
-# model-drift-floor.json) ARE tracked.
+# Regression fixtures (timestamped run outputs only)
 regression-fixtures/*T*Z/
 regression-fixtures/*T*Z.json
 
-# Large files (>20MB)
+# Large files / archives
 pgdata.tar.gz
 *.tar.gz
 *.zip
 *.sql.gz
-docs/business/Early Order业务场景&数据收集表.xlsx
-docs/ontology-handover/early-order-ontology-template.xlsx
+*.dump
+*.pbix
 
-# enterprise repo additions
-backend/lakehouse2ontology-server
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-pgdata/
-*.log
-
-# Large DB dumps + backups — present on filesystem for operator reference,
-# but NOT committed (git chokes on multi-GB binary blobs; use out-of-band
-# backup rotation instead).
+# Backup directories
 backup/
 backups/
 dumps/
 dbdumps/
-pgdata.tar.gz
-*.dump
-*.tar.gz
-*.pbix
 
-# OMC (oh-my-claudecode) runtime artifacts.
-# Block every nested .omc/ in the community repo — these directories are
-# auto-generated per-tool state and routinely contain absolute paths from
-# the maintainer's private machine (e.g. text2ontology-enterprise), notes,
-# and scratch context that should never ship to the public mirror.
-.omc/
-**/.omc/
-backend/.omc/
-frontend/.omc/
-
-# OMC-generated per-directory subagent context files. These are regenerated
-# on every OMC session and rot quickly; keep CLAUDE.md (project spec) tracked
-# but never commit AGENTS.md anywhere in the tree.
+# OMC-generated per-directory context files (CLAUDE.md stays tracked)
 AGENTS.md
 **/AGENTS.md
-# Anthropic local-only Claude memory; per-user, never commit.
 CLAUDE.local.md
 **/CLAUDE.local.md
+
+# Private / sensitive business artifacts — never commit
+docs/business/
+docs/ontology-handover/
+*.xlsx
