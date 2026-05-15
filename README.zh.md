@@ -104,7 +104,7 @@ done
 
 浏览器访问 `http://localhost:18080`。
 
-**要使用 Agent**:在 `.env.shared` 设置至少一个 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`,然后 `docker compose --env-file .env.shared restart agent-server`。
+**要使用 Agent**:用 `admin` / `.env.shared` 里设的 `ADMIN_PASSWORD` 登录后,在 `/settings/llm-config` 添加至少一个 chat 模型(Claude / OpenAI / DeepSeek / Qwen,填 vendor + base URL + API key + model 名),激活为 chat role。LLM 凭据存在数据库,**无需改 env 也无需重启容器**。
 
 **当前状态**:这套 setup 能把系统正常起来,但**未导入数据前 UI 是空的**。数据导入(PBIT / Excel / CSV / Postgres 镜像)见 `docs/`。
 

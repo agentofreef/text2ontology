@@ -101,7 +101,7 @@ done
 
 Open `http://localhost:18080` in a browser.
 
-**To use the Agent**: set at least one of `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` in `.env.shared`, then `docker compose --env-file .env.shared restart agent-server`.
+**To use the Agent**: sign in as `admin` with the `ADMIN_PASSWORD` you set in `.env.shared`, then go to `/settings/llm-config` and add at least one chat model (Claude / OpenAI / DeepSeek / Qwen — vendor + base URL + API key + model name) and activate it for the chat role. Credentials live in the database — **no env changes, no container restart needed.**
 
 **Status:** This setup brings the system up cleanly but **the UI is empty until you ingest data**. See `docs/` for ingestion guides (PBIT / Excel / CSV / Postgres mirror).
 
