@@ -1174,6 +1174,7 @@
     "col_name": "名称",
     "col_cols": "列数",
     "col_rows": "行数",
+    "columns_count": "共 {count} 列",
     "col_status": "状态",
     "col_type": "类型",
     "status_loaded": "已加载",

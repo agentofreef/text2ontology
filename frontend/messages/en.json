@@ -1174,6 +1174,7 @@
     "col_name": "Name",
     "col_cols": "Cols",
     "col_rows": "Rows",
+    "columns_count": "{count} columns",
     "col_status": "Status",
     "col_type": "Type",
     "status_loaded": "Loaded",

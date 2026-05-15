@@ -35,6 +35,32 @@ func activateRespondError(w http.ResponseWriter, status int, msg string) {
 // pgQuoteIdent escapes a Postgres identifier (doubles internal quotes).
 func pgQuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
+// normalizeSemanticSQL coerces any of the three forms the builder agent (or a
+// human edit) may submit into a complete SELECT statement that's safe to wrap
+// as a subquery via `FROM (%s) AS od`. Supported inputs:
+//
+//	"SELECT * FROM ..."   → returned as-is (already a SELECT)
+//	"WITH ... SELECT ..." → returned as-is (CTE form)
+//	"FROM \"schema\".\"t\"" → prepended with "SELECT * "
+//	"\"schema\".\"t\""    → prepended with "SELECT * FROM "
+//
+// Without this, a bare FROM fragment produces "SELECT … FROM (FROM …) AS od"
+// which fails Postgres parse with "syntax error at or near \"FROM\"".
+func normalizeSemanticSQL(sql string) string {
+	s := strings.TrimSpace(sql)
+	if s == "" {
+		return s
+	}
+	upper := strings.ToUpper(s)
+	if strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH") {
+		return s
+	}
+	if strings.HasPrefix(upper, "FROM") {
+		return "SELECT * " + s
+	}
+	return "SELECT * FROM " + s
+}
+
 // ─── POST /api/ontology/builder/activate-od ─────────────────────────────────
 //
 // Single-tx flow: ownership → apply edits → mark=true on object + props →
@@ -217,6 +243,9 @@ func handleBuilderActivateOd(db *sql.DB) http.HandlerFunc {
 			activateRespondError(w, http.StatusBadRequest, "semantic_sql is empty — cannot solidify")
 			return
 		}
+		// Coerce bare FROM-fragments / bare table refs into a full SELECT so the
+		// subquery wrap below produces valid SQL. See normalizeSemanticSQL doc.
+		semanticSQL = normalizeSemanticSQL(semanticSQL)
 
 		propRows, err := tx.QueryContext(ctx,
 			`SELECT name, COALESCE(source_column,'') FROM ont_property WHERE object_type_id=$1 ORDER BY name`,
@@ -249,13 +278,20 @@ func handleBuilderActivateOd(db *sql.DB) http.HandlerFunc {
 			// Preserve routes.go:1057-1058 behavior — pass through all columns.
 			selectCols = "od.*"
 		} else {
+			// Reference each column by the property's `name`, not its
+			// `source_column`. Rationale: the subquery alias `od` exposes the
+			// columns AS NAMED by the inner semanticSQL — and the canonical
+			// contract is "inner SELECT yields one column per property, named
+			// after property.name (via `AS` when renamed from the physical
+			// source_column)". Using source_column here silently broke any
+			// property whose inner SQL used `"src" AS "name"`, e.g. when the
+			// builder agent generated `SELECT "ShipVia" AS "ShipperID" ...`:
+			// the wrap `od."ShipVia"` would resolve against the subquery and
+			// fail with `column od.ShipVia does not exist` because the inner
+			// already renamed it.
 			parts := make([]string, len(mapped))
 			for i, p := range mapped {
-				if p.sourceCol == p.name {
-					parts[i] = "od." + pgQuoteIdent(p.sourceCol)
-				} else {
-					parts[i] = "od." + pgQuoteIdent(p.sourceCol) + " AS " + pgQuoteIdent(p.name)
-				}
+				parts[i] = "od." + pgQuoteIdent(p.name)
 			}
 			selectCols = strings.Join(parts, ", ")
 		}

@@ -137,7 +137,49 @@ func syncOneTable(
 	if progress != nil {
 		progress(table, n)
 	}
+
+	// Promote staging TEXT columns to their declared SQLite affinities
+	// (INTEGER → bigint, REAL → double precision, NUMERIC → numeric). Done
+	// AFTER CopyIn — staging text avoids pq.CopyIn type-coercion edge cases,
+	// then a single ALTER per column converts in-place using NULLIF(col,'') to
+	// treat empty strings as SQL NULL. Without this, downstream LLM-authored
+	// SQL like `WHERE "Discontinued" = 0` blows up with `operator does not
+	// exist: text = integer`.
+	for _, c := range cols {
+		pgType := postgresTypeForSqliteAffinity(c.DataType)
+		if pgType == "" {
+			continue // already text or unknown → leave as TEXT
+		}
+		alterSQL := fmt.Sprintf(
+			`ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s USING NULLIF(%s, '')::%s`,
+			pq.QuoteIdentifier(dstSchema),
+			pq.QuoteIdentifier(table),
+			pq.QuoteIdentifier(c.Name),
+			pgType,
+			pq.QuoteIdentifier(c.Name),
+			pgType,
+		)
+		if _, err := tx.ExecContext(ctx, alterSQL); err != nil {
+			return fmt.Errorf("promote column %q.%q to %s: %w", table, c.Name, pgType, err)
+		}
+	}
+
 	return tx.Commit()
+}
+
+// postgresTypeForSqliteAffinity maps a normalized SQLite affinity (output of
+// normalizeSqliteType) to the postgres type to ALTER staging columns into.
+// Returns "" to mean "leave as TEXT" (for "TEXT", "BLOB", or unknown values).
+func postgresTypeForSqliteAffinity(affinity string) string {
+	switch affinity {
+	case "INTEGER":
+		return "bigint"
+	case "REAL":
+		return "double precision"
+	case "NUMERIC":
+		return "numeric"
+	}
+	return ""
 }
 
 // encodeForText converts whatever Go type the SQLite driver produced for a

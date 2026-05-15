@@ -55,7 +55,12 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
       label: t('data_assets'),
       items: [
         { href: '/ontology/lakehouse',         label: t('lakehouse'),       icon: Database },
-        { href: '/ontology/er-diagram',        label: t('er_diagram'),      icon: Network  },
+        // ER Diagram: page lives at /ontology/er-diagram and still renders the
+        // raw FK-relationship view, but it's hidden from the sidebar because
+        // ontology design (OD / property / link) is the curated path users
+        // are meant to take — the raw ER view duplicates what they'd see in
+        // any DB GUI and adds little value here.
+        // { href: '/ontology/er-diagram',        label: t('er_diagram'),      icon: Network  },
         { href: '/ontology/lakehouse-objects', label: 'Ontology',           icon: Box      },
         { href: '/ontology/lakehouse-graph',   label: t('property_graph'),  icon: Network  },
       ],
@@ -97,7 +102,11 @@ function useSystemGroup(t: ReturnType<typeof useTranslations<'nav'>>): NavGroup 
     label: t('system'),
     items: [
       { href: '/settings/data-sources',   label: t('data_sources'),      icon: Database  },
-      { href: '/settings/prompt-config',  label: t('prompt_engineering'), icon: Settings },
+      // Prompt Engineering: page lives at /settings/prompt-config but is
+      // hidden from the sidebar — current prompts are driven from llm-config
+      // role bindings and DB-stored templates, so this page has no active
+      // UX role yet. Keep the file in case it comes back for advanced users.
+      // { href: '/settings/prompt-config',  label: t('prompt_engineering'), icon: Settings },
       { href: '/settings/llm-config',     label: t('llm_config'),         icon: Cpu      },
       { href: '/settings/mcp-keys',       label: t('mcp_keys'),           icon: KeyRound },
       { href: '/settings/preferences',    label: t('preferences'),        icon: UserCog  },

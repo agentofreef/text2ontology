@@ -901,13 +901,16 @@ function LakehouseAgentChat() {
       <div className={`flex items-center justify-between px-4 py-2.5 flex-shrink-0 bg-white ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-200'}`}>
         <div className="flex items-center gap-3">
           {industrial ? (
-            <span className="font-mono text-[11px] tracking-[0.22em] text-ink-ghost">
+            // min-width pins the title cell so the [QUERY|BUILDER] toggle to its
+            // right doesn't shift horizontally when the label changes length
+            // (e.g. `// LAKEHOUSE AGENT` 18ch vs `// 本体构造助手` ~12ch).
+            <span className="inline-block min-w-[15rem] font-mono text-[11px] tracking-[0.22em] text-ink-ghost">
               // {(mode === 'builder' ? t('header.title_builder') : t('header.title_lakehouse')).toString().toUpperCase()}
             </span>
           ) : (
             <>
               <BookOpen className="h-5 w-5 text-gray-600" />
-              <h1 className="text-base font-semibold text-gray-900">
+              <h1 className="inline-block min-w-[10rem] text-base font-semibold text-gray-900">
                 {mode === 'builder' ? t('header.title_builder') : t('header.title_lakehouse')}
               </h1>
             </>
@@ -1137,10 +1140,16 @@ function LakehouseAgentChat() {
               {messages.length === 0 && (
                 <MotionFade className="flex h-full flex-col items-center justify-center gap-3 text-gray-400">
                   <BookOpen className="h-10 w-10 text-gray-300" />
-                  <span className="text-sm font-medium text-gray-500">
+                  {/* whitespace-nowrap pins title height to one line so the SVG
+                      above doesn't move vertically when label changes (e.g.
+                      "湖仓 Agent" vs "本体构造助手") */}
+                  <span className="whitespace-nowrap text-sm font-medium text-gray-500">
                     {mode === 'builder' ? t('chat.empty_title_builder') : t('chat.empty_title_lakehouse')}
                   </span>
-                  <span className="text-xs text-gray-400 text-center max-w-xs">
+                  {/* fixed width + min-height stabilizes the hint box across
+                      modes — different-length hints land in identical
+                      bounding boxes so the surrounding stack doesn't re-flow */}
+                  <span className="block w-72 min-h-[3rem] text-xs text-gray-400 text-center">
                     {mode === 'builder' ? t('chat.empty_hint_builder') : t('chat.empty_hint_lakehouse')}
                   </span>
                 </MotionFade>
@@ -1265,11 +1274,29 @@ function LakehouseAgentChat() {
                           </div>
                         )}
 
-                        {/* Tokens */}
+                        {/* Tokens — per-message LLM usage. Backend emits
+                            promptTokens/completionTokens/totalTokens on the
+                            `done` SSE event; surfaced here so each answer
+                            carries its own cost trace. */}
                         {m.role === 'assistant' && m.totalTokens != null && m.totalTokens > 0 && (
-                          <div className="text-[10px] text-gray-300 font-mono">
-                            {m.promptTokens}+{m.completionTokens}={m.totalTokens}
-                            {m.modelName && <span className="ml-1">{m.modelName}</span>}
+                          <div className={`mt-1 flex items-center gap-1.5 ${
+                            industrial
+                              ? 'font-mono text-[10px] tracking-[0.08em] text-ink-muted'
+                              : 'text-[10px] text-gray-400'
+                          }`}>
+                            <span className={industrial ? 'text-ink-ghost' : 'text-gray-400'}>
+                              {industrial ? '// TOKENS' : 'tokens'}
+                            </span>
+                            <span className="tabular-nums">
+                              {m.promptTokens}<span className="text-ink-ghost"> in</span>
+                              {' · '}{m.completionTokens}<span className="text-ink-ghost"> out</span>
+                              {' · '}<span className="font-semibold">{m.totalTokens}</span><span className="text-ink-ghost"> total</span>
+                            </span>
+                            {m.modelName && (
+                              <span className={`ml-1 ${industrial ? 'text-ink-ghost uppercase tracking-[0.1em]' : 'text-gray-400'}`}>
+                                {m.modelName}
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>

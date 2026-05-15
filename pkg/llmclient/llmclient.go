@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,12 @@ import (
 
 	. "github.com/lakehouse2ontology/httputil"
 )
+
+// llmHeaderTimeout bounds time-to-first-byte (TTFT) for every LLM HTTP call.
+// Slow aggregators (siliconflow, openrouter, …) can take 60-150s to start
+// responding for big/reasoning models, so this is intentionally generous —
+// it only fires when the provider sends no headers at all.
+const llmHeaderTimeout = 180 * time.Second
 
 // httpClientCache caches *http.Client instances keyed by "<timeoutSeconds>|<proxyURL>".
 // Reusing clients lets the underlying connection pool reuse keep-alive sockets
@@ -71,7 +78,12 @@ func makeClient(timeout time.Duration, proxyURL string) *http.Client {
 		return v.(*http.Client)
 	}
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		DialContext:         (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 15 * time.Second,
+		// Bound TTFT separately from the overall Client.Timeout so a provider
+		// that accepts the connection but never replies still fails fast.
+		ResponseHeaderTimeout: llmHeaderTimeout,
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -81,6 +93,34 @@ func makeClient(timeout time.Duration, proxyURL string) *http.Client {
 		transport.Proxy = nil
 	}
 	client := &http.Client{Timeout: timeout, Transport: transport}
+	actual, _ := httpClientCache.LoadOrStore(key, client)
+	return actual.(*http.Client)
+}
+
+// makeStreamClient builds an http.Client tuned for streaming (SSE) LLM calls.
+// Client.Timeout is 0 — a streaming body legitimately stays open for minutes,
+// so an overall deadline would truncate long agent turns mid-stream. Instead
+// the transport bounds connect, TLS handshake and TTFT; once headers arrive
+// the body is read for as long as the model keeps streaming.
+func makeStreamClient(proxyURL string) *http.Client {
+	key := "stream|" + proxyURL
+	if v, ok := httpClientCache.Load(key); ok {
+		return v.(*http.Client)
+	}
+	transport := &http.Transport{
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: llmHeaderTimeout,
+	}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+	} else {
+		transport.Proxy = nil
+	}
+	client := &http.Client{Timeout: 0, Transport: transport}
 	actual, _ := httpClientCache.LoadOrStore(key, client)
 	return actual.(*http.Client)
 }
@@ -278,7 +318,9 @@ func DoChatFull(baseURL, apiKey string, chatBody M, proxyURL string) (string, *T
 	// OpenAI-compatible path
 	NormalizeMaxTokens(chatBody)
 	reqBytes, _ := json.Marshal(chatBody)
-	client := makeClient(120*time.Second, proxyURL)
+	// 300s overall cap: a non-streamed reasoning-model reply can take minutes
+	// to fully render. TTFT is bounded separately by ResponseHeaderTimeout.
+	client := makeClient(300*time.Second, proxyURL)
 	url := BuildURL(baseURL, "/chat/completions")
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(reqBytes))
 	req.Header.Set("Content-Type", "application/json")
@@ -341,7 +383,7 @@ func DoChatStreamCallback(baseURL, apiKey string, chatBody M, onToken, onThinkin
 		return "", nil, fmt.Errorf("LLM stream request failed: %w", err)
 	}
 
-	client := makeClient(120*time.Second, "")
+	client := makeStreamClient("")
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("LLM stream request failed: %w", err)

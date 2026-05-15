@@ -175,7 +175,9 @@ func DoChatFullRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M, *Tok
 	// OpenAI-compatible path — same as DoChatFull but returns raw M
 	NormalizeMaxTokens(chatBody)
 	reqBytes, _ := json.Marshal(chatBody)
-	client := makeClient(120*time.Second, proxyURL)
+	// 300s overall cap: a non-streamed tool-calling round on a reasoning model
+	// can take minutes. TTFT is bounded by the transport's ResponseHeaderTimeout.
+	client := makeClient(300*time.Second, proxyURL)
 	apiURL := BuildURL(baseURL, "/chat/completions")
 	req, _ := http.NewRequest("POST", apiURL, bytes.NewReader(reqBytes))
 	req.Header.Set("Content-Type", "application/json")

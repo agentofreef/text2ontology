@@ -137,18 +137,19 @@ func handleObjects(db *sql.DB) http.HandlerFunc {
 				&semanticSQL, &canonicalQuery, &validatedAt,
 				&createdAt, &updatedAt)
 
-			// Fetch properties for this object
+			// Fetch properties for this object. The two enrichment columns
+			// (machine-code override, sample-value preview) used to come from
+			// LEFT JOIN semantic_table / column_explanation — those tables only
+			// exist in the enterprise schema, so the join silently errored in
+			// community deployments and properties came back empty. Fall back
+			// to the property's own is_machine_code; leave sample_values blank.
 			propRows, _ := db.Query(`SELECT p.id, p.project_id, p.object_type_id, p.name, COALESCE(p.display_name,''),
 				COALESCE(p.data_type,''), COALESCE(p.source_column,''), p.is_filterable, p.is_groupable,
 				COALESCE(p.description,''), COALESCE(p.short_description,''), p.bridged_from, p.mark, COALESCE(p.note,''), p.created_at, p.updated_at,
-				COALESCE(p.is_machine_code, COALESCE(ce.is_machine_code, false)),
-				COALESCE(ce.sample_values, ''),
+				COALESCE(p.is_machine_code, false),
+				''::text,
 				p.keywords_synced_at
 				FROM ont_property p
-				LEFT JOIN semantic_table st ON st.project_id = p.project_id
-					AND st.table_name = split_part(p.source_column, '.', 1)
-				LEFT JOIN column_explanation ce ON ce.table_id = st.id
-					AND ce.column_name = split_part(p.source_column, '.', 2)
 				WHERE p.object_type_id = $1 ORDER BY p.name`, id)
 			var props []M
 			if propRows != nil {
@@ -313,18 +314,17 @@ func handleObjectByID(db *sql.DB) http.HandlerFunc {
 				JsonResp(w, M{"error": err.Error()})
 				return
 			}
-			// Properties — same join shape the list uses (sample values + machine-code hint).
+			// Properties — community schema has no semantic_table /
+			// column_explanation; drop the LEFT JOIN that silently errored
+			// and starved the response of properties. Fall back to the
+			// property's own is_machine_code; sample_values stays blank.
 			propRows, _ := db.Query(`SELECT p.id, p.project_id, p.object_type_id, p.name, COALESCE(p.display_name,''),
 				COALESCE(p.data_type,''), COALESCE(p.source_column,''), p.is_filterable, p.is_groupable,
 				COALESCE(p.description,''), COALESCE(p.short_description,''), p.bridged_from, p.mark, COALESCE(p.note,''), p.created_at, p.updated_at,
-				COALESCE(p.is_machine_code, COALESCE(ce.is_machine_code, false)),
-				COALESCE(ce.sample_values, ''),
+				COALESCE(p.is_machine_code, false),
+				''::text,
 				p.keywords_synced_at
 				FROM ont_property p
-				LEFT JOIN semantic_table st ON st.project_id = p.project_id
-					AND st.table_name = split_part(p.source_column, '.', 1)
-				LEFT JOIN column_explanation ce ON ce.table_id = st.id
-					AND ce.column_name = split_part(p.source_column, '.', 2)
 				WHERE p.object_type_id = $1 ORDER BY p.name`, id)
 			var props []M
 			if propRows != nil {

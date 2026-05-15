@@ -52,6 +52,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     '/ontology/lakehouse-graph',
     '/ontology/lakehouse-keyword-triage',
     '/ontology/lakehouse-metric-intents',
+    '/ontology/er-diagram',
     '/ontology/lakehouse-agent/token-recall',
     '/ontology/lakehouse-agent/annotations',
     '/ontology/lakehouse-agent/knowledge-learned',

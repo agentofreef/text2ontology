@@ -79,6 +79,13 @@ func builderToolProposeOd(ctx context.Context, db *sql.DB, projectID, threadID s
 	// trial-runs to `relation "staging.X" does not exist`.
 	semanticSQL = rewriteStagingSchema(ctx, db, projectID, semanticSQL)
 
+	// The LLM sometimes emits a bare FROM-fragment (`FROM "schema"."Tbl"`) or
+	// a bare table ref (`"schema"."Tbl"`) instead of a complete SELECT. Coerce
+	// to a full SELECT so the proposal card renders canonical SQL and the
+	// downstream activate-od trial-run wrap (`SELECT … FROM (%s) AS od`) is
+	// always valid. See also normalizeSemanticSQL in handler_builder_activate.go.
+	semanticSQL = normalizeProposedSemanticSQL(semanticSQL)
+
 	rawProps, ok := args["properties"].([]interface{})
 	if !ok || len(rawProps) == 0 {
 		return M{"error": "至少需要一个 property"}
@@ -422,4 +429,28 @@ func rewriteStagingSchema(ctx context.Context, db *sql.DB, projectID, sqlText st
 		}
 		return groups[1] + `"` + schema + `"."` + ident + `"`
 	})
+}
+
+// normalizeProposedSemanticSQL coerces the three forms the agent's LLM
+// commonly emits into a complete SELECT:
+//
+//	"SELECT * FROM ..." / "WITH ... SELECT ..." → returned as-is
+//	"FROM \"schema\".\"t\""                      → prepended with "SELECT * "
+//	"\"schema\".\"t\""                            → prepended with "SELECT * FROM "
+//
+// Mirrors normalizeSemanticSQL in backend-api/handler_builder_activate.go to
+// keep the propose-side and activate-side normalization in sync.
+func normalizeProposedSemanticSQL(sql string) string {
+	s := strings.TrimSpace(sql)
+	if s == "" {
+		return s
+	}
+	upper := strings.ToUpper(s)
+	if strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH") {
+		return s
+	}
+	if strings.HasPrefix(upper, "FROM") {
+		return "SELECT * " + s
+	}
+	return "SELECT * FROM " + s
 }
