@@ -1,0 +1,39 @@
+# ops/prometheus.yml
+# Prometheus scrape configuration for lakehouse2ontology services.
+# Phase 0: stubs expose no real /metrics endpoint; Prometheus will show
+# scrape errors until Phase 1 wires up go-prometheus instrumentation.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: backend-api
+    static_configs:
+      - targets: ['backend-api:8090']
+    metrics_path: /metrics
+
+  - job_name: agent-server
+    static_configs:
+      - targets: ['agent-server:8092']
+    metrics_path: /metrics
+
+  - job_name: recall-server
+    static_configs:
+      - targets: ['recall-server:8093']
+    metrics_path: /metrics
+
+  - job_name: lakehouse-sql-server
+    static_configs:
+      - targets: ['lakehouse-sql-server:8094']
+    metrics_path: /metrics
+
+  - job_name: mcp-tools-server
+    static_configs:
+      - targets: ['mcp-tools-server:8095']
+    metrics_path: /metrics
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ['otel-collector:8889']
+    metrics_path: /metrics

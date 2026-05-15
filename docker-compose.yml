@@ -1,0 +1,284 @@
+# docker-compose.yml — lakehouse2ontology Phase 0 service mesh
+#
+# Per plan OQ-1: external Postgres at 172.18.96.1:5438 is the default.
+# The `postgres` service below is OPTIONAL — uncomment the `postgres` block
+# and the `depends_on` postgres entries to run a local Postgres instead.
+#
+# Operator checklist before first run:
+#   cp .env.shared.example .env.shared   # fill in DATABASE_URL + API keys
+#   docker compose up -d
+#   for p in 8090 8092 8093 8094 8095; do curl -s localhost:$p/healthz; done
+
+services:
+
+  # ── Frontend + API gateway (unified entrypoint) ─────────────────────────────
+  # nginx:alpine serves the Next.js static export AND reverse-proxies
+  # /lakehouse/api/* to the correct sidecar (agent-server / recall-server /
+  # backend-api). Two host ports:
+  #   - 18080 : legacy, kept for dev / scripts that still hit it directly
+  #   - 10020 : canonical public entrypoint; put your reverse proxy or
+  #             firewall rule in front of this one
+  # Bundle is built with empty NEXT_PUBLIC_*_URL so the browser uses
+  # same-origin URLs — no cross-origin cookies, no CORS preflight for
+  # internal calls (backend CORSMiddleware still accepts external origins
+  # configured via CORS_ALLOW_ORIGINS).
+  frontend:
+    build:
+      context: .
+      dockerfile: services/frontend/Dockerfile
+    image: lakehouse/frontend:phase1
+    ports:
+      - "18080:80"
+      - "10020:80"
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      agent-server:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── Go service stubs ────────────────────────────────────────────────────────
+  # Each has its own services/<name>/Dockerfile.
+  # Phase 1+ will replace each stub with the real migrated implementation.
+
+  backend-api:
+    # Phase 3 B4a: swapped stub → real service. Currently owns the
+    # six leaf ontology CRUD entity pairs migrated in B2/B3
+    # (versions, aliases, rules, methods, skills, links) under
+    # /internal/backend-api/*. The monolith reverse-proxies the
+    # public /api/ontology/* surface here when BACKEND_API_URL is
+    # set (see services/backend-api/cmd/server/register_public_api.go).
+    build:
+      context: .
+      dockerfile: services/backend-api/Dockerfile
+    image: lakehouse/backend-api:phase1
+    ports:
+      - "18090:8090"
+    command: ["-port", "8090"]
+    env_file:
+      - .env.shared
+    environment:
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "backend-api"
+      # P7.4 dry-run validation on POST/PUT /api/ontology/metric-intents.
+      # Empty / unset → save without validation (dev-friendly degraded mode).
+      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  agent-server:
+    # Phase 2 A4a: swapped stub → real service. Talks to sibling
+    # services via compose DNS (lakehouse-sql-server:8094,
+    # recall-server:8093) — no host NAT round-trip.
+    build:
+      context: .
+      dockerfile: services/agent-server/Dockerfile
+    image: lakehouse/agent-server:phase1
+    ports:
+      - "18092:8092"
+    command: ["-port", "8092"]
+    env_file:
+      - .env.shared
+    environment:
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "agent-server"
+      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
+      RECALL_SERVER_URL: "http://recall-server:8093"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8092/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  recall-server:
+    # Phase 1 R4a: swapped stub → real service (Od recall + vector + OTel).
+    build:
+      context: .
+      dockerfile: services/recall-server/Dockerfile
+    image: lakehouse/recall-server:phase1
+    ports:
+      - "18093:8093"
+    command: ["-port", "8093"]
+    env_file:
+      - .env.shared
+    environment:
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "recall-server"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8093/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  lakehouse-sql-server:
+    # Phase 1 D4a: swapped from shared Phase-0 stub to real service
+    # (OTel + pgvector-aware SQL engine). Other services still stub.
+    build:
+      context: .
+      dockerfile: services/lakehouse-sql-server/Dockerfile
+    image: lakehouse/lakehouse-sql-server:phase1
+    ports:
+      - "18094:8094"
+    command: ["-port", "8094"]
+    env_file:
+      - .env.shared
+    environment:
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "lakehouse-sql-server"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8094/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mcp-tools-server:
+    # Phase 3 MCP: swapped stub → real service. External MCP tool gateway
+    # exposing lookup_od + execute_smartquery + recall_tokens to
+    # third-party consumers (Claude Code, operator scripts). Has its own
+    # bearer-token auth (MCP_API_KEY) distinct from INTERNAL_TOKEN.
+    # No direct DB access — proxies to backend-api + recall-server +
+    # lakehouse-sql-server via compose DNS.
+    build:
+      context: .
+      dockerfile: services/mcp-tools-server/Dockerfile
+    image: lakehouse/mcp-tools-server:phase1
+    ports:
+      - "18095:8095"
+    command: ["-port", "8095"]
+    env_file:
+      - .env.shared
+    environment:
+      # DB is for the mcp_api_key auth store only. Container must
+      # reach WSL-private Postgres through host-gateway.
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "mcp-tools-server"
+      RECALL_SERVER_URL: "http://recall-server:8093"
+      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
+      BACKEND_API_URL: "http://backend-api:8090"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8095/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  collector-server:
+    # Phase 1: collector-server shell. Phase 2-4 will add ingest routes.
+    build:
+      context: .
+      dockerfile: services/collector-server/Dockerfile
+    image: lakehouse/collector-server:phase1
+    ports:
+      - "18096:8096"
+    command: ["-port", "8096"]
+    env_file:
+      - .env.shared
+    environment:
+      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_SERVICE_NAME: "collector-server"
+      PBIT_STAGING_ROOT: "/data/pbit-staging"
+      PBIX_SCRIPTS_DIR: "/app/scripts"
+      FILE_UPLOAD_ROOT: "/data/uploads"
+    volumes:
+      - collector-staging:/data/pbit-staging
+      - collector-uploads:/data/uploads
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8096/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # NOTE: No `frontend` service — backend-api serves the static Next.js export
+  # via the -static flag (per plan OQ-1). Run: backend-api -static ./frontend/out
+
+  # ── Local Postgres (pgvector) ───────────────────────────────────────────────
+  # Self-contained: schema.sql is auto-applied on first start via
+  # /docker-entrypoint-initdb.d. No manual psql step required.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: lakehouse2ontology-enterprise
+      POSTGRES_USER: lakehouse2ontology-enterprise
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    ports:
+      - "5438:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Auto-init: schema.sql runs once, when the volume is empty.
+      - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakehouse2ontology-enterprise"]
+      interval: 5s
+      retries: 10
+      timeout: 3s
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  collector-staging:
+  collector-uploads:
+  postgres-data:

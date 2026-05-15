@@ -1,0 +1,81 @@
+name: Release images
+
+# Build all 7 service images and push to GitHub Container Registry.
+#
+# Triggers:
+#   - push to main      → ghcr.io/agentofreef/text2ontology-<svc>:latest + :main-<sha>
+#   - tag push v*       → :latest + :main-<sha> + :<tag>
+#   - workflow_dispatch → on-demand rebuild
+#
+# Each service builds independently inside the matrix so a slow image
+# (frontend, ~7 min) doesn't gate the rest. First-time setup: after the
+# first successful run, flip each package to "public" in
+# https://github.com/agentofreef?tab=packages — packages default to
+# private and won't be pullable without auth otherwise.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # required for ghcr.io push under GITHUB_TOKEN
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - frontend
+          - backend-api
+          - agent-server
+          - recall-server
+          - lakehouse-sql-server
+          - mcp-tools-server
+          - collector-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Lowercase the owner because GHCR rejects mixed-case repo paths.
+          # `github.repository_owner` for agentofreef is already lowercase
+          # but downstream forks may not be — this filter is a no-op for
+          # us and a safety net for them.
+          images: ghcr.io/${{ github.repository_owner }}/text2ontology-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=main-,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          # Context is repo root; Dockerfiles COPY across services/ and pkg/
+          # so a per-service context would break vendor / go.work resolution.
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

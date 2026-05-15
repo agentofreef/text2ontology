@@ -1,0 +1,1 @@
+{"upload_success":"上传成功：{detail}","upload_failed":"上传失败：{error}","download_template":"下载模板","upload_entity":"上传{entityName}","rows_display":"{count} 行","table_showing":"显示前 {max} / 共 {total} 行","close":"关闭","graph_node_inactive":"未激活（mark=false）","graph_link_pending":"提议中（mark=false）","graph_fact_no_title":"无标题","table_node_annotate":"标注此表的关联关系"}

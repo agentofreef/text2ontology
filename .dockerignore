@@ -1,0 +1,61 @@
+# Excludes from docker build context — applies to all services that use
+# the repo root as context (frontend, collector-server, agent-server, etc.).
+#
+# Keep vendor/ (Go workspace deps, ~254 MB) — collector-server's Dockerfile
+# uses GOFLAGS=-mod=vendor and copies it explicitly. Keep services/, pkg/,
+# go.work*, frontend/ source.
+
+# ── Build outputs / caches ────────────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+**/__pycache__/
+**/.pytest_cache/
+
+# ── Heavy binary artefacts not needed by any image ────────────────────
+dbdumps/
+dataset/
+*.pbix
+*.pbit
+*.xlsx
+*.xls
+*.dump
+*.sqlite
+*.db
+*.sqlite3
+
+# ── VCS / IDE / OS noise ──────────────────────────────────────────────
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+**/.DS_Store
+*.swp
+
+# ── Logs / temp ───────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+.omc/
+.claude/
+
+# ── Local env files (never bake into image) ───────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Documentation that doesn't need to ship into images ───────────────
+docs/
+README.md
+CLAUDE.md
+AGENTS.md
+
+# ── Test fixtures / regression data ───────────────────────────────────
+regression-fixtures/
+excel-relationship-skill/
+
+# ── Misc ──────────────────────────────────────────────────────────────
+coverage/
+*.coverprofile

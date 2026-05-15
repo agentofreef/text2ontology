@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #FFFFFF;
+  --color-canvas-alt: #F5F5F5;
+  --color-ink: #000000;
+  --color-ink-light: #333333;
+  --color-ink-muted: #666666;
+  --color-ink-ghost: #999999;
+  --color-accent: #0A0A0A;
+  --color-accent-light: #262626;
+  --color-border: #E5E5E5;
+  --color-border-light: #F0F0F0;
+  --color-success: #16A34A;
+  --color-warning: #F59E0B;
+  --color-danger: #DC2626;
+  --color-info: #3B82F6;
+  --color-blueprint: #F0F7FF;
+
+  --font-sans: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-cn: 'Noto Sans SC', system-ui, sans-serif;
+}
+
+/* Base resets */
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-canvas-alt);
+}
+::-webkit-scrollbar-thumb {
+  background: #CCC;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #999;
+}
+
+/* Message bar slide-in — linear, no spring */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}

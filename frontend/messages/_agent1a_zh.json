@@ -1,0 +1,64 @@
+{
+  "auth": {
+    "login_failed": "登录失败",
+    "network_error": "网络错误，请检查服务器连接"
+  },
+  "analyst": {
+    "load_workspace_failed": "加载 workspace 失败",
+    "axis_identity": "身份",
+    "axis_binding": "绑定",
+    "axis_properties": "属性",
+    "axis_links": "关联",
+    "axis_intents": "查询",
+    "axis_provenance": "依据"
+  },
+  "jobs": {
+    "seconds_ago": "{count} 秒前",
+    "minutes_ago": "{count} 分钟前",
+    "hours_ago": "{count} 小时前",
+    "days_ago": "{count} 天前",
+    "kind_file_upload": "数据上传",
+    "kind_pbit_ingest": "PBIT 导入",
+    "kind_wizard_confirm": "本体落地",
+    "status_queued": "排队中",
+    "status_running": "运行中",
+    "status_succeeded": "已完成",
+    "status_failed": "失败",
+    "status_cancelled": "已取消",
+    "tasks": "任务",
+    "close_task_center": "关闭任务中心",
+    "open_task_center": "打开任务中心"
+  },
+  "nav": {
+    "data_assets": "数据资产",
+    "lakehouse": "湖仓",
+    "er_diagram": "ER 图",
+    "property_graph": "属性图",
+    "knowledge_engineering": "知识工程",
+    "lakehouse_keywords": "触发词",
+    "keyword_triage": "关键词分诊",
+    "metric_intents": "查询意图",
+    "lakehouse_agent": "湖仓 Agent",
+    "chat_history": "对话历史",
+    "annotations": "标注",
+    "token_recall": "Token 召回",
+    "learned_knowledge": "学习知识",
+    "dataset_testing": "数据集测试",
+    "data_flywheel": "数据飞轮",
+    "lakehouse_sql": "湖仓 SQL",
+    "system": "系统",
+    "data_sources": "数据源",
+    "prompt_engineering": "Prompt 工程",
+    "llm_config": "LLM 配置",
+    "mcp_keys": "MCP 密钥",
+    "logout": "退出",
+    "collapse": "收起",
+    "expand": "展开",
+    "delete_project": "删除项目",
+    "delete_project_confirm": "确定要删除项目 \"{name}\" 吗？",
+    "new_project": "新建项目"
+  },
+  "common": {
+    "loading": "加载中"
+  }
+}

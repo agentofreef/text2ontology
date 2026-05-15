@@ -1,0 +1,55 @@
+name: Feature Request
+description: Propose new functionality
+title: "[feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. Before filing, please check if it overlaps with our existing roadmap or design — see `docs/spec/design-philosophy.zh.md`.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Start with the user-facing problem, not the proposed solution.
+      placeholder: "Today when X happens, users have to do Y manually, which is error-prone because Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you solve it? Sketch a design if you have one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider? Why is your proposal better?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which layer does this touch?
+      multiple: true
+      options:
+        - Ontology (OD / OK / OL / Link / Causality)
+        - Intent / Keyword
+        - Agent modes (query / build / analyst)
+        - Recall pipeline
+        - SmartQuery engine
+        - Ingest / Connector
+        - Frontend
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

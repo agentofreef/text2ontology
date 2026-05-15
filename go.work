@@ -1,0 +1,17 @@
+go 1.25.0
+
+use (
+	./pkg/authmw
+	./pkg/contracts
+	./pkg/dsnguard
+	./pkg/httputil
+	./pkg/llmclient
+	./pkg/observability
+	./pkg/ontology
+	./services/agent-server
+	./services/backend-api
+	./services/collector-server
+	./services/lakehouse-sql-server
+	./services/mcp-tools-server
+	./services/recall-server
+)

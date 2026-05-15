@@ -1,0 +1,78 @@
+name: Bug Report
+description: Report something that doesn't work as documented
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill out the form below — it helps us reproduce and fix faster.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug in plain language.
+      placeholder: "When I run X, I expected Y but got Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce. Include any commands, queries, or config snippets.
+      placeholder: |
+        1. Run `docker compose up -d`
+        2. Open browser at http://localhost:18080
+        3. Submit a lakehouse-agent query: "..."
+        4. Observe error in agent-server logs
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: What version (commit SHA, tag, or release) are you running?
+      placeholder: "main @ abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component?
+      multiple: true
+      options:
+        - frontend
+        - backend-api
+        - agent-server
+        - recall-server
+        - lakehouse-sql-server
+        - mcp-tools-server
+        - collector-server
+        - docs
+        - unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant log output (please redact sensitive info)
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, related issues, hypotheses about root cause

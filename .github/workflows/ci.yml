@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-tests:
+    name: Go services
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Verify go.work
+        run: go env GOWORK && cat go.work
+
+      - name: go vet
+        run: |
+          for svc in services/backend-api services/agent-server services/recall-server \
+                     services/lakehouse-sql-server services/mcp-tools-server services/collector-server; do
+            echo "=== vet $svc ==="
+            (cd "$svc" && go vet ./...)
+          done
+
+      - name: go test
+        env:
+          # tests should skip cleanly without DATABASE_URL
+          DATABASE_URL: ""
+        run: |
+          for svc in services/backend-api services/agent-server services/recall-server \
+                     services/lakehouse-sql-server services/mcp-tools-server services/collector-server; do
+            echo "=== test $svc ==="
+            (cd "$svc" && go test ./...) || exit 1
+          done
+
+  layer-deps-check:
+    name: Service dependency check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check service deps
+        run: bash scripts/check-service-deps.sh
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      # Use `npm install` instead of `npm ci` because npm ci's lockfile
+      # strictness is brittle across Node/npm minor versions.
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - name: Build static export
+        env:
+          NEXT_PUBLIC_BACKEND_API_URL: http://localhost:18090
+          NEXT_PUBLIC_AGENT_SERVER_URL: http://localhost:18092
+          NEXT_PUBLIC_RECALL_SERVER_URL: http://localhost:18093
+        run: npm run build
