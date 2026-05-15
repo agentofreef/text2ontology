@@ -227,7 +227,7 @@ What ontology does is not Discovery (finding truth) — it is **Resolution** (sp
 - vs **dbt Semantic Layer / Cube**: they solve BI consistency (consumer = dashboard); text2ontology solves AI answer consistency (consumer = LLM agent)
 - vs **LangChain / LlamaIndex**: those are LLM toolchains; text2ontology is ontology governance infrastructure *outside* the LLM
 
-Recall mechanics in depth (three-tier cascade + Intent priority + explanation-layer vector recall) are not covered here; see the future essay *text2ontology Recall Mechanics Deep-Dive*.
+Recall mechanics in depth (three-tier cascade + Intent priority + explanation-layer vector recall) are not covered in this essay — see `recall-server/` in the [codebase](https://github.com/agentofreef/text2ontology) for the implementation.
 
 ---
 
@@ -252,7 +252,6 @@ Everything else is that line unfolded from different angles.
 > - Counter-narrative: [*"AI Agentic Data Analyst" is the most expensive illusion of 2026*](../essays/ai-agentic-illusion.en.md)
 > - Role definition: [*Business Ontology Engineer*](../essays/business-ontology-engineer.en.md)
 > - **Design philosophy**: this essay ★
-> - Recall mechanics deep-dive: to be written
 >
 > Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 

@@ -225,7 +225,7 @@ ontology 做的不是 Discovery(发现真理),是 Resolution(指定共识):
 - 跟 **dbt Semantic Layer / Cube**:它们解决 BI 一致性(消费者是 dashboard);text2ontology 解决 AI 答案一致性(消费者是 LLM agent)
 - 跟 **LangChain / LlamaIndex**:它们是 LLM 工具链;text2ontology 是 LLM 之外的本体治理基础设施
 
-召回机制(三层级联 + Intent priority + 解释层向量召回)的细节本文不展开,见后续《text2ontology 召回机制深度拆解》。
+召回机制(三层级联 + Intent priority + 解释层向量召回)的细节本文不展开 —— 实现见[代码仓库](https://github.com/agentofreef/text2ontology) `recall-server/` 目录。
 
 ---
 
@@ -250,7 +250,6 @@ ontology 做的不是 Discovery(发现真理),是 Resolution(指定共识):
 > - 反方解构:[《AI Agentic Data Analyst 是 2026 年最贵的错觉》](./ai-agentic-illusion.zh.md)
 > - 角色定义:[《业务本体工程师》](./business-ontology-engineer.zh.md)
 > - **设计哲学**:本文 ★
-> - 召回机制深度拆解:待写
 >
 > 本文以 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 授权。
 

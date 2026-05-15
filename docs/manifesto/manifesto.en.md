@@ -189,8 +189,8 @@ If you **disagree**:
 - Open a GitHub Issue with a concrete counter-example
 
 If you are **curious**:
-- Follow [text2ontology.com](https://text2ontology.com) for the upcoming eight-week series, each post expanding one principle in depth
-- Subscribe to the email list (main site)
+- Read the essays at [text2ontology.com](https://text2ontology.com) — each principle has its own expansion
+- Subscribe to the RSS feed for new posts
 - @ me on Twitter / LinkedIn / HN
 
 ---

@@ -190,8 +190,8 @@ Agent 多轮对话的记忆不应该是历史 token 的堆叠,应该是结构化
 - 提交一个 GitHub Issue 论证你的反例
 
 如果你**好奇**:
-- 关注 [text2ontology.com](https://text2ontology.com) 接下来的八周连载,每篇详尽展开一条原则
-- 订阅邮件列表(主站)
+- 在 [text2ontology.com](https://text2ontology.com) 阅读已经写完的文章
+- 订阅 RSS,新文章会自动同步
 - 在 Twitter / 知乎 / 即刻 上 @ 我
 
 ---
