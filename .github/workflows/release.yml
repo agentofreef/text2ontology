@@ -49,8 +49,11 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          # PAT with write:packages — falls back to GITHUB_TOKEN if not set.
+          # GITHUB_TOKEN alone has been observed to 403 on first push under a
+          # user account namespace after a repo delete/recreate cycle.
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Compute image metadata
         id: meta
