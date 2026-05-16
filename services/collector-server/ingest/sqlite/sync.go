@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -138,17 +139,23 @@ func syncOneTable(
 		progress(table, n)
 	}
 
-	// Promote staging TEXT columns to their declared SQLite affinities
-	// (INTEGER → bigint, REAL → double precision, NUMERIC → numeric). Done
-	// AFTER CopyIn — staging text avoids pq.CopyIn type-coercion edge cases,
-	// then a single ALTER per column converts in-place using NULLIF(col,'') to
-	// treat empty strings as SQL NULL. Without this, downstream LLM-authored
-	// SQL like `WHERE "Discontinued" = 0` blows up with `operator does not
-	// exist: text = integer`.
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Promote staging TEXT columns to their real SQLite affinities so
+	// downstream SQL works numerically — without this `sum(Quantity)` fails
+	// with `function sum(text) does not exist` and `WHERE x = 0` fails with
+	// `operator does not exist: text = integer`.
+	//
+	// Run AFTER the CopyIn commit, each ALTER on its own autocommit statement:
+	// staging-as-text sidesteps pq.CopyIn coercion edge cases, and a per-column
+	// statement means one un-castable column (dirty data) degrades to TEXT with
+	// a log line instead of aborting the whole table import.
 	for _, c := range cols {
 		pgType := postgresTypeForSqliteAffinity(c.DataType)
 		if pgType == "" {
-			continue // already text or unknown → leave as TEXT
+			continue // text / bytea / unknown → leave as TEXT
 		}
 		alterSQL := fmt.Sprintf(
 			`ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s USING NULLIF(%s, '')::%s`,
@@ -159,25 +166,27 @@ func syncOneTable(
 			pq.QuoteIdentifier(c.Name),
 			pgType,
 		)
-		if _, err := tx.ExecContext(ctx, alterSQL); err != nil {
-			return fmt.Errorf("promote column %q.%q to %s: %w", table, c.Name, pgType, err)
+		if _, err := dst.ExecContext(ctx, alterSQL); err != nil {
+			log.Printf("sqlite sync: leaving %q.%q as TEXT — promotion to %s failed: %v",
+				table, c.Name, pgType, err)
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
-// postgresTypeForSqliteAffinity maps a normalized SQLite affinity (output of
-// normalizeSqliteType) to the postgres type to ALTER staging columns into.
-// Returns "" to mean "leave as TEXT" (for "TEXT", "BLOB", or unknown values).
+// postgresTypeForSqliteAffinity decides the concrete postgres type to promote
+// a staging TEXT column into. The input is the normalized affinity produced by
+// normalizeSqliteType — which is ALREADY a lowercase postgres-style type
+// ("integer", "double precision", "numeric", "boolean", "timestamp", …), so no
+// re-mapping is needed; we only whitelist the casts that are safe from a text
+// staging column. Returns "" to mean "leave as TEXT" — for "text", "bytea",
+// and the date/time family (text→timestamp casts are format-fragile and not
+// required for numeric aggregation, the common failure mode).
 func postgresTypeForSqliteAffinity(affinity string) string {
 	switch affinity {
-	case "INTEGER":
-		return "bigint"
-	case "REAL":
-		return "double precision"
-	case "NUMERIC":
-		return "numeric"
+	case "integer", "double precision", "numeric", "boolean":
+		return affinity
 	}
 	return ""
 }
