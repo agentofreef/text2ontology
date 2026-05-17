@@ -238,6 +238,7 @@ func isValidFilterOp(op string) bool {
 	switch strings.ToLower(strings.TrimSpace(op)) {
 	case "=", "<>", "!=", ">", ">=", "<", "<=",
 		"contains", "not contains", "starts with", "ends with",
+		"like", "not like",
 		"is blank", "is not blank", "between", "in", "not in":
 		return true
 	}

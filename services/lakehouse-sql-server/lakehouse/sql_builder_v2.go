@@ -603,6 +603,12 @@ func filterCondExprV2(col exp.IdentifierExpression, f smartquery.ResolvedFilter)
 		return textCol.ILike(f.Value + "%")
 	case "ends with":
 		return textCol.ILike("%" + f.Value)
+	case "like":
+		// Caller supplies the wildcards (e.g. "%-12-%"); use the pattern
+		// as-is. CAST AS TEXT so it works on date/numeric columns too.
+		return textCol.ILike(f.Value)
+	case "not like":
+		return textCol.NotILike(f.Value)
 	case "is blank":
 		return goqu.Or(col.IsNull(), textCol.Eq(""))
 	case "is not blank":
@@ -633,7 +639,13 @@ func filterCondExprV2(col exp.IdentifierExpression, f smartquery.ResolvedFilter)
 		}
 		return col.NotIn(vals...)
 	default:
-		return col.Eq(f.Value)
+		// Unreachable for valid input: ResolveQuery gates every op through
+		// isValidFilterOp before reaching here. If this branch is ever hit,
+		// isValidFilterOp() and this switch have drifted out of sync — fail
+		// visibly (empty result + a screaming SQL comment) instead of the
+		// historical silent degradation to "=", which produced empty
+		// results with no diagnosable cause.
+		return goqu.L("FALSE /* SMARTQUERY-BUG: unhandled filter operator reached filterCondExprV2 default — sync isValidFilterOp() with this switch */")
 	}
 }
 

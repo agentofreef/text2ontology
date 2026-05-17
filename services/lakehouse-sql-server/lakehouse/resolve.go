@@ -57,6 +57,41 @@ func splitCommaMetric(metric string) []string {
 	return result
 }
 
+// augmentObjectsFromRefs returns spec.Objects extended with any Od referenced
+// by a filter / orderBy / groupBy prop prefix ("Od.prop") that the caller did
+// not explicitly declare. Referencing a linked Od's property inherently means
+// that Od must join into the query — the caller should not have to list it
+// twice. Unknown prefixes are harmless: loadLakehouseObjects silently skips
+// Ods it cannot resolve.
+func augmentObjectsFromRefs(objects []string, filters []smartquery.FilterItem, orderBy []smartquery.OrderByItem, groupBy []string) []string {
+	seen := make(map[string]bool, len(objects))
+	for _, o := range objects {
+		seen[strings.ToLower(strings.TrimSpace(o))] = true
+	}
+	consider := func(prop string) {
+		od, _ := smartquery.StripObjectPrefix(prop)
+		od = strings.TrimSpace(od)
+		if od == "" {
+			return
+		}
+		key := strings.ToLower(od)
+		if !seen[key] {
+			seen[key] = true
+			objects = append(objects, od)
+		}
+	}
+	for _, f := range filters {
+		consider(f.Prop)
+	}
+	for _, ob := range orderBy {
+		consider(ob.Prop)
+	}
+	for _, g := range groupBy {
+		consider(g)
+	}
+	return objects
+}
+
 // ResolveQuery resolves a QuerySpec into a fully bound ResolvedLakehouseQuery.
 // Loads properties from ont_property + ont_object_type, validates canonical_query exists.
 func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCorrector) (*ResolvedLakehouseQuery, error) {
@@ -72,6 +107,14 @@ func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCor
 	if rq.Limit <= 0 {
 		rq.Limit = 1000
 	}
+
+	// 0. Auto-include Ods referenced by filter / orderBy / groupBy prop
+	//    prefixes but missing from spec.Objects. Without this, a filter on a
+	//    linked Od (e.g. "ORDER_ENT.OrderDate" while objects=["ORDER_DETAIL"])
+	//    takes the single-Od path, mis-qualifies the column onto the primary
+	//    Od, and fails with "column does not exist". The OD layer must not
+	//    require the caller to manually list every referenced Od.
+	spec.Objects = augmentObjectsFromRefs(spec.Objects, spec.Filters, spec.OrderBy, spec.GroupBy)
 
 	// 1. Load objects + properties.
 	objects, allProps, err := loadLakehouseObjects(db, spec.ProjectID, spec.Objects)
@@ -170,6 +213,19 @@ func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCor
 		pi, err := resolvePropertyLakehouse(db, spec.ProjectID, propName, allProps)
 		if err != nil {
 			return nil, err
+		}
+
+		// Validate the filter operator. An unknown op (e.g. "like" when the
+		// LLM reaches for SQL-native syntax) must be rejected here with a
+		// clear, addressable error — otherwise it silently degrades to "="
+		// in the v2 SQL builder's default branch and returns an empty result
+		// with no diagnosable cause. Empty op is allowed (treated as "=").
+		if f.Op != "" && !isValidFilterOp(f.Op) {
+			return nil, &smartquery.ResolveError{
+				Code:    "INVALID_FILTER_OP",
+				Message: fmt.Sprintf("不支持的过滤操作符 %q。可用: =, <>, >, >=, <, <=, contains, not contains, starts with, ends with, like, not like, between, in, not in, is blank, is not blank", f.Op),
+				Detail:  map[string]any{"prop": f.Prop, "op": f.Op},
+			}
 		}
 
 		// Validate between format (ported from smartquery).

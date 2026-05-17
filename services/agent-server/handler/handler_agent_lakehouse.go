@@ -2575,6 +2575,31 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 	if objectName != "" {
 		objectNames = []string{objectName}
 	}
+	// canonical_filters / auto_group_by may reference cross-OD properties in
+	// "OD.Prop" form (e.g. "PRODUCT.CategoryID"). Those dim ODs MUST land in
+	// spec.Objects or ResolveJoinPath has no edges to walk — the SQL builder
+	// then strips the prefix onto the lead OD and the query dies with
+	// `column <leadOD>.<prop> does not exist`. compose_query already tracks
+	// referenced dim ODs into spec.Objects; the strict Intent path must too.
+	seenOD := map[string]bool{strings.ToLower(objectName): true}
+	addDimOD := func(prop string) {
+		dot := strings.Index(prop, ".")
+		if dot <= 0 {
+			return
+		}
+		od := strings.TrimSpace(prop[:dot])
+		if od == "" || seenOD[strings.ToLower(od)] {
+			return
+		}
+		seenOD[strings.ToLower(od)] = true
+		objectNames = append(objectNames, od)
+	}
+	for _, f := range hint.CanonicalFilters {
+		addDimOD(f.Prop)
+	}
+	for _, gb := range hint.AutoGroupBy {
+		addDimOD(gb)
+	}
 	return hint, objectNames, params, false
 }
 

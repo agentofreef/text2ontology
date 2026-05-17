@@ -126,6 +126,12 @@ func buildFilterCondition(colRef string, f smartquery.ResolvedFilter) string {
 		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s%%'", colRef, val)
 	case "ends with":
 		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s'", colRef, val)
+	case "like":
+		// Caller supplies the wildcards (e.g. "%-12-%"); use the pattern
+		// as-is. CAST AS TEXT so it works on date/numeric columns too.
+		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s'", colRef, val)
+	case "not like":
+		return fmt.Sprintf("CAST(%s AS TEXT) NOT ILIKE '%s'", colRef, val)
 	case "is blank":
 		return fmt.Sprintf("(%s IS NULL OR CAST(%s AS TEXT) = '')", colRef, colRef)
 	case "is not blank":
@@ -156,7 +162,13 @@ func buildFilterCondition(colRef string, f smartquery.ResolvedFilter) string {
 		}
 		return fmt.Sprintf("%s NOT IN (%s)", colRef, strings.Join(quoted, ", "))
 	default:
-		return fmt.Sprintf("%s = '%s'", colRef, val)
+		// Unreachable for valid input: ResolveQuery gates every op through
+		// isValidFilterOp before the SQL builders run. If this branch is
+		// hit, isValidFilterOp() and this switch have drifted out of sync —
+		// fail visibly (empty result + a screaming SQL comment) instead of
+		// the historical silent degradation to "=", which produced empty
+		// results with no diagnosable cause.
+		return "FALSE /* SMARTQUERY-BUG: unhandled filter operator reached buildFilterCondition default — sync isValidFilterOp() with this switch */"
 	}
 }
 
