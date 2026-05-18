@@ -22,6 +22,7 @@ import { BuilderProposeIntentCard } from '@/components/lakehouse-agent/BuilderPr
 import { BuilderProposeLinkCard } from '@/components/lakehouse-agent/BuilderProposeLinkCard'
 import { PlanGraph, type PlanTrace } from '@/components/lakehouse-agent/PlanGraph'
 import { AnalysisPlan, type AnalysisPlanResult } from '@/components/lakehouse-agent/AnalysisPlan'
+import { renderDataTemplates } from '@/components/lakehouse-agent/dataTemplate'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Link } from '@/i18n/navigation'
@@ -50,6 +51,7 @@ interface FunctionCall {
     execution_status?: string
     execution_result?: string
     execution_error?: string
+    step_id?: string
     display_mode?: string
     objects?: string[]
     metrics?: string[]
@@ -1269,12 +1271,12 @@ function LakehouseAgentChat() {
                         {m.role === 'assistant' && m.content && (
                           isStreamingLast ? (
                             <MotionFade key={`stream-${i}`} className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={m.content} />
+                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
                               {loading && <StreamingDot />}
                             </MotionFade>
                           ) : (
                             <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={m.content} />
+                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
                             </div>
                           )
                         )}

@@ -765,6 +765,64 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 1. 分组内占比（横向，本行内部各类别之和=100%）
 2. 占总量的占比（纵向，分母=所有分组该指标合计）
 即使用户只问一个方向也补上另一个，并用一句话点明差异。
+
+## 数据模板：用引用代替数字（必读，回复质量红线）
+
+每个 smartquery / compose_query 成功结果在【输出】里都带一个 ` + "`id=tN`" + `（如 t1、t2）。
+当你在最终答复里需要报告**来自查询结果的数值**时，**绝对不要手写数字** —— 改写成引用，
+前端会把引用渲染成真值：
+
+- 标量（求和 / 平均 / 计数 / 极值）：「sum(t1.列名)」「avg(t1.列名)」「count(t1.列名)」「min(t1.列名)」「max(t1.列名)」
+- 整张表：「t1」 —— 把结果表 t1 原样内联
+
+列名一律用结果【输出】表头里出现的真实列名（如 amount、city）。引用整体用全角方括号「」包住。
+
+例：
+- ✗ 错：受冲击毛营收是 8,380,820 元。
+- ✓ 对：受冲击毛营收是「sum(t1.amount)」元。
+- ✗ 错：（手抄一张分城市的表）
+- ✓ 对：各城市分布见下表：「t1」
+
+**引用形式**：
+  1. 「tN」 —— 整张结果表
+  2. 单个聚合值：「agg(tN.列名)」 或 「agg(tN.列名 WHERE 筛选列='值')」
+       agg ∈ sum/avg/count/min/max；WHERE 只支持**单个等值条件**（列='值'），
+       没有 AND/OR、没有范围、没有其它运算符。
+  3. 派生值（占比 / 比值 / 差值 / 倍数 / 任何要算的数）：
+       把**整个算式**包进一对「」，算式里可以有聚合值、数字、加减乘除、括号。
+       前端会求值出最终数字。
+       例 占比：「sum(t1.amt WHERE city='上海') / sum(t1.amt) * 100」
+            （末尾的 % 号写在「」**外面**当普通文字：…「…* 100」%）
+       例 差值：「max(t1.amt) - min(t1.amt)」
+       **绝不**自己把占比 / 比值 / 差值算出来再写一个数字——那就是编造。
+       把算式整体交给「」，让前端算。
+
+**列名必须逐字照抄**：引用里的列名、WHERE 的筛选列名，必须和该结果【输出】
+TOON 表头里的列名**一字不差**（含大小写、下划线）。例如表头是 ` + "`Total_amount`" + ` 就写
+` + "`Total_amount`" + `，不要简写成 ` + "`amount`" + `。写错列名引用会解析失败、原始 token 暴露给用户。
+每个 tN 的列名各自独立——引用 tN 前先看那个 tN 的表头。
+
+**逐项 / 逐行问法**（"各城市分别是多少"、"每个 X 卖了多少"）有两种正确写法，任选其一：
+- 直接「tN」给整表 —— 表里每行已带它自己的值；
+- 或逐行用 WHERE：成都「sum(t1.amount WHERE city='成都')」、北京「sum(t1.amount WHERE city='北京')」……
+**单行问题**（"上海的营收是多少"）：用 WHERE —— 「sum(t1.amount WHERE city='上海')」。
+绝不要对每行写不带 WHERE 的「sum(tN.列)」——那是整列求和，每行会得到同一个总数（错）。
+
+**铁律 1 —— 必须引用，绝不编造**：
+答复里任何**来自数据的数字**都必须写成引用，不能是你自己写出来的字面量。
+如果你想报一个数、但手里没有能支撑它的查询结果（没有对应的 tN）——
+**先去查**（调 smartquery / compose_query 把那个结果查出来，创建引用），再用引用报。
+**绝不**凭记忆、凭估算、凭"大概"、凭推算写数字。宁可多查一次，绝不编一个数。
+
+**铁律 2 —— 引用只在本轮有效**：
+tN 是**本轮**的编号，每一轮都从 t1 重新开始。
+**只能引用你在本轮亲自查出来的 tN**。绝不要引用上一轮对话里出现过的 tN ——
+那个编号在本轮指向的是另一张表（或根本不存在），会渲染成错数或暴露原始 token。
+如果用户的追问需要之前查过的数据，**在本轮重新查一遍**、生成本轮的 tN 再引用
+（重查同时保证数据是最新的）。
+
+为什么：大语言模型对长数字的转录天生不可靠，直接写数字会抄错。引用让"真值"只来自查询结果本身，
+你只负责"指哪个数"，不负责"报数"。非数值的结论 / 解读文字照常正常写，**只有数字和表格用引用**。
 ` + xmlToolSection + `
 ## 日期参考
 
@@ -1000,6 +1058,33 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 					planNudgedThisFeature = true
 				}
 			}
+		}
+
+		// Data-template step ids (.omc/specs — 数据模板). Each successful
+		// smartquery / compose_query result is tagged with a stable id
+		// (t1, t2, …) for this turn. The id rides inside the result M, so it
+		// reaches BOTH the LLM (via toolResultToMarkdown) and the frontend
+		// (via the function_call SSE event). The LLM then reports key numbers
+		// as references — 「sum(t1.amount)」 / 「t1」 — instead of transcribing
+		// digits; the frontend resolves the references against the stored
+		// result tables at render time. Numbers never touch the LLM output
+		// or the DB; only templates do.
+		dataStepSeq := 0
+		tagDataStep := func(toolName string, result M) {
+			if result == nil {
+				return
+			}
+			if toolName != "smartquery" && toolName != "compose_query" {
+				return
+			}
+			if st, _ := result["execution_status"].(string); st != "success" {
+				return
+			}
+			if _, already := result["step_id"]; already {
+				return
+			}
+			dataStepSeq++
+			result["step_id"] = fmt.Sprintf("t%d", dataStepSeq)
 		}
 
 		// Dispatch a tool by name.
@@ -1350,6 +1435,7 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 						sendSSEFull("clear_tokens", M{})
 						sendSSE("thinking", fmt.Sprintf("调用工具: %s", fcName))
 						toolResult := dispatchTool(fcName, fcArgs)
+						tagDataStep(fcName, toolResult)
 						roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 						sendSSEFull("function_call", roundFC)
 						// Plan-mode terminal (streamed-XML path): see native path.
@@ -1413,6 +1499,7 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 				tc := toolCalls[0]
 				sendSSE("thinking", fmt.Sprintf("调用工具: %s", tc.Name))
 				toolResult := dispatchTool(tc.Name, tc.Arguments)
+				tagDataStep(tc.Name, toolResult)
 				roundFC = M{"name": tc.Name, "arguments": tc.Arguments, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
@@ -1485,6 +1572,7 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 				sendSSEFull("clear_tokens", M{})
 				sendSSE("thinking", fmt.Sprintf("调用工具: %s", fcName))
 				toolResult := dispatchTool(fcName, fcArgs)
+				tagDataStep(fcName, toolResult)
 				roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
