@@ -202,11 +202,8 @@ func toolResultToMarkdown(toolName string, _ map[string]interface{}, result M) s
 				// (「sum(t1.col)」 / 「t1」) rather than transcribing digits.
 				if sid, _ := result["step_id"].(string); sid != "" {
 					sb.WriteString(fmt.Sprintf(
-						"# 本结果 id=%s。报告其中的数值时**不要手写数字**，写引用："+
-							"整列聚合「sum(%s.列名)」/「avg/count/min/max(…)」；"+
-							"逐行/单行「sum(%s.列名 WHERE 筛选列='值')」；"+
-							"派生值（占比/差值等）整个算式包进「」如「sum(…)/sum(…)*100」；"+
-							"整表「%s」。前端会渲染成真值。列名见下方表头。\n",
+						"# 本结果 id=%s —— 报告其中数值时写引用「%s」/「agg(%s.列)」等"+
+							"（语法见系统提示「数据模板」节），不要手写数字。\n",
 						sid, sid, sid))
 				}
 

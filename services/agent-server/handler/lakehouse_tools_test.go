@@ -20,7 +20,7 @@ func TestToolResultToMarkdown_StepIDHeader(t *testing.T) {
 	if !strings.Contains(out, "id=t1") {
 		t.Errorf("step id header missing:\n%s", out)
 	}
-	if !strings.Contains(out, "「sum(t1.列名)」") {
+	if !strings.Contains(out, "「agg(t1.列)」") {
 		t.Errorf("reference syntax hint missing:\n%s", out)
 	}
 	// columns must still be present in the TOON header
