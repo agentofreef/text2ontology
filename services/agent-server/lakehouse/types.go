@@ -28,6 +28,34 @@ type LakehouseResult struct {
 	ErrorMessage string             `json:"errorMessage,omitempty"`
 	DurationMs   int64              `json:"durationMs"`
 	DebugInfo    LakehouseDebugInfo `json:"debugInfo"`
+
+	// PlanTrace is populated only by /internal/smartquery/execute-plan
+	// (composite-Intent path). Mirrors the lakehouse-sql-server side's
+	// PlanTrace shape verbatim so wire-decode is lossless.
+	PlanTrace *PlanTrace `json:"planTrace,omitempty"`
+}
+
+// PlanTrace is the runtime observation of one composite-Intent execution.
+// Wire-compatible with lakehouse-sql-server/lakehouse.PlanTrace — kept as a
+// parallel type because the Phase 1 D4d service-deps gate forbids
+// cross-service Go imports.
+type PlanTrace struct {
+	Steps  []StepTrace `json:"steps"`
+	Output string      `json:"output"`
+}
+
+type StepTrace struct {
+	ID          string   `json:"id"`
+	Layer       int      `json:"layer"`
+	Od          string   `json:"od"`
+	Status      string   `json:"status"`
+	RowCount    int      `json:"rowCount"`
+	DurationMs  int64    `json:"durationMs"`
+	Error       string   `json:"error,omitempty"`
+	SQL         string   `json:"sql,omitempty"`
+	OntologySQL string   `json:"ontologySQL,omitempty"`
+	DependsOn   []string `json:"dependsOn,omitempty"`
+	IsOutput    bool     `json:"isOutput,omitempty"`
 }
 
 // LakehouseDebugInfo carries observability data.

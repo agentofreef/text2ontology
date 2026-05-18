@@ -95,6 +95,26 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 		}
 	}
 
+	// Composite-Intent (plan-mode) results are pre-authorized: the plan's
+	// step DAG, groupBy, and aggregation were authored on
+	// lakehouse_metric_intent.plan, not synthesized at call time. Reflect's
+	// rule heuristics (e.g. "smartqueryArgs.groupBy 为空 → mismatch") fire
+	// false positives here because args carries only {intent, params} for
+	// plan-mode — groupBy lives inside the plan. When the executor reports
+	// success, trust it. The trace + per-step status are the audit trail.
+	// Spec: .omc/specs/plan-mode-composite-intent.md §2 ("v1 里 reflect 只
+	// 作用于 plan 的最终输出").
+	if planMode, _ := resp["plan_mode"].(bool); planMode {
+		if status, _ := resp["execution_status"].(string); status == "success" {
+			return M{
+				"verdict":            "match",
+				"reasoning":          "composite Intent (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
+				"missing_dimensions": []string{},
+				"suggested_action":   "answer",
+			}
+		}
+	}
+
 	v := evaluateShape(db, userQuestion, smartqueryArgs, resp)
 	return M{
 		"verdict":            v.Verdict,

@@ -76,4 +76,5 @@ CLAUDE.local.md
 # Private / sensitive business artifacts — never commit
 docs/business/
 docs/ontology-handover/
+docs/harness-agent-design/
 *.xlsx

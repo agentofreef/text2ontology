@@ -28,6 +28,42 @@ type LakehouseResult struct {
 	ErrorMessage string             `json:"errorMessage,omitempty"`
 	DurationMs   int64              `json:"durationMs"`
 	DebugInfo    LakehouseDebugInfo `json:"debugInfo"`
+
+	// PlanTrace is populated only by /internal/smartquery/execute-plan
+	// (composite-Intent path). nil on the regular single-query path —
+	// `omitempty` keeps the wire shape byte-identical there. Surfaces the
+	// step DAG, per-step status, row counts, durations, and SQL so the
+	// frontend can render the "system's reasoning" plan graph.
+	PlanTrace *PlanTrace `json:"planTrace,omitempty"`
+}
+
+// PlanTrace is the runtime observation of one composite-Intent execution.
+type PlanTrace struct {
+	Steps  []StepTrace `json:"steps"`
+	Output string      `json:"output"`
+}
+
+// StepTrace records one step in the plan as it ran. Status semantics:
+//
+//	"success"           — Runner returned ExecutionOK=true, rows were produced
+//	"empty"             — short-circuited because an upstream IN-list was empty
+//	"empty_upstream"    — short-circuited because an ancestor step itself was empty
+//	"failed"            — Runner returned ExecutionOK=false (Error holds reason)
+//
+// DependsOn lists the step ids this step's filter values reference via
+// `$stepId.col`. The frontend uses it to draw arrows between cards.
+type StepTrace struct {
+	ID          string   `json:"id"`
+	Layer       int      `json:"layer"`
+	Od          string   `json:"od"`
+	Status      string   `json:"status"`
+	RowCount    int      `json:"rowCount"`
+	DurationMs  int64    `json:"durationMs"`
+	Error       string   `json:"error,omitempty"`
+	SQL         string   `json:"sql,omitempty"`
+	OntologySQL string   `json:"ontologySQL,omitempty"`
+	DependsOn   []string `json:"dependsOn,omitempty"`
+	IsOutput    bool     `json:"isOutput,omitempty"`
 }
 
 // LakehouseDebugInfo carries observability data.

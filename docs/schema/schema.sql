@@ -294,6 +294,11 @@ ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_order_by_la
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_order_by_dir   TEXT;
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_limit          INT;
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS parameters             JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- plan: composite-Intent step DAG. NULL = ordinary single-query Intent
+-- (canonical_metric / canonical_filters / auto_group_by path); non-null = the
+-- query is a multi-step plan and is routed to /internal/smartquery/execute-plan
+-- instead of /internal/smartquery/execute. See .omc/specs/plan-mode-composite-intent.md.
+ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS plan                   JSONB;
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -631,6 +636,35 @@ CREATE TABLE IF NOT EXISTS ont_topic (
 CREATE INDEX IF NOT EXISTS idx_ont_topic_project ON ont_topic(project_id);
 
 -- ==================== ont_15. ont_knowledge ====================
+-- entry_type / anchor_type / skill_config conventions (no CHECK — values are
+-- documented here so the application layer can validate):
+--   entry_type values:
+--     'concept'          (default) free-form knowledge entry
+--     'analysis'         analysis-pattern skill card — drives plan-mode in
+--                        agent-server. See .omc/specs/plan-from-ontology-knowledge.md
+--   anchor_type values:
+--     'version' (default) | 'object' | 'property' | 'metric' | 'analysis_pattern'
+--   skill_config JSONB schema for entry_type='analysis' (analysis pattern card):
+--     {
+--       "trigger": { "keywords":[...], "structural_hints":[...] },
+--       "features": [
+--         { "id":"<feature-id>", "behavior":"<one-line description>",
+--           "verification":"<predicate over result>",
+--           "tool_hints":[
+--             {"tool":"smartquery","intent":"<intent-name>"},
+--             {"tool":"compose_query"},
+--             {"tool":"query_dag","ref":"<intent-name>"}
+--           ]
+--         }, ...
+--       ],
+--       "synthesis": {
+--         "template": "<Go text/template, {{ .features.<id>.summary|rows|value|error }} vars>",
+--         "caveats": ["<verbatim caveat 1>", ...]
+--       }
+--     }
+-- See .omc/specs/plan-from-ontology-knowledge.md §3.1 for full semantics.
+-- Triggering keywords for these cards live in ont_knowledge_keyword (below) —
+-- the same table used for ordinary OK keyword recall.
 CREATE TABLE IF NOT EXISTS ont_knowledge (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id   UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,

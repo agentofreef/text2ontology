@@ -107,6 +107,7 @@ func main() {
 	})
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/internal/smartquery/execute", executeHandler(engine))
+	mux.HandleFunc("/internal/smartquery/execute-plan", executePlanHandler(engine))
 	mux.HandleFunc("/internal/smartquery/validate-intent", validateIntentHandler())
 
 	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
@@ -167,6 +168,76 @@ func executeHandler(engine *lakehouse.Engine) http.HandlerFunc {
 		if err := json.NewEncoder(w).Encode(result); err != nil {
 			outcome = "write_error"
 			log.Printf("execute: write response failed: %v", err)
+		}
+	}
+}
+
+// executePlanRequest is the HTTP body for composite-Intent execution.
+// Plan is the lakehouse_metric_intent.plan JSONB verbatim — the handler
+// re-validates it with ParsePlan rather than trusting the caller's pre-parse,
+// so a malformed plan surfaces here instead of silently mis-executing.
+type executePlanRequest struct {
+	Plan      json.RawMessage   `json:"plan"`
+	Params    map[string]string `json:"params"`
+	ProjectID string            `json:"projectId"`
+}
+
+func executePlanHandler(engine *lakehouse.Engine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		outcome := "ok"
+		defer func() {
+			ms := float64(time.Since(start).Milliseconds())
+			httpExecuteDuration.WithLabelValues(outcome).Observe(ms)
+			httpExecuteRequests.WithLabelValues(outcome).Inc()
+		}()
+
+		if r.Method != http.MethodPost {
+			outcome = "method_not_allowed"
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+
+		var req executePlanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			outcome = "bad_request"
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+		if req.ProjectID == "" {
+			outcome = "bad_request"
+			writeErr(w, http.StatusBadRequest, "projectId required")
+			return
+		}
+		if len(req.Plan) == 0 {
+			outcome = "bad_request"
+			writeErr(w, http.StatusBadRequest, "plan required")
+			return
+		}
+		plan, err := lakehouse.ParsePlan(req.Plan)
+		if err != nil {
+			outcome = "bad_plan"
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		exec := &lakehouse.PlanExecutor{
+			Runner: func(ctx context.Context, _ string, spec smartquery.QuerySpec) lakehouse.LakehouseResult {
+				return engine.Execute(ctx, spec)
+			},
+		}
+		result, err := exec.Execute(r.Context(), plan, req.Params, req.ProjectID)
+		if err != nil {
+			outcome = "exec_error"
+			if result.ErrorMessage == "" {
+				result.ErrorMessage = err.Error()
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			outcome = "write_error"
+			log.Printf("execute-plan: write response failed: %v", err)
 		}
 	}
 }

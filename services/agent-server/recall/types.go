@@ -1,5 +1,7 @@
 package recall
 
+import "encoding/json"
+
 // KeywordHit represents a keyword_explanation table match result.
 //
 // Tier "FUZZY_LIKE" is a synthetic tier produced by the recall layer when a
@@ -68,11 +70,26 @@ type OdLink struct {
 }
 
 // OkEntry represents a non-property knowledge entry (concept/playbook) from the fallback path.
+//
+// When EntryType="analysis" and AnchorType="analysis_pattern", SkillConfig carries
+// the analysis-pattern recipe — decode it with ParseAnalysisPattern.
 type OkEntry struct {
-	ID      string   `json:"id"`
-	Title   string   `json:"title"`
-	Summary string   `json:"summary"`
-	Tokens  []string `json:"tokens"` // which tokens triggered this
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Summary     string          `json:"summary"`
+	Tokens      []string        `json:"tokens"` // which tokens triggered this
+	EntryType   string          `json:"entryType,omitempty"`
+	AnchorType  string          `json:"anchorType,omitempty"`
+	SkillConfig json.RawMessage `json:"skillConfig,omitempty"`
+}
+
+// IsAnalysisPattern reports whether this OK entry carries an analysis-pattern
+// skill (entry_type='analysis' AND anchor_type='analysis_pattern' AND
+// skill_config is non-empty).
+func (e OkEntry) IsAnalysisPattern() bool {
+	return e.EntryType == "analysis" &&
+		e.AnchorType == "analysis_pattern" &&
+		len(e.SkillConfig) > 0
 }
 
 // OlEntry represents a confirmed learned fact (Ol) matched during recall.
@@ -122,6 +139,23 @@ type FilterSpec struct {
 //
 // The LLM is expected to copy CanonicalMetric / CanonicalFilters / AutoGroupBy
 // verbatim into smartquery args, then append the user's additional dimensions.
+// MetricIntentParameter mirrors one entry of lakehouse_metric_intent.parameters.
+// JSON field names match recall-server's MetricIntentParameter byte-for-byte
+// so the wire decode is lossless (the previous version of this struct lacked
+// the field entirely, silently dropping it on the agent-server side and
+// leaving the LLM to guess param names — observed bug, see
+// .omc/specs/plan-mode-composite-intent.md follow-up).
+type MetricIntentParameter struct {
+	Name        string      `json:"name"`
+	Type        string      `json:"type"` // "int" | "string" | "property_filter"
+	Property    string      `json:"property,omitempty"`
+	Op          string      `json:"op,omitempty"`
+	Default     interface{} `json:"default,omitempty"`
+	Optional    bool        `json:"optional,omitempty"`
+	Description string      `json:"description,omitempty"`
+	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
+}
+
 type MetricIntent struct {
 	IntentID         string       `json:"intentId"`
 	Name             string       `json:"name"`        // "Order.Quantity"
@@ -131,6 +165,11 @@ type MetricIntent struct {
 	CanonicalMetric  string       `json:"canonicalMetric"`
 	CanonicalFilters []FilterSpec `json:"canonicalFilters"`
 	AutoGroupBy      []string     `json:"autoGroupBy"`
+
+	// Parameters carries the per-Intent param schema (mirrors lakehouse_metric_intent.parameters).
+	// Composite-Intent plans need this so the LLM picks the right param name on
+	// first call instead of guessing.
+	Parameters []MetricIntentParameter `json:"parameters,omitempty"`
 	// Pivot config: if PivotOn is set, the smartquery executor pivots the
 	// result JSON on that column. PivotValues fixes the column order (absent
 	// → data-derived). PivotTotalLabel names the synthetic sum column.

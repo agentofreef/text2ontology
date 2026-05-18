@@ -19,6 +19,13 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 
 	isLookup := question == "lookup"
 
+	// ── Analysis-pattern skills (analysis_pattern OK cards) ──
+	// Rendered FIRST and prominently: an analysis_pattern card is, from the
+	// LLM's view, a callable skill (.omc/specs/plan-from-ontology-knowledge.md
+	// §0). The LLM decides whether the question warrants a multi-dimension
+	// analysis and, if so, calls start_analysis_plan with the patternId below.
+	formatAnalysisSkills(&sb, result.OkEntries)
+
 	// ── Metric Intents (canonical query templates) ──
 	// Rendered FIRST (before Od blocks) because intents carry the decision:
 	// LLM should copy canonical_metric/filters/auto_group_by verbatim into
@@ -61,9 +68,17 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 	}
 
 	// ── Ok entries (non-property knowledge, fallback) ──
-	if len(result.OkEntries) > 0 {
+	// analysis_pattern cards are skipped here — already rendered as a skill
+	// block at the top by formatAnalysisSkills.
+	var ordinaryOks []OkEntry
+	for _, e := range result.OkEntries {
+		if !e.IsAnalysisPattern() {
+			ordinaryOks = append(ordinaryOks, e)
+		}
+	}
+	if len(ordinaryOks) > 0 {
 		sb.WriteString("### 知识参考（Ok）\n\n")
-		for _, e := range result.OkEntries {
+		for _, e := range ordinaryOks {
 			sb.WriteString(fmt.Sprintf("`Ok:%s` **%s**", e.Title, e.Title))
 			if e.Summary != "" {
 				sb.WriteString(": " + e.Summary)
@@ -381,6 +396,33 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, recalledOds []stri
 			quoted = append(quoted, fmt.Sprintf(`"%s"`, g))
 		}
 		sb.WriteString(fmt.Sprintf("- **auto_groupBy**（必须保留）：`[%s]`\n", strings.Join(quoted, ", ")))
+	}
+
+	// parameters — the user-level knobs the LLM is expected to fill in
+	// `smartquery({intent, params:{...}})`. WITHOUT this block the LLM has
+	// no way to know the param name and guesses (observed: guessed
+	// `ingredient_name` instead of `ingredient`), which the executor rejects
+	// as "unbound param" and the plan fails on first call.
+	if len(mi.Parameters) > 0 {
+		sb.WriteString("- **parameters**（按 `name` 填到 `params` 里）：\n")
+		for _, p := range mi.Parameters {
+			required := "可选"
+			if !p.Optional {
+				required = "**必填**"
+			}
+			defaultStr := ""
+			if p.Default != nil {
+				defaultStr = fmt.Sprintf("，默认 `%v`", p.Default)
+			}
+			desc := p.Description
+			if desc == "" {
+				desc = "（无说明）"
+			}
+			sb.WriteString(fmt.Sprintf("    - `%s` (%s, %s%s) — %s\n",
+				p.Name, p.Type, required, defaultStr, desc))
+		}
+	} else {
+		sb.WriteString("- **parameters**：（无）— 直接 `{\"intent\":\"" + mi.Name + "\",\"params\":{}}`\n")
 	}
 
 	// Pivot hint — tell the LLM the executor will pivot for it, so its markdown

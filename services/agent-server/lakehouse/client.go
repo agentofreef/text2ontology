@@ -92,6 +92,67 @@ func (c *RemoteClient) Execute(ctx context.Context, spec smartquery.QuerySpec) L
 	return result
 }
 
+// ExecutePlan POSTs `{plan, params, projectId}` to /internal/smartquery/execute-plan
+// and decodes the JSON LakehouseResult. Used when the matched Metric Intent has
+// a non-null `plan` column (composite Intent) — see
+// .omc/specs/plan-mode-composite-intent.md §3.5.
+func (c *RemoteClient) ExecutePlan(ctx context.Context, planJSON []byte, params map[string]string, projectID string) LakehouseResult {
+	start := time.Now()
+	ctx, span := observability.Tracer().Start(ctx, "cross_service_http",
+		trace.WithAttributes(
+			attribute.String("peer.service", "lakehouse-sql-server"),
+			attribute.String("http.method", http.MethodPost),
+			attribute.String("http.route", "/internal/smartquery/execute-plan"),
+			attribute.String("project_id", projectID),
+		))
+	defer span.End()
+	defer func() {
+		observability.CrossSvcHTTPDuration.
+			WithLabelValues("monolith", "lakehouse-sql-server", "/internal/smartquery/execute-plan").
+			Observe(float64(time.Since(start).Milliseconds()))
+	}()
+
+	if c.HTTP == nil {
+		c.HTTP = &http.Client{Timeout: 60 * time.Second}
+	}
+
+	body, err := json.Marshal(struct {
+		Plan      json.RawMessage   `json:"plan"`
+		Params    map[string]string `json:"params"`
+		ProjectID string            `json:"projectId"`
+	}{Plan: planJSON, Params: params, ProjectID: projectID})
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client marshal: %v", err))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/smartquery/execute-plan", bytes.NewReader(body))
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client new request: %v", err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", c.Token)
+	req.Header.Set("X-On-Behalf-Of", c.OnBehalfOf)
+	req.Header.Set("X-Caller-Service", "monolith")
+	observability.InjectTraceContext(ctx, req)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client do: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		peek, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return errResult(fmt.Sprintf("remote status %d: %s", resp.StatusCode, string(peek)))
+	}
+
+	var result LakehouseResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return errResult(fmt.Sprintf("remote client decode: %v", err))
+	}
+	return result
+}
+
 func errResult(msg string) LakehouseResult {
 	return LakehouseResult{ExecutionOK: false, ErrorMessage: msg}
 }

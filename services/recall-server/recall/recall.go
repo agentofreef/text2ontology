@@ -2,6 +2,7 @@ package recall
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -269,32 +270,59 @@ func pruneOneToMany(db *sql.DB, result *RecallResult) {
 	}
 }
 
-// fallbackOkEntries searches ont_knowledge_keyword for non-property Ok entries.
+// okEntrySelect is the shared SELECT list for the two OK-recall queries below.
+const okEntrySelect = `
+	SELECT DISTINCT kk.knowledge_id::text, ok.title, COALESCE(ok.summary,''),
+	       COALESCE(ok.anchor_type,''),
+	       COALESCE(ok.entry_type,''),
+	       COALESCE(ok.skill_config, '{}'::jsonb)::text
+	FROM ont_knowledge_keyword kk
+	JOIN ont_knowledge ok ON ok.id = kk.knowledge_id
+	WHERE kk.project_id = $1
+	  AND (LOWER(kk.keyword) = LOWER($2) OR kk.keyword ILIKE '%'||$2||'%')`
+
+// fallbackOkEntries searches ont_knowledge_keyword for ordinary (non-property,
+// non-analysis-pattern) Ok entries. The caller gates this on matchedTokens —
+// ordinary OK knowledge is only useful for tokens with no stronger anchor.
 func fallbackOkEntries(db *sql.DB, projectID, token string, result *RecallResult) {
-	rows, err := db.Query(`
-		SELECT DISTINCT kk.knowledge_id::text, ok.title, COALESCE(ok.summary,''),
-		       COALESCE(ok.anchor_type,'')
-		FROM ont_knowledge_keyword kk
-		JOIN ont_knowledge ok ON ok.id = kk.knowledge_id
-		WHERE kk.project_id = $1
-		  AND (LOWER(kk.keyword) = LOWER($2) OR kk.keyword ILIKE '%'||$2||'%')
-		  AND COALESCE(ok.anchor_type,'') != 'property'
+	rows, err := db.Query(okEntrySelect+`
+	  AND COALESCE(ok.anchor_type,'') NOT IN ('property','analysis_pattern')
 		LIMIT 3`, projectID, token)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
+	appendOkRows(rows, token, result)
+}
 
+// fallbackAnalysisPatterns searches ont_knowledge_keyword specifically for
+// analysis_pattern OK cards. UNLIKE fallbackOkEntries, the caller runs this
+// UNCONDITIONALLY (not gated on matchedTokens): an analysis_pattern card is a
+// callable skill (spec §0) and its trigger keyword must surface the skill even
+// when the same token also resolved to a property / metric Intent — the LLM
+// needs to *see* the skill block to decide whether to enter plan-mode (§3.2).
+func fallbackAnalysisPatterns(db *sql.DB, projectID, token string, result *RecallResult) {
+	rows, err := db.Query(okEntrySelect+`
+	  AND COALESCE(ok.anchor_type,'') = 'analysis_pattern'
+		LIMIT 3`, projectID, token)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	appendOkRows(rows, token, result)
+}
+
+// appendOkRows scans OK rows into result.OkEntries, deduplicating by id and
+// merging the triggering token onto an entry already present.
+func appendOkRows(rows *sql.Rows, token string, result *RecallResult) {
 	seen := map[string]bool{}
 	for _, e := range result.OkEntries {
 		seen[e.ID] = true
 	}
-
 	for rows.Next() {
-		var id, title, summary, anchorType string
-		rows.Scan(&id, &title, &summary, &anchorType)
+		var id, title, summary, anchorType, entryType, skillConfigStr string
+		rows.Scan(&id, &title, &summary, &anchorType, &entryType, &skillConfigStr)
 		if seen[id] {
-			// Merge token
 			for i := range result.OkEntries {
 				if result.OkEntries[i].ID == id {
 					result.OkEntries[i].Tokens = append(result.OkEntries[i].Tokens, token)
@@ -304,9 +332,14 @@ func fallbackOkEntries(db *sql.DB, projectID, token string, result *RecallResult
 			continue
 		}
 		seen[id] = true
-		result.OkEntries = append(result.OkEntries, OkEntry{
+		entry := OkEntry{
 			ID: id, Title: title, Summary: summary, Tokens: []string{token},
-		})
+			EntryType: entryType, AnchorType: anchorType,
+		}
+		if skillConfigStr != "" && skillConfigStr != "{}" {
+			entry.SkillConfig = json.RawMessage(skillConfigStr)
+		}
+		result.OkEntries = append(result.OkEntries, entry)
 	}
 }
 

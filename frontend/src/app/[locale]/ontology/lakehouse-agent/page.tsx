@@ -20,6 +20,8 @@ import { ResultViewer } from '@/components/ui/ResultViewer'
 import { BuilderProposeOdCard } from '@/components/lakehouse-agent/BuilderProposeOdCard'
 import { BuilderProposeIntentCard } from '@/components/lakehouse-agent/BuilderProposeIntentCard'
 import { BuilderProposeLinkCard } from '@/components/lakehouse-agent/BuilderProposeLinkCard'
+import { PlanGraph, type PlanTrace } from '@/components/lakehouse-agent/PlanGraph'
+import { AnalysisPlan, type AnalysisPlanResult } from '@/components/lakehouse-agent/AnalysisPlan'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Link } from '@/i18n/navigation'
@@ -64,6 +66,8 @@ interface FunctionCall {
     unresolvedLinks?: string[]
     summary_text?: string
     matched_intent?: string
+    plan_mode?: boolean
+    plan_trace?: PlanTrace
     pivoted?: {
       pivotOn?: string
       percentAxis?: string
@@ -458,6 +462,14 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
                     )
                   })()}
                 </div>
+              )}
+
+              {fc.name === 'smartquery' && fc.result?.plan_trace && (
+                <PlanGraph trace={fc.result.plan_trace} />
+              )}
+
+              {(fc.name === 'start_analysis_plan' || fc.name === 'verify_feature' || fc.name === 'complete_analysis') && fc.result && (
+                <AnalysisPlan toolName={fc.name} result={fc.result as AnalysisPlanResult} />
               )}
 
               {fc.name === 'propose_learned_fact' && <LearnConfirmCard fc={fc} />}

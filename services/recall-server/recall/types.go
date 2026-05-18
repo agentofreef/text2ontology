@@ -1,5 +1,7 @@
 package recall
 
+import "encoding/json"
+
 // KeywordHit represents a keyword_explanation table match result.
 //
 // Tier "FUZZY_LIKE" is a synthetic tier produced by the recall layer when a
@@ -68,11 +70,18 @@ type OdLink struct {
 }
 
 // OkEntry represents a non-property knowledge entry (concept/playbook) from the fallback path.
+//
+// When EntryType="analysis" and AnchorType="analysis_pattern", SkillConfig carries
+// the analysis-pattern recipe (trigger/features/synthesis). See schema.sql
+// ont_knowledge comments and .omc/specs/plan-from-ontology-knowledge.md §3.1.
 type OkEntry struct {
-	ID      string   `json:"id"`
-	Title   string   `json:"title"`
-	Summary string   `json:"summary"`
-	Tokens  []string `json:"tokens"` // which tokens triggered this
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Summary     string          `json:"summary"`
+	Tokens      []string        `json:"tokens"` // which tokens triggered this
+	EntryType   string          `json:"entryType,omitempty"`
+	AnchorType  string          `json:"anchorType,omitempty"`
+	SkillConfig json.RawMessage `json:"skillConfig,omitempty"`
 }
 
 // OlEntry represents a confirmed learned fact (Ol) matched during recall.

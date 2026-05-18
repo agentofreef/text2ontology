@@ -208,6 +208,25 @@
         "label_group": "Group:",
         "label_filter": "Filter:"
       },
+      "plan_graph": {
+        "title": "Execution Plan",
+        "summary": "{steps} steps · {layers} layers",
+        "output": "OUTPUT",
+        "rows": "{n} rows",
+        "status_empty": "empty · short-circuit",
+        "status_empty_upstream": "upstream empty · skipped",
+        "status_failed": "failed",
+        "status_pending": "not run",
+        "badge_failed": "plan failed",
+        "badge_empty": "empty result"
+      },
+      "analysis_plan": {
+        "header": "Analysis Skill",
+        "completed": "settled",
+        "final_answer": "Final answer (with caveats)",
+        "tool_label": "tool",
+        "error_prefix": "Error:"
+      },
       "header": {
         "mode_query": "Query",
         "mode_builder": "Builder",

@@ -80,6 +80,7 @@ params — 按 Intent 声明的 parameters schema 填，用户问题没提到的
 // missing so misconfig surfaces immediately rather than as silent empty results.
 type smartqueryExecutor interface {
 	Execute(ctx context.Context, spec smartquery.QuerySpec) lakehouse.LakehouseResult
+	ExecutePlan(ctx context.Context, planJSON []byte, params map[string]string, projectID string) lakehouse.LakehouseResult
 }
 
 var (
@@ -497,6 +498,10 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		var recallContextMD string
 		var threadLedger *ledger.Ledger
 		var ledgerOldVersion int
+		// recallResult is hoisted to handler scope so plan-mode tools
+		// (start_analysis_plan) can look up analysis_pattern OK cards in
+		// recallResult.OkEntries. Populated inside the lakehouse ledger block.
+		var recallResult recall.RecallResult
 
 		// Builder ledger — parallel to threadLedger but for builder agent mode.
 		var threadBuilderLedger *builder_ledger.BuilderLedger
@@ -543,7 +548,7 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 			go saveAnnotation(db, projectID, threadID, userQuestion, tokens, nil)
 
 			cached := ledger.BuildCachedContext(l)
-			recallResult := recall.BuildLakehouseContextCached(ctx, db, projectID, tokens, userQuestion, cached)
+			recallResult = recall.BuildLakehouseContextCached(ctx, db, projectID, tokens, userQuestion, cached)
 			l.MergeRecallResult(recallResult, l.TurnCount)
 			threadLedger = l
 
@@ -875,7 +880,7 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 					"required": []string{"odName", "metric"},
 					"properties": M{
 						"odName": M{"type": "string", "description": "主 OD 名（单个，必填）。例 \"SALE\""},
-						"metric": M{"type": "string", "description": "聚合表达式 func(arg)。func ∈ sum/avg/min/max/count/distinct_count；arg 是 OD 的 property 名（count(*) 例外）"},
+						"metric": M{"type": "string", "description": "聚合表达式 func(arg)。func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property 名。⚠ count 不接受 count(*)，请用 count(id) 或其它具体列——引擎会拒绝 *（避免 JOIN 双重计数）"},
 						"filters": M{"type": "array", "items": M{
 							"type": "object",
 							"required": []string{"property", "op"},
@@ -897,6 +902,41 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 						"limit": M{"type": "integer", "minimum": 1},
 					},
 				}},
+				// ── Plan-mode tools (analysis_pattern OK cards) ──
+				// See .omc/specs/plan-from-ontology-knowledge.md §3.5.
+				// When recall context shows a "📊 分析 Skill" block, the
+				// question may warrant a multi-dimension analysis. These
+				// three tools drive a WIP=1 feature loop.
+				{Name: "start_analysis_plan", Description: startAnalysisPlanToolDescription, Parameters: M{
+					"type":     "object",
+					"required": []string{"patternId", "reason"},
+					"properties": M{
+						"patternId": M{"type": "string", "description": "📊 分析 Skill 块里给出的 patternId（OK 卡片 id）"},
+						"reason":    M{"type": "string", "description": "为什么这个问题值得展开多维分析（一句话）"},
+					},
+				}},
+				{Name: "verify_feature", Description: verifyFeatureToolDescription, Parameters: M{
+					"type":     "object",
+					"required": []string{"featureId", "verdict"},
+					"properties": M{
+						"featureId": M{"type": "string", "description": "当前 active 特征的 id"},
+						"verdict": M{
+							"type":        "string",
+							"enum":        []string{"pass", "fail", "blocked"},
+							"description": "pass=验证条件满足；fail=不满足、需换工具/参数重试；blocked=该维度确实拿不到（如引擎 bug）",
+						},
+						"tool":      M{"type": "string", "description": "你为这个特征用了哪个工具"},
+						"summary":   M{"type": "string", "description": "结果的单行摘要（人类可读）"},
+						"reasoning": M{"type": "string", "description": "为什么给这个 verdict"},
+						"value":     M{"type": "string", "description": "标量结果（如有），如 \"8,380,820\""},
+						"rowCount":  M{"type": "integer", "description": "结果行数（如有）"},
+						"error":     M{"type": "string", "description": "verdict=blocked/fail 时的原因"},
+					},
+				}},
+				{Name: "complete_analysis", Description: completeAnalysisToolDescription, Parameters: M{
+					"type":       "object",
+					"properties": M{},
+				}},
 			}
 		}
 
@@ -914,6 +954,53 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 		// nil prev list = no prior smartquery in this thread.
 		var lastSmartqueryFilterProps []string
 		lastSmartqueryWasEmpty := false
+
+		// Plan-mode state (.omc/specs/plan-from-ontology-knowledge.md §3.5).
+		// nil until start_analysis_plan succeeds; lives one agent turn only.
+		var planState *analysisPlanState
+
+		// Plan-mode tool-thrash guard: within a single active feature, the LLM
+		// can keep calling data tools (smartquery/compose_query/lookup) without
+		// ever calling verify_feature — this resurfaces spec §1.3's "13 步无界
+		// 试错" anti-pattern from the old non-plan path. retry budget=2 only
+		// bounds verify_feature *verdicts*, not raw tool calls before verify.
+		// We count tool calls since the active feature started, and at
+		// planToolNudgeThreshold inject ONE nudge telling the LLM to verify
+		// (pass/fail/blocked — blocked is honest if the data can't be obtained).
+		const planToolNudgeThreshold = 4
+		var planToolCallsThisFeature int
+		var planNudgedThisFeature bool
+
+		// checkPlanToolBudget is called once per dispatch in plan-mode. It
+		// resets the counter on start_analysis_plan / verify_feature (the LLM
+		// either started a feature or reported a verdict), is a no-op on
+		// complete_analysis (terminal), and otherwise increments + maybe nudges.
+		checkPlanToolBudget := func(toolName string) {
+			if planState == nil {
+				return
+			}
+			switch toolName {
+			case "start_analysis_plan", "verify_feature":
+				planToolCallsThisFeature = 0
+				planNudgedThisFeature = false
+			case "complete_analysis":
+				// terminal — no-op
+			default:
+				planToolCallsThisFeature++
+				if planToolCallsThisFeature >= planToolNudgeThreshold && !planNudgedThisFeature {
+					llmMessages = append(llmMessages, M{
+						"role": "user",
+						"content": fmt.Sprintf(
+							"你为当前 active 特征已经调用了 %d 次工具但还没调 verify_feature 上报结论。"+
+								"请立刻调 verify_feature 给出 pass/fail/blocked verdict —— "+
+								"如果验证条件确实拿不到（如引擎/数据限制）就标 blocked，"+
+								"诚实终态比无界试错好（spec §3.3 / §7.7）。",
+							planToolCallsThisFeature),
+					})
+					planNudgedThisFeature = true
+				}
+			}
+		}
 
 		// Dispatch a tool by name.
 		//
@@ -963,6 +1050,10 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 			// pre-built intent covers. LLM-callable; validates every token
 			// against the project's catalog before SQL generation.
 			"compose_query": true,
+			// Plan-mode tools — drive the analysis_pattern feature loop.
+			"start_analysis_plan": true,
+			"verify_feature":      true,
+			"complete_analysis":   true,
 		}
 
 		dispatchTool := func(name string, args map[string]interface{}) M {
@@ -1159,6 +1250,17 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 				return runReRecallTool(ctx, db, projectID, userQuestion, args)
 			case "compose_query":
 				return runComposeQueryTool(ctx, db, projectID, userQuestion, args)
+			case "start_analysis_plan":
+				st, res := runStartAnalysisPlan(recallResult.OkEntries, args)
+				if st != nil {
+					planState = st
+				}
+				return res
+			case "verify_feature":
+				return runVerifyFeature(planState, args)
+			case "complete_analysis":
+				_, res := runCompleteAnalysis(planState)
+				return res
 			// remember 工具已撤销 — 查询模式只暴露 lookup + smartquery。
 			// 知识沉淀（anchor / causality / fact）暂无 LLM 入口，需要时通过
 			// builder mode 或独立 API 操作。
@@ -1250,6 +1352,17 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 						toolResult := dispatchTool(fcName, fcArgs)
 						roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 						sendSSEFull("function_call", roundFC)
+						// Plan-mode terminal (streamed-XML path): see native path.
+						if fcName == "complete_analysis" {
+							if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
+								sendSSE("token", fa)
+								saveRoundStep(sentMsgsSnapshot, fa, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
+								promptTokens += roundPT
+								completionTokens += roundCT
+								totalTokens += roundTT
+								break
+							}
+						}
 						saveRoundStep(sentMsgsSnapshot, "", roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
 						promptTokens += roundPT
 						completionTokens += roundCT
@@ -1271,13 +1384,17 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 							followUp = "\n\n请继续完成任务。"
 						}
 						llmMessages = append(llmMessages, M{"role": "user", "content": toolResultToMarkdown(fcName, fcArgs, toolResult) + followUp})
+						checkPlanToolBudget(fcName)
 						// Auto-invoke reflect as a separate tool boundary after
 						// a successful smartquery. reflect returns a follow-up
 						// that either chains synthesize (verdict=match) or
 						// directs the LLM to re_recall / lookup
 						// (verdict=mismatch). The synthesize legacy bridge
 						// lives inside autoInvokeReflect for the match path.
-						if fcName == "smartquery" || fcName == "compose_query" {
+						// In plan-mode the per-feature check is verify_feature,
+						// not the legacy reflect→synthesize bridge — suppress
+						// autoInvokeReflect so the feature loop is not hijacked.
+						if planState == nil && (fcName == "smartquery" || fcName == "compose_query") {
 							if reflectMsg := autoInvokeReflect(ctx, db, dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, toolResult, fcArgs, &synthFailCount, time.Now()); reflectMsg != "" {
 								llmMessages = append(llmMessages, M{"role": "user", "content": reflectMsg})
 							}
@@ -1299,6 +1416,22 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 				roundFC = M{"name": tc.Name, "arguments": tc.Arguments, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
+				// Plan-mode terminal: complete_analysis renders the final
+				// answer (machine-stitched synthesis — template + verbatim
+				// caveats). Emit it directly and end the turn; the LLM does
+				// not get to rephrase it (spec §9.5).
+				if tc.Name == "complete_analysis" {
+					if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
+						roundContent = fa
+						sendSSE("token", fa)
+						saveRoundStep(sentMsgsSnapshot, roundContent, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
+						promptTokens += roundPT
+						completionTokens += roundCT
+						totalTokens += roundTT
+						break
+					}
+				}
+
 				saveRoundStep(sentMsgsSnapshot, roundContent, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
 				promptTokens += roundPT
 				completionTokens += roundCT
@@ -1306,12 +1439,16 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 
 				llmMessages = append(llmMessages, llmclient.BuildAssistantToolCallMessage([]llmclient.ToolCallResult{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}))
 				llmMessages = append(llmMessages, llmclient.BuildToolResultMessage(tc.ID, toolResultToMarkdown(tc.Name, tc.Arguments, toolResult)))
+				checkPlanToolBudget(tc.Name)
 				// Auto-invoke reflect after smartquery (replaces legacy
 				// synthesize auto-invoke). reflect's return message either
 				// chains synthesize (verdict=match) or instructs the LLM to
 				// re_recall / lookup with the missing dimensions found in the
 				// shape mismatch.
-				if tc.Name == "smartquery" || tc.Name == "compose_query" {
+				// Plan-mode suppresses autoInvokeReflect — see the streamed-XML
+				// path above for the rationale (verify_feature owns per-feature
+				// checking in plan-mode).
+				if planState == nil && (tc.Name == "smartquery" || tc.Name == "compose_query") {
 					if reflectMsg := autoInvokeReflect(ctx, db, dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, toolResult, tc.Arguments, &synthFailCount, time.Now()); reflectMsg != "" {
 						llmMessages = append(llmMessages, M{"role": "user", "content": reflectMsg})
 					}
@@ -1351,6 +1488,19 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 				roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
+				// Plan-mode terminal (XML path): see native path above.
+				if fcName == "complete_analysis" {
+					if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
+						roundContent = fa
+						sendSSE("token", fa)
+						saveRoundStep(sentMsgsSnapshot, roundContent, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
+						promptTokens += roundPT
+						completionTokens += roundCT
+						totalTokens += roundTT
+						break
+					}
+				}
+
 				saveRoundStep(sentMsgsSnapshot, roundContent, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
 				promptTokens += roundPT
 				completionTokens += roundCT
@@ -1371,8 +1521,10 @@ compose_query 失败时不要硬撑 —— 给用户回退方案（"我有 ByEmp
 					followUp = "\n\n请继续完成任务。"
 				}
 				llmMessages = append(llmMessages, M{"role": "user", "content": toolResultToMarkdown(fcName, fcArgs, toolResult) + followUp})
+				checkPlanToolBudget(fcName)
 				// Auto-invoke reflect after smartquery (XML fallback path).
-				if fcName == "smartquery" {
+				// Suppressed in plan-mode — verify_feature owns per-feature checks.
+				if planState == nil && fcName == "smartquery" {
 					if reflectMsg := autoInvokeReflect(ctx, db, dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, toolResult, fcArgs, &synthFailCount, time.Now()); reflectMsg != "" {
 						llmMessages = append(llmMessages, M{"role": "user", "content": reflectMsg})
 					}
@@ -2056,7 +2208,7 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		}
 	}
 
-	hint, objectNames, intentParams, notFound := lookupIntentByName(db, projectID, intentName)
+	hint, objectNames, intentParams, planJSON, notFound := lookupIntentByName(db, projectID, intentName)
 	if notFound {
 		return M{
 			"error": fmt.Sprintf(
@@ -2064,6 +2216,68 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 				intentName, projectID),
 			"code": "INTENT_NOT_FOUND",
 		}
+	}
+
+	// Composite Intent (spec .omc/specs/plan-mode-composite-intent.md): when
+	// the Intent carries a plan, dispatch to the deterministic plan executor
+	// instead of the single-query path. LLM tool surface is unchanged —
+	// it still called smartquery({intent, params}) — only the server-side
+	// dispatch differs. Most response fields that the single-query path
+	// builds (bound_spec, pivot, keyword corrections, joinPath) are
+	// inapplicable to a plan, so we return a minimal compatible shape.
+	if isPlanIntent(planJSON) {
+		rawParams, _ := args["params"].(map[string]interface{})
+		stringParams := make(map[string]string, len(rawParams))
+		for k, v := range rawParams {
+			if v == nil {
+				continue
+			}
+			stringParams[k] = fmt.Sprint(v)
+		}
+		_ = intentParams // plan params live inside plan JSON; Intent.parameters is irrelevant here
+		res := smartqueryExec(db).ExecutePlan(ctx, planJSON, stringParams, projectID)
+		execStatus := "error"
+		if res.ExecutionOK {
+			execStatus = "success"
+		}
+		go func() {
+			q := userQuestion
+			if q == "" {
+				q = fmt.Sprintf("[LH PLAN] %s", hint.Name)
+			}
+			db.Exec(`INSERT INTO ont_query_log (project_id, user_question,
+				generated_sql, objects, metric, group_by,
+				execution_status, execution_result, execution_error, source_type, used_llm, mark)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'lakehouse',false,false)
+				ON CONFLICT (project_id, user_question) DO UPDATE SET
+					generated_sql=EXCLUDED.generated_sql, execution_status=EXCLUDED.execution_status,
+					execution_result=EXCLUDED.execution_result, execution_error=EXCLUDED.execution_error`,
+				projectID, q,
+				res.SQL, strings.Join(objectNames, ","), "(plan)", "",
+				execStatus, res.ResultJSON, res.ErrorMessage)
+		}()
+		resp := M{
+			"execution_status":  execStatus,
+			"execution_result":  res.ResultJSON,
+			"execution_error":   res.ErrorMessage,
+			"matched_intent":    hint.Name,
+			"matched_intent_id": hint.IntentID,
+			"displayMode":       "table",
+			"plan_mode":         true,
+			"involved": M{
+				"kind":         "smartquery",
+				"odNames":      objectNames,
+				"propertyKeys": []M{},
+			},
+		}
+		// Surface the step trace so the frontend can render the plan DAG
+		// (per-step OD / status / row count / duration / SQL). Single source
+		// of truth: lakehouse-sql-server filled LakehouseResult.PlanTrace
+		// inside the executor — agent-server only forwards it.
+		if res.PlanTrace != nil {
+			resp["plan_trace"] = res.PlanTrace
+		}
+		return resp
 	}
 
 	// Build base spec from Intent. Objects come from Intent's lead Od;
@@ -2559,6 +2773,18 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 	return hint
 }
 
+// isPlanIntent reports whether the lakehouse_metric_intent.plan JSONB value
+// read from the DB represents a composite Intent. NULL → empty bytes;
+// 'null'::jsonb → string "null"; '{}'::jsonb → empty object. Anything else
+// non-empty is treated as a plan to be parsed downstream.
+func isPlanIntent(planJSON []byte) bool {
+	s := strings.TrimSpace(string(planJSON))
+	if s == "" || s == "null" || s == "{}" {
+		return false
+	}
+	return true
+}
+
 // lookupIntentByName loads the full Metric Intent record by name (strict-mode
 // dispatch path). Unlike lookupIntentHint — which finds the highest-priority
 // keyword-gated intent for a question — this resolves an explicit intent name
@@ -2577,11 +2803,12 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 	hint *smartquery.IntentHint,
 	objectNames []string,
 	params []smartquery.IntentParameter,
+	planJSON []byte,
 	notFound bool,
 ) {
 	intentName = strings.TrimSpace(intentName)
 	if intentName == "" {
-		return nil, nil, nil, true
+		return nil, nil, nil, nil, true
 	}
 	var (
 		intentID, intentNameOut, canonicalMetric, objectName string
@@ -2589,7 +2816,7 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 		replaceGB                                            bool
 		defaultOrderLabel, defaultOrderDir                   sql.NullString
 		defaultLimit                                         sql.NullInt64
-		canonicalFiltersJSON, parametersJSON                 []byte
+		canonicalFiltersJSON, parametersJSON, planBytes      []byte
 	)
 	err := db.QueryRow(`
 		SELECT mi.id::text, mi.name,
@@ -2599,7 +2826,8 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 		       mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
 		       COALESCE(mi.canonical_filters, '[]'::jsonb),
 		       COALESCE(mi.parameters, '[]'::jsonb),
-		       COALESCE(o.name, '')
+		       COALESCE(o.name, ''),
+		       mi.plan
 		FROM lakehouse_metric_intent mi
 		JOIN ont_object_type o ON mi.object_id = o.id
 		WHERE mi.project_id = $1
@@ -2610,12 +2838,13 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 		projectID, intentName).Scan(
 		&intentID, &intentNameOut, &canonicalMetric, &autoGB, &replaceGB,
 		&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
-		&canonicalFiltersJSON, &parametersJSON, &objectName,
+		&canonicalFiltersJSON, &parametersJSON, &objectName, &planBytes,
 	)
 	if err != nil {
 		log.Printf("intent DEBUG: lookupIntentByName(%q) miss: %v", intentName, err)
-		return nil, nil, nil, true
+		return nil, nil, nil, nil, true
 	}
+	planJSON = planBytes
 	hint = &smartquery.IntentHint{
 		IntentID:        intentID,
 		Name:            intentNameOut,
@@ -2680,7 +2909,7 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 	for _, gb := range hint.AutoGroupBy {
 		addDimOD(gb)
 	}
-	return hint, objectNames, params, false
+	return hint, objectNames, params, planJSON, false
 }
 
 // computeRowSummary turns the result rows into a structured summary the

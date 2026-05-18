@@ -208,6 +208,25 @@
         "label_group": "分组:",
         "label_filter": "筛选:"
       },
+      "plan_graph": {
+        "title": "执行计划",
+        "summary": "{steps} 步 · {layers} 层",
+        "output": "输出",
+        "rows": "{n} 行",
+        "status_empty": "空集 · 短路",
+        "status_empty_upstream": "上游为空 · 未执行",
+        "status_failed": "失败",
+        "status_pending": "未执行",
+        "badge_failed": "计划失败",
+        "badge_empty": "空结果"
+      },
+      "analysis_plan": {
+        "header": "分析 Skill",
+        "completed": "已闭环",
+        "final_answer": "最终答复（含 caveat）",
+        "tool_label": "工具",
+        "error_prefix": "错误："
+      },
       "header": {
         "mode_query": "查询",
         "mode_builder": "构造",

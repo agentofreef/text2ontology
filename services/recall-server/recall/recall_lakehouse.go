@@ -251,6 +251,9 @@ func BuildLakehouseContext(ctx context.Context, db *sql.DB, projectID string, to
 			continue
 		}
 		fallbackDirectOd(db, projectID, tok, &result)
+		// analysis_pattern skill cards surface UNCONDITIONALLY — a skill must
+		// be visible even when its trigger token also matched an Intent.
+		fallbackAnalysisPatterns(db, projectID, tok, &result)
 		if matchedTokens[tok] {
 			continue
 		}
