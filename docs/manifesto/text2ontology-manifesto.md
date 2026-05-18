@@ -70,6 +70,8 @@ Snowflake Cortex、Databricks Genie、Cube、dbt + LookML —— 这些方案都
 
 这是企业愿意为后者付费的真正原因 —— **信任有了归宿**。
 
+**Text2SQL 死在多表,本体路线把多表整个抽走**。让 LLM 自由写 SQL 的方案在 3 张表以上准确率断崖,因为 LLM 要同时决定"用哪张表 + 怎么 JOIN + 怎么写过滤聚合",任何一步错就全错。本体路线让 LLM **只在已经预先连好的 OD 网络里挑 OD、挑 Intent、挑 Keyword** —— 三件事都是有限集里的选择,不是生成。SQL 由后面的 SmartQuery 引擎顺着 OD 之间的 Link 自动拼出来。**LLM 永远看不见 JOIN**。这才是"LLM 只是受约束的执行者"的工程兑现。
+
 ---
 
 ## 四、九条原则

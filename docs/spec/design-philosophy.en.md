@@ -156,6 +156,21 @@ Source OLs are not deleted (audit trail)
 
 **Key principle**: AI detects patterns, **humans decide truth**. Induction cannot be left to an algorithm in isolation — it will hallucinate regularities out of noise.
 
+### Why multi-table queries are no longer a problem
+
+The real reason Text-to-SQL fails is not that an LLM cannot write SQL — it is that in a multi-table query, **the LLM has to decide three things at once**: which tables are involved, how to JOIN them, and how to lay out WHERE / GROUP BY. Get any one wrong and the whole query is wrong. Past three tables, accuracy falls off a cliff.
+
+The ontology architecture **physically separates** those three decisions:
+
+| Decision | By whom | How |
+|---|---|---|
+| Which business objects are involved | LLM | Pick from the already-connected OD network (finite-set selection) |
+| Which query shape | LLM | Pick from the Intents bound to those ODs (finite-set selection) |
+| Parameters | LLM | Recall Keywords from the user's question (recall, not generation) |
+| **JOIN / SQL assembly** | **SmartQuery engine** | **Stitched mechanically along the Links — no LLM involved** |
+
+**The LLM never sees a JOIN.** Everything it does is **picking from finite sets**, not **writing**. Assembly is done deterministically by the backend code in `lakehouse-sql-server`.
+
 ---
 
 ## 4. Two core tools: Lookup and Query

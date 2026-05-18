@@ -1,0 +1,79 @@
+# docker-compose.demo.yml — demo profile overlay
+#
+# Adds preloaded demo data on top of the base stack. Use:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+#
+# What this overlay changes:
+#   1. Switches Postgres to its own data volume (postgres-data-demo) so demo
+#      data never collides with your real ingestion volume.
+#   2. Adds 4 extra SQL files into /docker-entrypoint-initdb.d/ that auto-run
+#      after the base schema.sql on first start of the demo volume.
+#
+# File ordering inside /docker-entrypoint-initdb.d/ (Postgres runs alphabetically):
+#   schema.sql        ← base (creates ont_*, lakehouse_*, project, user)
+#   z-01-demo-ddl.sql       ← demo staging tables
+#   z-02-demo-static.sql    ← 25 Launch + 12 Team + 30 Resource
+#   z-03-demo-generated.sql ← ~163 Workstream / ~544 Milestone / ~608 Dep (gen'd)
+#   z-04-demo-ontology.sql  ← demo project + 6 ODs + Links + Intent + Keywords
+#
+# The 'z-' prefix guarantees these run AFTER the base 'schema.sql'.
+#
+# Pre-flight: run `python3 scripts/demo-seed/generate.py` once to produce
+# seed_generated.sql before bringing the stack up (it's git-committed too,
+# so this step is optional unless you've changed the generator).
+#
+# Reset to clean demo state:
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml down -v
+#   (the -v wipes postgres-data-demo so next `up` re-runs all seeds)
+
+services:
+
+  postgres:
+    volumes:
+      # New data volume — keeps demo isolated from real-ingestion volume.
+      - postgres-data-demo:/var/lib/postgresql/data
+      # Base schema (already mounted in base file as /docker-entrypoint-initdb.d/01-schema.sql
+      # via the base compose; we re-state explicitly here so the override is
+      # self-documenting).
+      - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      # Demo overlay — 'z-' prefix ensures these run AFTER schema.sql.
+      - ./scripts/demo-seed/ddl.sql:/docker-entrypoint-initdb.d/z-01-demo-ddl.sql:ro
+      - ./scripts/demo-seed/seed_static.sql:/docker-entrypoint-initdb.d/z-02-demo-static.sql:ro
+      - ./scripts/demo-seed/seed_generated.sql:/docker-entrypoint-initdb.d/z-03-demo-generated.sql:ro
+      - ./scripts/demo-seed/seed_ontology.sql:/docker-entrypoint-initdb.d/z-04-demo-ontology.sql:ro
+
+  # Optional: a one-shot helper that prints sanity counts after Postgres is healthy.
+  # Profile-gated so it only runs with the demo overlay.
+  demo-init-check:
+    image: postgres:16-alpine
+    profiles: ["demo-verify"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
+      PGHOST: postgres
+      PGUSER: lakehouse2ontology-enterprise
+      PGDATABASE: lakehouse2ontology-enterprise
+    entrypoint:
+      - sh
+      - -c
+      - |
+        echo "=== demo-seed sanity check ==="
+        psql -At -c "SELECT 'launches=' || COUNT(*) FROM demo_launch;"
+        psql -At -c "SELECT 'teams=' || COUNT(*) FROM demo_team;"
+        psql -At -c "SELECT 'resources=' || COUNT(*) FROM demo_resource;"
+        psql -At -c "SELECT 'workstreams=' || COUNT(*) FROM demo_workstream;"
+        psql -At -c "SELECT 'milestones=' || COUNT(*) FROM demo_milestone;"
+        psql -At -c "SELECT 'dependencies=' || COUNT(*) FROM demo_dependency;"
+        psql -At -c "SELECT 'cross_launch_deps=' || COUNT(*) FROM demo_dependency WHERE cross_launch;"
+        psql -At -c "SELECT 'ODs=' || COUNT(*) FROM ont_object_type WHERE project_id='d0000000-0000-0000-0000-000000000001';"
+        psql -At -c "SELECT 'keywords=' || COUNT(*) FROM lakehouse_keyword WHERE project_id='d0000000-0000-0000-0000-000000000001';"
+        psql -At -c "SELECT 'intents=' || COUNT(*) FROM lakehouse_metric_intent WHERE project_id='d0000000-0000-0000-0000-000000000001';"
+        psql -At -c "SELECT 'S25_PRO_row=' || COUNT(*) FROM demo_launch WHERE name='S25 Pro';"
+        echo "=== done ==="
+
+volumes:
+  postgres-data-demo:
+    # Named volume scoped to demo. `docker compose down -v` removes it cleanly.

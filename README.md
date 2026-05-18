@@ -71,7 +71,7 @@ Per-service responsibility:
 - **backend-api** `:18090` — CRUD for `ont_*` / `lakehouse_*` tables, auth, projects, export/import
 - **agent-server** `:18092` — Lakehouse Agent SSE (lakehouse / builder modes)
 - **recall-server** `:18093` — Exact + vector + intent recall over `ont_*`
-- **lakehouse-sql-server** `:18094` — SmartQuery engine (deterministic ontology → SQL compiler)
+- **lakehouse-sql-server** `:18094` — SmartQuery engine (deterministic ontology → SQL compiler). The LLM picks `(OD, Intent, Keyword)` from finite sets; this engine stitches the JOINs deterministically via pre-defined `ont_link` relationships — **the LLM never sees a table or a JOIN**.
 - **mcp-tools-server** `:18095` — MCP tool gateway for external clients (Claude Code, etc.)
 - **collector-server** `:18096` — Sole data-ingest entrypoint (PBI/Postgres/File + wizard state machine)
 

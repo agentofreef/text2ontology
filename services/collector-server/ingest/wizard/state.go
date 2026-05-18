@@ -107,43 +107,17 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 		return fmt.Errorf("wizard.Confirm: parse wizard_state: %w", err)
 	}
 
-	// 2. Build catalog depending on source type.
+	// External PostgreSQL is wired in zero-copy via postgres_fdw foreign
+	// tables: there is no staging schema and no sync→merge pipeline (those are
+	// file/sqlite/pbi only). Branch out before the staging machinery below.
+	if srcType == "postgres" {
+		return confirmPostgresFDW(ctx, db, dsID, projectID, configRaw, ws)
+	}
+
+	// 2. Build catalog depending on source type. (postgres is handled earlier
+	//    by confirmPostgresFDW and never reaches this switch.)
 	var catalog []contracts.TableInfo
 	switch srcType {
-	case "postgres":
-		// Re-open source DB from stored config_json credentials.
-		var cfgMap map[string]any
-		if err := json.Unmarshal(configRaw, &cfgMap); err != nil {
-			return fmt.Errorf("wizard.Confirm: parse pg config: %w", err)
-		}
-		port := 5432
-		if p, ok := cfgMap["port"].(float64); ok {
-			port = int(p)
-		}
-		strVal := func(key string) string {
-			if v, ok := cfgMap[key].(string); ok {
-				return v
-			}
-			return ""
-		}
-		cfg := pgpkg.Config{
-			Host:     strVal("host"),
-			Port:     port,
-			Database: strVal("database"),
-			User:     strVal("user"),
-			Password: strVal("password"),
-			SSLMode:  strVal("ssl_mode"),
-		}
-		srcDB, err := pgpkg.Open(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("wizard.Confirm: open source pg: %w", err)
-		}
-		defer srcDB.Close()
-		catalog, err = pgpkg.Discover(ctx, srcDB)
-		if err != nil {
-			return fmt.Errorf("wizard.Confirm: discover catalog: %w", err)
-		}
-
 	case "file", "pbi":
 		// For file/pbi sources the catalog was returned at upload/parse time.
 		// Re-derive a minimal catalog from wizard_state table_roles + column_roles
@@ -254,6 +228,109 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 	}(projectID)
 
 	return nil
+}
+
+// confirmPostgresFDW finalizes an external-PostgreSQL data source using the
+// zero-copy postgres_fdw path: it (re-)discovers the remote catalog (which
+// also validates the remote is reachable), registers the selected tables as
+// foreign tables under proj_<hex>, points project.lakehouse_schema at that
+// schema, and marks the data source completed. No rows are copied — every
+// downstream query is pushed down to the remote at run time.
+func confirmPostgresFDW(ctx context.Context, db *sql.DB, dsID, projectID string, configRaw []byte, ws contracts.WizardStateUpdate) error {
+	var cfgMap map[string]any
+	if err := json.Unmarshal(configRaw, &cfgMap); err != nil {
+		return fmt.Errorf("wizard.Confirm: parse pg config: %w", err)
+	}
+	strVal := func(key string) string {
+		if v, ok := cfgMap[key].(string); ok {
+			return v
+		}
+		return ""
+	}
+	port := 5432
+	if p, ok := cfgMap["port"].(float64); ok {
+		port = int(p)
+	}
+	cfg := pgpkg.Config{
+		Host:     strVal("host"),
+		Port:     port,
+		Database: strVal("database"),
+		User:     strVal("user"),
+		Password: strVal("password"),
+		SSLMode:  strVal("ssl_mode"),
+	}
+
+	// Re-discover: validates the remote is reachable AND yields the table list.
+	srcDB, err := pgpkg.Open(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("wizard.Confirm: open source pg: %w", err)
+	}
+	catalog, derr := pgpkg.Discover(ctx, srcDB)
+	srcDB.Close()
+	if derr != nil {
+		return fmt.Errorf("wizard.Confirm: discover catalog: %w", derr)
+	}
+
+	tables := selectedPostgresTables(ws, catalog)
+	if len(tables) == 0 {
+		return fmt.Errorf("wizard.Confirm: no tables selected for import")
+	}
+
+	finalSchema := pbitpkg.SanitizeSchemaName(projectID)
+	if err := pgpkg.SetupForeignSchema(ctx, db, dsID, finalSchema, cfg, tables); err != nil {
+		return fmt.Errorf("wizard.Confirm: setup foreign schema: %w", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("wizard.Confirm: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE project SET lakehouse_schema = $1, updated_at = now() WHERE id = $2
+	`, finalSchema, projectID); err != nil {
+		return fmt.Errorf("wizard.Confirm: update project.lakehouse_schema: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE data_source SET status='completed', last_sync_at=now(), updated_at=now() WHERE id=$1
+	`, dsID); err != nil {
+		return fmt.Errorf("wizard.Confirm: update status: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("wizard.Confirm: commit: %w", err)
+	}
+
+	// Vector embedding in the background (best-effort), same as the file path.
+	go func(pid string) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := pbitpkg.RecomputeVectorsForProject(bgCtx, db, pid); err != nil {
+			log.Printf("[wizard] auto vector compute: %v", err)
+		}
+	}(projectID)
+	return nil
+}
+
+// selectedPostgresTables returns the "schema.table" names to import as foreign
+// tables: the non-skip entries from wizard_state.table_roles, or — when the
+// wizard recorded no roles — every table in the discovered catalog.
+func selectedPostgresTables(ws contracts.WizardStateUpdate, catalog []contracts.TableInfo) []string {
+	if len(ws.TableRoles) > 0 {
+		var out []string
+		for tbl, role := range ws.TableRoles {
+			if role != "skip" && role != "" {
+				out = append(out, tbl)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	out := make([]string, 0, len(catalog))
+	for _, t := range catalog {
+		out = append(out, t.Name)
+	}
+	return out
 }
 
 // cleanOntologyByTableNames deletes ont_object_type rows (and their CASCADE

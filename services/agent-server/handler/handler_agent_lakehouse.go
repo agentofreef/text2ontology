@@ -165,6 +165,13 @@ func autoInvokeSynthesize(
 			return ""
 		}
 	}
+	// Suspicious all-zero result: skip synth so the agent loop sees the
+	// smartquery tool result's suspicious_zero_hint and self-corrects,
+	// instead of receiving a locked "echo this answer" instruction for a
+	// number that is almost certainly an unmatched JOIN.
+	if h, _ := smartqueryResult["suspicious_zero_hint"].(string); h != "" {
+		return ""
+	}
 
 	synthArgs := map[string]interface{}{
 		"userQuestion":   userQuestion,
@@ -2362,6 +2369,21 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 				strings.Join(suggestable, "、"))
 		}
 	}
+	// ── Suspicious all-zero hint (Tier 2 tripwire) ──
+	// A multi-OD query that returns rows but whose every metric (non-groupBy)
+	// column is zero/null across every row is almost always a JOIN that
+	// matched nothing — typically a filter VALUE that does not exist (wrong
+	// date format, misspelled enum), not a wrong Intent. SQL succeeded and a
+	// row came back, so neither the empty-result hint (total_rows==0) nor
+	// reflect's shape-check fires. Flag it explicitly and steer the fix
+	// toward the filter values rather than re-recall.
+	if result.ExecutionOK && totalRows > 0 && len(spec.Objects) > 1 &&
+		spec.Metric != "" && suspiciousAllZero(resultJSON, spec.GroupBy) {
+		resp["suspicious_zero_hint"] = "查询成功返回了维度行，但所有指标列在每一行都是 0/NULL。" +
+			"这通常是跨 OD 的 JOIN 一行没匹配上——极可能某个 filter 的【值】不存在" +
+			"（日期格式写错、枚举名拼错），而不是 Intent 选错。请先核对 filter 的 value" +
+			"（尤其日期/期间是否为 YYYY-MM），不要急着 re_recall 换 Intent。"
+	}
 	// Expose spec/intent metadata to the agent loop so it can build synth args.
 	resp["_spec_metric"] = spec.Metric
 	resp["_spec_groupBy"] = spec.GroupBy
@@ -2371,6 +2393,64 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	}
 	resp["_spec_filters"] = specFiltersOut
 	return resp
+}
+
+// isZeroish reports whether a result-cell value counts as zero/empty. Numeric
+// columns from the PG driver arrive as JSON strings ("0", "0.00"), so string
+// parsing is required alongside the native numeric cases.
+func isZeroish(v interface{}) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case float64:
+		return x == 0
+	case int:
+		return x == 0
+	case bool:
+		return !x
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return true
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		return err == nil && f == 0
+	default:
+		return false
+	}
+}
+
+// suspiciousAllZero reports whether every metric (non-groupBy) column is
+// zero/null across every result row. groupBy entries may be "OD.prop" form —
+// the last dotted segment is matched case-insensitively against column names.
+// Returns false on parse failure or empty result (the empty-result hint owns
+// the 0-row case).
+func suspiciousAllZero(resultJSON string, groupBy []string) bool {
+	var rows []map[string]interface{}
+	if json.Unmarshal([]byte(resultJSON), &rows) != nil || len(rows) == 0 {
+		return false
+	}
+	dim := make(map[string]bool, len(groupBy))
+	for _, g := range groupBy {
+		seg := g
+		if i := strings.LastIndex(seg, "."); i >= 0 {
+			seg = seg[i+1:]
+		}
+		dim[strings.ToLower(strings.TrimSpace(seg))] = true
+	}
+	metricCells := 0
+	for _, row := range rows {
+		for k, v := range row {
+			if dim[strings.ToLower(k)] {
+				continue
+			}
+			metricCells++
+			if !isZeroish(v) {
+				return false
+			}
+		}
+	}
+	return metricCells > 0
 }
 
 // lookupIntentHint queries lakehouse_metric_intent for the highest-priority

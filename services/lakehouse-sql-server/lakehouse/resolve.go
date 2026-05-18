@@ -265,6 +265,26 @@ func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCor
 			}
 		}
 
+		// Deterministic period expansion: when a date/timestamp property is
+		// filtered with a human period expression ("2025年12月", "本月",
+		// "2025-12", "2025 Q4"), expand it into an explicit half-open range
+		// [start, end). Without this the raw value becomes a text ILIKE
+		// against a timestamp column and silently matches zero rows. See
+		// period.go. Catches every path — Intent params, compose_query,
+		// direct filters — because it lives at resolution, not param-bind.
+		opLower := strings.ToLower(strings.TrimSpace(f.Op))
+		if isDateType(pi.DataType) && (opLower == "" || opLower == "=" || opLower == "starts with") {
+			if start, end, okP := expandPeriod(f.Value); okP {
+				rq.FilterItems = append(rq.FilterItems,
+					smartquery.ResolvedFilter{Prop: pi, Op: ">=", Value: start, OriginalValue: origValue},
+					smartquery.ResolvedFilter{Prop: pi, Op: "<", Value: end, OriginalValue: origValue},
+				)
+				rq.Warnings = append(rq.Warnings, fmt.Sprintf(
+					"period normalized: %s %q → [%s, %s)", f.Prop, f.Value, start, end))
+				continue
+			}
+		}
+
 		rq.FilterItems = append(rq.FilterItems, smartquery.ResolvedFilter{
 			Prop: pi, Op: f.Op, Value: corrected, OriginalValue: origValue, FuzzyMatch: fuzzy,
 		})

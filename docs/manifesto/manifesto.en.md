@@ -70,6 +70,8 @@ It is not a prompt description — prompts cannot be versioned, audited, or CRUD
 
 **This is why enterprises will pay for the latter — trust has a home.**
 
+**Text-to-SQL dies on multi-table queries; the ontology route removes multi-table from the picture entirely.** Letting the LLM freely write SQL falls off a cliff past three tables, because the LLM has to decide "which tables + how to JOIN + how to filter and aggregate" all at once, and any single step going wrong takes the whole answer down. The ontology route lets the LLM **pick OD, pick Intent, pick Keyword from a pre-connected OD network** — three finite-set selections, not generation. The SQL is assembled downstream by the SmartQuery engine along the Links between ODs. **The LLM never sees a JOIN.** This is the engineering payoff of "the LLM is only a constrained executor."
+
 ---
 
 ## IV. Nine Principles

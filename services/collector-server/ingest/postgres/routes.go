@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -184,45 +183,15 @@ func getSourceCatalog(w http.ResponseWriter, r *http.Request, db *sql.DB, id str
 }
 
 // POST /api/connector/postgres/sources/{id}/sync  (SSE streaming)
-// Body: { "tables": ["schema.table", ...] }
+//
+// External PostgreSQL is wired in zero-copy via postgres_fdw foreign tables at
+// wizard Confirm time (see wizard.confirmPostgresFDW) — no rows are copied and
+// there is no staging schema. This endpoint is kept so the wizard's
+// connect→sync→confirm progress flow still has a "sync" step to call: it just
+// flips the source to 'ready' and emits the SSE events the frontend expects.
 func postSourceSync(w http.ResponseWriter, r *http.Request, db *sql.DB, id string) {
-	// 1. Decode request body.
-	var req struct {
-		Tables []string `json:"tables"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Tables) == 0 {
-		jsonResp(w, http.StatusBadRequest, contracts.ErrorEnvelope{
-			Code: "BAD_REQUEST", Message: "tables array required",
-		})
-		return
-	}
-
-	// 2. Load source config.
-	cfg, err := loadSourceConfig(r.Context(), db, id)
-	if err != nil {
-		jsonResp(w, http.StatusNotFound, contracts.ErrorEnvelope{
-			Code: "NOT_FOUND", Message: err.Error(),
-		})
-		return
-	}
-
-	// 3. Determine staging schema name (based on ds_id, dashes → underscores).
-	stagingSchema := "collector_" + strings.ReplaceAll(id, "-", "_")
-
-	// 4. Create staging schema in the collector's own DB.
 	if _, err := db.ExecContext(r.Context(),
-		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, stagingSchema),
-	); err != nil {
-		jsonResp(w, http.StatusInternalServerError, contracts.ErrorEnvelope{
-			Code: "SCHEMA_CREATE", Message: err.Error(),
-		})
-		return
-	}
-
-	// 5. Update status → syncing and persist staging_schema.
-	if _, err := db.ExecContext(r.Context(),
-		`UPDATE data_source SET status='syncing', staging_schema=$1, updated_at=now() WHERE id=$2`,
-		stagingSchema, id,
+		`UPDATE data_source SET status='ready', updated_at=now() WHERE id=$1`, id,
 	); err != nil {
 		jsonResp(w, http.StatusInternalServerError, contracts.ErrorEnvelope{
 			Code: "DB_ERROR", Message: err.Error(),
@@ -230,12 +199,10 @@ func postSourceSync(w http.ResponseWriter, r *http.Request, db *sql.DB, id strin
 		return
 	}
 
-	// 6. SSE headers (must be written before any data).
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	flusher, _ := w.(http.Flusher)
-
 	sendEvent := func(ev contracts.SyncProgressEvent) {
 		data, _ := json.Marshal(ev)
 		_, _ = w.Write([]byte("data: " + string(data) + "\n\n"))
@@ -243,34 +210,7 @@ func postSourceSync(w http.ResponseWriter, r *http.Request, db *sql.DB, id strin
 			flusher.Flush()
 		}
 	}
-
 	sendEvent(contracts.SyncProgressEvent{Phase: "sync_started"})
-
-	// 7. Open source DB.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-	srcDB, err := Open(ctx, cfg)
-	if err != nil {
-		sendEvent(contracts.SyncProgressEvent{Phase: "sync_failed", Error: err.Error()})
-		_, _ = db.ExecContext(r.Context(), `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, id)
-		return
-	}
-	defer srcDB.Close()
-
-	// 8. Call SyncTables (pq.CopyIn bulk copy).
-	if err := SyncTables(ctx, srcDB, db, stagingSchema, req.Tables); err != nil {
-		sendEvent(contracts.SyncProgressEvent{Phase: "sync_failed", Error: err.Error()})
-		_, _ = db.ExecContext(r.Context(), `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, id)
-		return
-	}
-
-	// 9. Mark ready.
-	if _, err := db.ExecContext(r.Context(),
-		`UPDATE data_source SET status='ready', last_sync_at=now(), updated_at=now() WHERE id=$1`, id,
-	); err != nil {
-		sendEvent(contracts.SyncProgressEvent{Phase: "sync_failed", Error: err.Error()})
-		return
-	}
 	sendEvent(contracts.SyncProgressEvent{Phase: "sync_complete"})
 }
 

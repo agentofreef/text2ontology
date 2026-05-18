@@ -7,8 +7,15 @@
 #   3. upload a SQLite file        POST /api/connector/sqlite/sources
 #   4. sync all tables to staging  POST /api/connector/sqlite/sources/{id}/sync   (SSE)
 #   5. confirm the wizard          POST /api/connector/wizard/{id}/confirm
-#   6. verify rows landed in proj_<hex>.<table>  (direct psql)
-#   7. ask the Lakehouse Agent a question  POST /api/ontology/lakehouse-agent-stream (SSE)
+#   6. verify rows + numeric-column promotion  (direct psql)
+#   7. build ontology via the Builder Agent — 6 ODs + 5 Links, Chinese prompts,
+#      each its own conversation: propose_od/propose_link → activate-od/-link;
+#      then create 1 Metric Intent (deterministic multi-hop query template)
+#      via the ontology REST API
+#   8. ask the Lakehouse Agent 4 English demo questions (warmup → multi-OD
+#      centerpiece, routed through the Intent → rephrase twin → deliberate
+#      unregistered-term miss); raw SSE saved under regression-fixtures/
+#      demo-shots/ for review.
 #
 # Talks DIRECTLY to each service port (bypasses nginx). All ports require the
 # same Bearer token (authmw is mounted on every service).
@@ -29,8 +36,7 @@ ADMIN_ID="a0000000-0000-0000-0000-000000000001"
 ENV_FILE=".env.shared"
 SYNC_TIMEOUT="${SYNC_TIMEOUT:-1800}"        # 30 min — large DBs copy row-by-row
 ASK_TIMEOUT="${ASK_TIMEOUT:-300}"
-QUESTION="${QUESTION:-Which 3 employees handled the most orders? Please list their full names and order counts, in English.}"
-EXPECT_IN_ANSWER="${EXPECT_IN_ANSWER:-Peacock}"
+FIXTURE_DIR="${FIXTURE_DIR:-regression-fixtures/demo-shots}"  # raw SSE per demo question
 
 PSQL=(docker compose --env-file "$ENV_FILE" exec -T postgres
       psql -U lakehouse2ontology-enterprise -d lakehouse2ontology-enterprise -tA)
@@ -304,8 +310,12 @@ OD_IDS=()
 # Each entry: <OD_NAME>|<chinese build prompt>. Primary keys + FK columns must
 # be exposed as properties so the Builder Agent can later anchor Links to them.
 build_and_activate_od "PRODUCT" \
-  "请基于湖仓里的 Products 表，创建一个名为 PRODUCT 的本体对象(OD)。属性至少包含 ProductID(产品ID, 主键)、ProductName(产品名)、UnitPrice(单价)、UnitsInStock(库存)。请尽快直接调用 propose_od 完成建模，不要反复追问。"
+  "请基于湖仓里的 Products 表，创建一个名为 PRODUCT 的本体对象(OD)。属性至少包含 ProductID(产品ID, 主键)、ProductName(产品名)、CategoryID(类别ID, 外键)、UnitPrice(单价)、UnitsInStock(库存)。请尽快直接调用 propose_od 完成建模，不要反复追问。"
 OD_NAMES+=("PRODUCT"); OD_IDS+=("$BUILT_OD_ID")
+
+build_and_activate_od "CATEGORY" \
+  "请基于湖仓里的 Categories 表，创建一个名为 CATEGORY 的本体对象(OD)。属性至少包含 CategoryID(类别ID, 主键)、CategoryName(类别名)、Description(描述)。请尽快直接调用 propose_od 完成建模，不要反复追问。"
+OD_NAMES+=("CATEGORY"); OD_IDS+=("$BUILT_OD_ID")
 
 build_and_activate_od "CUSTOMER" \
   "请基于湖仓里的 Customers 表，创建一个名为 CUSTOMER 的本体对象(OD)。属性至少包含 CustomerID(客户ID, 主键)、CompanyName(公司名)、ContactName(联系人)、Country(国家)。请尽快直接调用 propose_od 完成建模，不要反复追问。"
@@ -354,55 +364,118 @@ build_and_activate_link "OD_PRODUCT" \
   "在已激活的 ORDER_DETAIL 和 PRODUCT 这两个 OD 之间建立一条 many_to_one Link，名为 OD_PRODUCT，外键列是 ORDER_DETAIL.ProductID 指向 PRODUCT.ProductID。请：1) 先调用 list type=ods 拿到两个 OD 的 property.id；2) 立即调用 propose_link，fromObjectId=ORDER_DETAIL 的 id、toObjectId=PRODUCT 的 id、fromPropertyId=ORDER_DETAIL.ProductID 的 property.id、toPropertyId=PRODUCT.ProductID 的 property.id、fkColumn=\"ProductID\"、linkName=\"OD_PRODUCT\"、cardinality=\"many_to_one\"。不要反复追问。"
 LINK_NAMES+=("OD_PRODUCT"); LINK_IDS+=("$BUILT_LINK_ID")
 
+build_and_activate_link "PRODUCT_CATEGORY" \
+  "在已激活的 PRODUCT 和 CATEGORY 这两个 OD 之间建立一条 many_to_one Link，名为 PRODUCT_CATEGORY，外键列是 PRODUCT.CategoryID 指向 CATEGORY.CategoryID。请：1) 先调用 list type=ods 拿到两个 OD 的 property.id；2) 立即调用 propose_link，fromObjectId=PRODUCT 的 id、toObjectId=CATEGORY 的 id、fromPropertyId=PRODUCT.CategoryID 的 property.id、toPropertyId=CATEGORY.CategoryID 的 property.id、fkColumn=\"CategoryID\"、linkName=\"PRODUCT_CATEGORY\"、cardinality=\"many_to_one\"。不要反复追问。"
+LINK_NAMES+=("PRODUCT_CATEGORY"); LINK_IDS+=("$BUILT_LINK_ID")
+
 ok "built & activated ${#LINK_IDS[@]} Links: ${LINK_NAMES[*]}"
 
-# ── Step 8: ask the Lakehouse Agent ──────────────────────────────────────────
-say "STEP 8 — ask the Lakehouse Agent"
-echo "       Q: $QUESTION"
-echo "       ----------------------------------------------------------------"
-THREAD_ID=""
-ASK_LOG=$(mktemp)
-agent_post_retry lakehouse "$(jq -cn --arg q "$QUESTION" '[{role:"user",content:$q}]')" "$ASK_LOG"
-printf '       '
-ANSWER="" ; SAW_DONE=0 ; SAW_ERR=""
-while IFS= read -r line; do
-  [[ "$line" == data:* ]] || continue
-  ev=${line#data: }
-  typ=$(echo "$ev" | jq -r '.type // empty' 2>/dev/null)
-  case "$typ" in
-    token)    tok=$(echo "$ev" | jq -r '.content // empty'); ANSWER+="$tok"; printf '%s' "$tok" ;;
-    thinking) printf '\033[2m·\033[0m' ;;
-    function_call)
-      fn=$(echo "$ev" | jq -r '.name // "tool"')
-      printf '\n       \033[36m[tool: %s]\033[0m ' "$fn" ;;
-    error)    SAW_ERR=$(echo "$ev" | jq -r '.content // "unknown"') ;;
-    done)
-      SAW_DONE=1
-      PT=$(echo "$ev" | jq -r '.promptTokens // .content.promptTokens // 0')
-      CT=$(echo "$ev" | jq -r '.completionTokens // .content.completionTokens // 0')
-      MN=$(echo "$ev" | jq -r '.modelName // .content.modelName // "?"') ;;
-  esac
-done < "$ASK_LOG"
-echo
-echo "       ----------------------------------------------------------------"
-[[ -n "$SAW_ERR" ]] && die "agent returned error: $SAW_ERR"
-[[ "$SAW_DONE" == 1 ]] || die "agent stream ended without 'done' event — see $ASK_LOG"
-[[ -n "$ANSWER" ]] || die "agent produced no answer tokens — see $ASK_LOG"
-[[ "$ANSWER" == *"$EXPECT_IN_ANSWER"* ]] \
-  || die "answer missing expected token '$EXPECT_IN_ANSWER': $ANSWER"
-ok "agent answered (model=${MN:-?}, ${PT:-?} in / ${CT:-?} out tokens) — answer contains '$EXPECT_IN_ANSWER' ✓"
-rm -f "$ASK_LOG"
+# ── Step 7d: build a Metric Intent (deterministic multi-hop query template) ──
+# A Metric Intent bakes a multi-OD join + filter set into a named template.
+# The Lakehouse Agent then only emits {intent, params} — the canonical SQL
+# (4-table join across ORDER_DETAIL→PRODUCT, →ORDER_ENT→CUSTOMER) is fixed,
+# so the same question always yields byte-identical SQL. Created via the
+# ontology REST API (the same endpoint the modelling UI uses).
+say "STEP 7d — build a Metric Intent"
+OD_DETAIL_ID=""
+for i in "${!OD_NAMES[@]}"; do
+  [[ "${OD_NAMES[$i]}" == "ORDER_DETAIL" ]] && OD_DETAIL_ID="${OD_IDS[$i]}"
+done
+[[ -n "$OD_DETAIL_ID" ]] || die "ORDER_DETAIL OD id not found among built ODs"
+INTENT_BODY=$(jq -cn --arg od "$OD_DETAIL_ID" '{
+  objectId: $od,
+  name: "EU.Beverage.Quantity.2017",
+  displayName: "2017 EU Beverage Quantity",
+  canonicalMetric: "sum(Quantity)",
+  canonicalFilters: [
+    {prop:"PRODUCT.CategoryID",  op:"=",       value:"1"},
+    {prop:"CUSTOMER.Country",    op:"in",      value:"Germany,France,UK,Italy,Spain"},
+    {prop:"ORDER_ENT.OrderDate", op:"between", value:"2017-01-01,2017-12-31"},
+    {prop:"Discount",            op:"<=",      value:"0.1"}
+  ],
+  autoGroupBy: [],
+  triggerKeywords: ["beverage sales","drinks sales","EU beverages","European beverage"],
+  mark: true
+}')
+INTENT_RESP=$(curl -s "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -X POST "$API/api/ontology/metric-intents?projectId=$PROJECT_ID" -d "$INTENT_BODY")
+INTENT_ID=$(echo "$INTENT_RESP" | jq -r '.id // empty')
+[[ -n "$INTENT_ID" ]] || die "metric-intent create failed: $INTENT_RESP"
+ok "Metric Intent created — EU.Beverage.Quantity.2017 ($INTENT_ID)"
+
+# ask_demo <tag> <question> <expect|->
+# Asks the Lakehouse Agent one English question on a fresh thread, streams the
+# answer, saves raw SSE to $FIXTURE_DIR/<tag>.sse (screenshot/regression source),
+# and validates that the answer contains <expect> (commas ignored so "88,588"
+# matches "88588"). Pass "-" as <expect> for a deliberate-miss question that is
+# not asserted on (Q3 — the unregistered-term scenario).
+DEMO_PASS=0
+DEMO_TOTAL=0
+ask_demo() {
+  local tag="$1" question="$2" expect="$3"
+  local THREAD_ID="" out="$FIXTURE_DIR/${tag}.sse"
+  DEMO_TOTAL=$((DEMO_TOTAL + 1))
+  echo
+  printf '   \033[1m[%s]\033[0m %s\n' "$tag" "$question"
+  agent_post_retry lakehouse "$(jq -cn --arg q "$question" '[{role:"user",content:$q}]')" "$out"
+  local arr err done_ tools ans mn
+  arr=$(sse_array "$out")
+  err=$(echo "$arr" | jq -r 'map(select(.type=="error").content)[0] // empty')
+  done_=$(echo "$arr" | jq -r 'any(.[]; .type=="done")')
+  tools=$(echo "$arr" | jq -r '[.[]|select(.type=="function_call").name]|join(" → ")')
+  ans=$(echo "$arr" | jq -r 'map(select(.type=="token").content)|join("")')
+  mn=$(echo "$arr" | jq -r 'map(select(.type=="done"))[0].modelName // "?"')
+  [[ -n "$err" ]] && die "$tag — agent error: $err"
+  [[ "$done_" == "true" ]] || die "$tag — stream ended without 'done' — see $out"
+  [[ -n "$ans" ]] || die "$tag — no answer tokens — see $out"
+  echo "       tools:  ${tools:-none}"
+  echo "       answer: $(echo "$ans" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-280)"
+  if [[ "$expect" == "-" ]]; then
+    ok "$tag — answered (model=$mn) [soft: deliberate-miss, not asserted]  → $out"
+    DEMO_PASS=$((DEMO_PASS + 1))
+  elif [[ "$(echo "$ans" | tr -d ,)" == *"$(echo "$expect" | tr -d ,)"* ]]; then
+    ok "$tag — answered (model=$mn), contains '$expect' ✓  → $out"
+    DEMO_PASS=$((DEMO_PASS + 1))
+  else
+    die "$tag — answer missing expected '$expect' — see $out"
+  fi
+}
+
+# ── Step 8: ask the Lakehouse Agent (demo scenarios, English) ────────────────
+# Four questions, escalating: a warmup, the multi-OD centerpiece, its rephrase
+# twin (same intent, different words), and a deliberate unregistered-term miss.
+say "STEP 8 — ask the Lakehouse Agent (demo questions)"
+mkdir -p "$FIXTURE_DIR"
+
+ask_demo "Q1-warmup" \
+  "Which 3 employees handled the most orders? Please list their full names and order counts. Respond strictly in English." \
+  "Peacock"
+
+ask_demo "Q2-centerpiece" \
+  "What was the total quantity of beverages ordered by our key European customers in Germany, France, the UK, Italy and Spain during 2017, excluding heavily-discounted orders with a discount above 10 percent? Respond strictly in English." \
+  "88,588"
+
+ask_demo "Q2prime-rephrase" \
+  "For the year 2017, how many units of drinks did our major EU clients based in Germany, France, the UK, Italy and Spain purchase, ignoring any order discounted by more than 10 percent? Respond strictly in English." \
+  "88,588"
+
+ask_demo "Q3-deliberate-miss" \
+  "Which of our VIP customers ordered the most beverages in 2017? Respond strictly in English." \
+  "-"
+
+ok "demo questions: $DEMO_PASS/$DEMO_TOTAL ran clean (Q3 is a soft deliberate-miss)"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 say "RESULT — full upload → build → ask flow PASSED"
 echo "   project:   $PNAME ($PROJECT_ID)"
 echo "   schema:    $SCHEMA"
 echo "   tables:    ${#TABLES[@]}   rows: $TOTAL"
-echo "   ontology:  ${#OD_IDS[@]} ODs + ${#LINK_IDS[@]} Links built via Builder Agent (Chinese) + activated"
+echo "   ontology:  ${#OD_IDS[@]} ODs + ${#LINK_IDS[@]} Links (Builder Agent, Chinese) + 1 Metric Intent"
 for i in "${!OD_NAMES[@]}"; do
-  printf '              OD   %-13s %s\n' "${OD_NAMES[$i]}" "${OD_IDS[$i]}"
+  printf '              OD     %-15s %s\n' "${OD_NAMES[$i]}" "${OD_IDS[$i]}"
 done
 for i in "${!LINK_NAMES[@]}"; do
-  printf '              LINK %-13s %s\n' "${LINK_NAMES[$i]}" "${LINK_IDS[$i]}"
+  printf '              LINK   %-15s %s\n' "${LINK_NAMES[$i]}" "${LINK_IDS[$i]}"
 done
-echo "   ask:       English question answered (contains '$EXPECT_IN_ANSWER')"
+printf '              INTENT %-15s %s\n' "EU.Beverage..." "$INTENT_ID"
+echo "   demo:      $DEMO_PASS/$DEMO_TOTAL questions clean — raw SSE in $FIXTURE_DIR/"
