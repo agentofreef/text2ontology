@@ -718,22 +718,40 @@ function LakehouseAgentChat() {
           role: string; content: string; thinking?: string; functionCall?: unknown
         }>
       }>(`/ontology/lakehouse-agent-threads/${id}`)
+      // One agent turn spans MULTIPLE ont_agent_step rows (a tool-call round,
+      // a reflect round, …, the final-answer round). Merge each turn's
+      // assistant rows into one message — matching the live-streaming path —
+      // so the final answer keeps that turn's functionCalls in scope. This is
+      // required for data-template references (「sum(t1.col)」 etc.) to resolve
+      // on page reload: renderDataTemplates resolves m.content against
+      // m.functionCalls, and step ids are per-turn.
       const restored: ChatMessage[] = []
+      let pendingAsst: ChatMessage | null = null
+      const flushAsst = () => {
+        if (pendingAsst) { restored.push(pendingAsst); pendingAsst = null }
+      }
       for (const step of res.steps || []) {
         if (step.role === 'user') {
+          flushAsst()
           restored.push({ role: 'user', content: step.content || '', functionCalls: [] })
         } else if (step.role === 'assistant') {
-          const fcs: FunctionCall[] = []
+          if (!pendingAsst) pendingAsst = { role: 'assistant', content: '', functionCalls: [] }
           if (step.functionCall) {
             const arr = Array.isArray(step.functionCall) ? step.functionCall : [step.functionCall]
             for (const fc of arr) {
               const f = fc as Record<string, unknown>
-              if (f.name) fcs.push({ name: String(f.name), arguments: (f.arguments as Record<string, unknown>) || {}, result: f.result as FunctionCall['result'] })
+              if (f.name) pendingAsst.functionCalls.push({ name: String(f.name), arguments: (f.arguments as Record<string, unknown>) || {}, result: f.result as FunctionCall['result'] })
             }
           }
-          restored.push({ role: 'assistant', content: step.content || '', functionCalls: fcs, thinking: step.thinking || undefined })
+          if (step.content) {
+            pendingAsst.content = pendingAsst.content ? pendingAsst.content + '\n' + step.content : step.content
+          }
+          if (step.thinking) {
+            pendingAsst.thinking = (pendingAsst.thinking ? pendingAsst.thinking + '\n' : '') + step.thinking
+          }
         }
       }
+      flushAsst()
       setMessages(restored)
       setThreadId(id)
       setThreadStatus(res.status || 'active')
