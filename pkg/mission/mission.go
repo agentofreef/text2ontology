@@ -54,6 +54,10 @@ type Mission struct {
 	StepResults     map[string]StepResult `json:"step_results"`
 	Synthesis       Synthesis             `json:"synthesis"`
 	Status          MissionStatus         `json:"status"`
+	// Reachability is the 任务可达器 verdict — the mandatory first
+	// judgment: can the question be answered from authorized data, and
+	// why / why not. Set before any querying; gates the rest.
+	Reachability    *ReachabilityVerdict  `json:"reachability,omitempty"`
 	BlockedRoot     *BlockedReason        `json:"blocked_root,omitempty"`
 	CreatedAt       string                `json:"created_at,omitempty"`
 	UpdatedAt       string                `json:"updated_at,omitempty"`
