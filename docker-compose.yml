@@ -105,6 +105,9 @@ services:
       OTEL_SERVICE_NAME: "agent-server"
       LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
       RECALL_SERVER_URL: "http://recall-server:8093"
+      # MissionAct (.omc/specs/mission-act.md). Off ⇒ byte-identical
+      # legacy behavior; on ⇒ shadow missions + capability-gap tool.
+      USE_MISSION_ACT: "true"
 
     depends_on:
       postgres:
