@@ -440,6 +440,11 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		}
 		sendSSEFull("thread", M{"threadId": threadID, "agentType": agentType})
 
+		// MissionAct M1 — shadow mission (turn start). Behind USE_MISSION_ACT;
+		// nil + no-op when the flag is off. Best-effort: never fails the turn.
+		// See mission_shadow.go.
+		shadowM := newShadowMission(ctx, db, threadID, projectID, userQuestion)
+
 		// ── Branch-thread detection ──
 		// If this thread has parent_thread_id in thread_state, it's a clarification
 		// child thread and must use the distilled seed prompt (no main system prompt,
@@ -583,8 +588,10 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Save raw userQuestion to DB — recall context is ephemeral and must not be stored.
-		db.Exec(`INSERT INTO ont_agent_step (thread_id, step_index, role, content) VALUES ($1, $2, 'user', $3)`,
-			threadID, stepIdx, userQuestion)
+		// mission_id is the shadow mission's id (NULL when USE_MISSION_ACT is off).
+		db.Exec(`INSERT INTO ont_agent_step (thread_id, step_index, role, content, mission_id)
+			VALUES ($1, $2, 'user', $3, $4)`,
+			threadID, stepIdx, userQuestion, nullableMissionID(shadowM))
 
 		sendSSE("thinking", "正在加载知识目录...")
 
@@ -1314,19 +1321,30 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// synthFollowUpMaxFails, the helper falls back to legacy prose path.
 		synthFailCount := 0
 
+		// lastAssistantContent tracks the most recent non-empty assistant
+		// text persisted this turn. The final saveRoundStep call of a turn
+		// carries the final answer, so this ends up holding it — used by the
+		// MissionAct M1 shadow-mission turn-end hook below.
+		var lastAssistantContent string
+
 		// saveRoundStep persists one LLM call round to ont_agent_step.
 		// sentMsgs is the exact llmMessages snapshot sent to the LLM this round.
 		saveRoundStep := func(sentMsgs []M, roundContent, roundThinking string, roundFC M, roundPT, roundCT, roundTT int, roundDur int64) {
 			stepIdx++
+			if roundContent != "" {
+				lastAssistantContent = roundContent
+			}
 			fcJSON, _ := json.Marshal(roundFC)
 			sentJSON, _ := json.Marshal(sentMsgs)
+			// mission_id ties this step to the shadow mission (NULL when
+			// USE_MISSION_ACT is off — see mission_shadow.go).
 			db.Exec(`INSERT INTO ont_agent_step
 				(thread_id, step_index, role, content, thinking, function_call,
-				 system_prompt, llm_messages, duration_ms, prompt_tokens, completion_tokens, total_tokens)
-				VALUES ($1, $2, 'assistant', $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11)`,
+				 system_prompt, llm_messages, duration_ms, prompt_tokens, completion_tokens, total_tokens, mission_id)
+				VALUES ($1, $2, 'assistant', $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11, $12)`,
 				threadID, stepIdx, roundContent, roundThinking, string(fcJSON),
 				systemPrompt, string(sentJSON), roundDur,
-				roundPT, roundCT, roundTT)
+				roundPT, roundCT, roundTT, nullableMissionID(shadowM))
 		}
 
 		for round := 0; round < maxRounds; round++ {
@@ -1386,6 +1404,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 						sendSSE("thinking", fmt.Sprintf("调用工具: %s", fcName))
 						toolResult := dispatchTool(fcName, fcArgs)
 						tagDataStep(fcName, toolResult)
+						shadowM.recordStep(toolResult) // MissionAct M1 — shadow step result
 						roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 						sendSSEFull("function_call", roundFC)
 						// Plan-mode terminal (streamed-XML path): see native path.
@@ -1450,6 +1469,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				sendSSE("thinking", fmt.Sprintf("调用工具: %s", tc.Name))
 				toolResult := dispatchTool(tc.Name, tc.Arguments)
 				tagDataStep(tc.Name, toolResult)
+				shadowM.recordStep(toolResult) // MissionAct M1 — shadow step result
 				roundFC = M{"name": tc.Name, "arguments": tc.Arguments, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
@@ -1523,6 +1543,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				sendSSE("thinking", fmt.Sprintf("调用工具: %s", fcName))
 				toolResult := dispatchTool(fcName, fcArgs)
 				tagDataStep(fcName, toolResult)
+				shadowM.recordStep(toolResult) // MissionAct M1 — shadow step result
 				roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 				sendSSEFull("function_call", roundFC)
 
@@ -1600,6 +1621,11 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 		// NOTE: builder ledger save is now done via `defer` near the load block,
 		// so it fires even on LLM-error early-return paths.
+
+		// MissionAct M1 — shadow mission (turn end). Records the final answer
+		// into synthesis.output, marks the mission complete and persists it.
+		// nil + no-op when USE_MISSION_ACT is off. See mission_shadow.go.
+		shadowM.finish(ctx, lastAssistantContent)
 
 		sendSSEFull("done", M{
 			"promptTokens": promptTokens, "completionTokens": completionTokens,
