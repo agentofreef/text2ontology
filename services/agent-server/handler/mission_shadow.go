@@ -145,6 +145,143 @@ func writeCapabilityGapLog(ctx context.Context, db *sql.DB, missionID, projectID
 	}
 }
 
+// ── M3: analysis-plan shadow capture ─────────────────────────────────────────
+
+// seedTasksFromFeatures is the start_analysis_plan hook (M3). It converts the
+// analysis.FeatureLedger snapshot into mission.Task entries and appends them
+// to the shadow mission, then saves. No-op when shadow path is inert.
+//
+// features is the []analysis.FeatureRuntime snapshot from the ledger (via
+// st.ledger.Snapshot()). Each feature becomes one pending task; DependsOn is
+// left empty because AnalysisFeature v1 has no dependency field — the ledger
+// itself drives run order.
+func (sm *shadowMission) seedTasksFromFeatures(ctx context.Context, features []featureRuntimeView) {
+	if sm == nil || sm.m == nil || len(features) == 0 {
+		return
+	}
+	tasks := make([]mission.Task, 0, len(features))
+	for _, f := range features {
+		taskType := "smartquery" // default; ToolHints[0].Tool is advisory only
+		if len(f.ToolHints) > 0 && f.ToolHints[0].Tool != "" {
+			taskType = f.ToolHints[0].Tool
+		}
+		tasks = append(tasks, mission.Task{
+			ID:           f.ID,
+			Type:         taskType,
+			Behavior:     f.Behavior,
+			Verification: f.Verification,
+			Status:       mission.TaskPending,
+			RetryBudget:  2,
+		})
+	}
+	sm.m.Tasks = tasks
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: seedTasksFromFeatures save failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
+// recordVerifyFeature is the verify_feature hook (M3). It mirrors the ledger
+// state transition into the shadow mission using mission.Mutate. The mutator
+// enforces WIP=1 and state-machine legality; any rejection is logged and
+// ignored — the turn is never affected. No-op when shadow path is inert.
+//
+// outcome is one of "passing" / "retry" / "blocked" (the "outcome" key in the
+// runVerifyFeature result M). tool/summary/reasoning are evidence strings.
+func (sm *shadowMission) recordVerifyFeature(ctx context.Context, featureID, outcome, tool, summary, reasoning string) {
+	ev := mission.Evidence{Tool: tool, ResultSummary: summary, Reasoning: reasoning}
+	if sm == nil || sm.m == nil || featureID == "" {
+		return
+	}
+	m := sm.m
+
+	// The mutator requires the task to be active before completing/blocking it.
+	// Drive pending→active if needed (the ledger already did this; we mirror).
+	taskActive := false
+	for _, t := range m.Tasks {
+		if t.ID == featureID && t.Status == mission.TaskActive {
+			taskActive = true
+			break
+		}
+	}
+	if !taskActive {
+		if err := mission.Mutate(m, mission.Mutation{Kind: mission.MutateStartTask, TaskID: featureID}); err != nil {
+			log.Printf("MISSION-ACT: recordVerifyFeature start(%s) rejected: %v", featureID, err)
+			return // can't proceed without active state
+		}
+	}
+
+	var err error
+	switch outcome {
+	case "passing":
+		err = mission.Mutate(m, mission.Mutation{
+			Kind:     mission.MutateCompleteTask,
+			TaskID:   featureID,
+			Evidence: &ev,
+		})
+	case "retry":
+		err = mission.Mutate(m, mission.Mutation{
+			Kind:   mission.MutateRetryTask,
+			TaskID: featureID,
+		})
+	default: // "blocked" and any unexpected value
+		err = mission.Mutate(m, mission.Mutation{
+			Kind:   mission.MutateBlockTask,
+			TaskID: featureID,
+			Blocked: &mission.BlockedReason{
+				Kind:             mission.GapShapeUnsupported,
+				MissingDimension: featureID,
+				CandidatesChecked: []mission.CandidateCheck{{
+					IntentName:      featureID,
+					WhyInsufficient: ev.Reasoning,
+				}},
+			},
+		})
+	}
+	if err != nil {
+		log.Printf("MISSION-ACT: recordVerifyFeature mutate(%s, %s) rejected: %v", featureID, outcome, err)
+		return
+	}
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if saveErr := sm.store.Save(ctx, sm.m); saveErr != nil {
+		log.Printf("MISSION-ACT: recordVerifyFeature save failed (mission %s): %v", sm.m.MissionID, saveErr)
+	}
+}
+
+// recordCompleteAnalysis is the complete_analysis hook (M3). Sets
+// synthesis.output from the machine-rendered final answer; mission status
+// derives automatically from task states (complete if all passing, partial if
+// any blocked). No-op when shadow path is inert.
+func (sm *shadowMission) recordCompleteAnalysis(ctx context.Context, finalAnswer string) {
+	if sm == nil || sm.m == nil {
+		return
+	}
+	sm.m.Synthesis.Output = finalAnswer
+	// Recompute status from task states (already handled by Mutate calls
+	// above; call DeriveStatus directly to ensure it's up-to-date even if
+	// some Mutate calls were rejected).
+	sm.m.Status = mission.DeriveStatus(sm.m.Tasks, sm.m.BlockedRoot)
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: recordCompleteAnalysis save failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
+// featureRuntimeView is the minimal projection of analysis.FeatureRuntime
+// that seedTasksFromFeatures needs. Using this thin view avoids importing the
+// analysis package into mission_shadow.go (which would create a package
+// dependency that isn't needed anywhere else in the shadow path).
+type featureRuntimeView struct {
+	ID           string
+	Behavior     string
+	Verification string
+	ToolHints    []featureToolHintView
+}
+
+type featureToolHintView struct {
+	Tool string
+}
+
 // finish is the turn-end hook. It records the final assistant answer into
 // synthesis.output, marks the mission complete and persists it again.
 // Best-effort: a save failure is logged, never propagated.

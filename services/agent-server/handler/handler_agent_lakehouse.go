@@ -1311,12 +1311,40 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				st, res := runStartAnalysisPlan(recallResult.OkEntries, args)
 				if st != nil {
 					planState = st
+					// MissionAct M3 — seed shadow mission tasks from feature list.
+					if shadowM != nil && st.ledger != nil {
+						snap := st.ledger.Snapshot()
+						views := make([]featureRuntimeView, len(snap))
+						for i, r := range snap {
+							hints := make([]featureToolHintView, len(r.ToolHints))
+							for j, h := range r.ToolHints {
+								hints[j] = featureToolHintView{Tool: h.Tool}
+							}
+							views[i] = featureRuntimeView{
+								ID: r.ID, Behavior: r.Behavior,
+								Verification: r.Verification, ToolHints: hints,
+							}
+						}
+						shadowM.seedTasksFromFeatures(ctx, views)
+					}
 				}
 				return res
 			case "verify_feature":
-				return runVerifyFeature(planState, args)
+				res := runVerifyFeature(planState, args)
+				// MissionAct M3 — mirror verify_feature outcome into shadow mission.
+				if shadowM != nil {
+					featureID, _ := args["featureId"].(string)
+					outcome, _ := res["outcome"].(string)
+					shadowM.recordVerifyFeature(ctx, featureID, outcome,
+						strArg(args, "tool"), strArg(args, "summary"), strArg(args, "reasoning"))
+				}
+				return res
 			case "complete_analysis":
-				_, res := runCompleteAnalysis(planState)
+				fa, res := runCompleteAnalysis(planState)
+				// MissionAct M3 — record final synthesis into shadow mission.
+				if shadowM != nil && fa != "" {
+					shadowM.recordCompleteAnalysis(ctx, fa)
+				}
 				return res
 			case "declare_capability_gap":
 				// MissionAct M2 — capability gap declaration.
