@@ -12,6 +12,7 @@ import (
 type DB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // Store persists missions to the ont_mission table. The full mission
@@ -61,6 +62,31 @@ func (s *Store) Load(ctx context.Context, missionID string) (*Mission, error) {
 		return nil, fmt.Errorf("decode mission %s: %w", missionID, err)
 	}
 	return m, nil
+}
+
+// ListByThread returns every mission persisted for a thread, newest
+// first. Each row's full `state` JSON is decoded into a Mission.
+func (s *Store) ListByThread(ctx context.Context, threadID string) ([]*Mission, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT state FROM ont_mission WHERE thread_id = $1 ORDER BY created_at DESC`,
+		threadID)
+	if err != nil {
+		return nil, fmt.Errorf("list missions for thread %s: %w", threadID, err)
+	}
+	defer rows.Close()
+	var out []*Mission
+	for rows.Next() {
+		var state []byte
+		if err := rows.Scan(&state); err != nil {
+			return nil, fmt.Errorf("scan mission row: %w", err)
+		}
+		m, err := DecodeMission(state)
+		if err != nil {
+			return nil, fmt.Errorf("decode mission row: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // EncodeMission serialises a mission to the JSON stored in the `state`

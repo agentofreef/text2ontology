@@ -116,6 +116,11 @@ func main() {
 	mux.HandleFunc("/api/ontology/lakehouse-agent-stream", handler.HandleAgentStream(db))
 	mux.HandleFunc("/api/ontology/lakehouse-agent-threads", handler.HandleAgentThreads(db))
 	mux.HandleFunc("/api/ontology/lakehouse-agent-threads/", handler.HandleAgentThreadByID(db))
+	// MissionAct (.omc/specs/mission-act.md) — read the mission ledger
+	// for a thread. Empty list is legitimate (USE_MISSION_ACT off, or
+	// pre-MissionAct thread).
+	mux.HandleFunc("/api/ontology/lakehouse-missions", handler.HandleMissionsByThread(db))
+	mux.HandleFunc("/internal/agent/missions", handler.HandleMissionsByThread(db))
 	mux.HandleFunc("/api/ontology/lh-test-suites", handler.HandleLHTestSuites(db))
 	mux.HandleFunc("/api/ontology/lh-test-suites/", handler.HandleLHTestSuiteByID(db))
 	mux.HandleFunc("/api/ontology/lh-test-runs/", handler.HandleLHTestRunCancelExported(db))
