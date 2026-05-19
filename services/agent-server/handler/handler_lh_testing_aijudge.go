@@ -115,6 +115,13 @@ func handleLHTestRunCaseAIJudge(db *sql.DB, rcID, suiteID, runID string, w http.
 - 如果 AI 回答里同时包含正确与错误信息，按"主要结论是否正确"来打分；并在 reason 中指出错误片段。
 - 如果 AI 回答看起来在表达"无法回答 / 无数据 / 出错"，但标准答案有具体内容 → incorrect。
 
+【诊断正确性 — MissionAct 引入的口径】
+- AI 回答里出现"技术限制 / 系统暂时无法处理 / 平台功能有限 / 暂不支持"这类**模糊措辞**，是把可定位的本体缺口糊成"临时故障"的误诊：
+  · 当问题需要的筛选维度真的没有任何 Intent 提供（结构性能力缺口）时，正确做法是给出**定位式回答**——点名缺失的维度 + 修复方向（"需要在本体授权层为 Intent X 添加 Y 参数"），而不是"技术限制"。
+  · 即使没有给出数字，只要点名了缺失能力 + 修法 + 已检查过哪些 Intent，仍判 correct（诚实优于编造）。
+  · 模糊措辞 = 误诊，判 incorrect，并在 reason 里指出该用 declare_capability_gap 给出定位式回答。
+- 真相是"参数存在但形状不支持"（如 period_label 只支持单月、不支持跨年）时同理：AI 应明确说"该指标的 period_label 不支持跨年范围"，而不是"暂时无法处理跨年度查询"。
+
 【输出格式 — 必须严格遵守】
 只输出一个 JSON 对象，且不要包裹 markdown 代码块：
 
