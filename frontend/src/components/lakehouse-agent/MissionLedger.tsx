@@ -223,21 +223,28 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
     )
   }
 
-  if (!missions || missions.length === 0) return null
+  const list = missions || []
 
+  // The panel is always present (it occupies the left column's lower
+  // slot), so an empty list renders an empty-state line rather than
+  // returning null.
   return (
-    <div className="border-t border-indigo-200 bg-indigo-50/30 flex-shrink-0">
-      <button className="w-full flex items-center gap-1.5 px-4 py-1.5 text-left hover:bg-indigo-50/60 transition-colors" onClick={() => setCollapsed(v => !v)}>
+    <div className="border-t border-indigo-200 bg-indigo-50/40 flex-shrink-0 flex flex-col min-h-0">
+      <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left hover:bg-indigo-50/70 transition-colors shrink-0" onClick={() => setCollapsed(v => !v)}>
         {collapsed ? <ChevronRight size={12} className="text-indigo-400" /> : <ChevronDown size={12} className="text-indigo-400" />}
         <Sparkles size={12} className="text-indigo-500" />
-        <span className="text-[11px] font-semibold text-indigo-700">Mission 账本</span>
-        <span className="text-[10px] text-indigo-400 ml-1">({missions.length})</span>
+        <span className="text-[11px] font-semibold text-indigo-700 tracking-wider">任务可达器</span>
+        <span className="text-[10px] text-indigo-400 ml-1">({list.length})</span>
       </button>
 
       {!collapsed && (
-        <div className="px-4 pb-3 space-y-1.5 max-h-48 overflow-y-auto">
-          {missions.map(m => <MissionCard key={m.mission_id} mission={m} />)}
-        </div>
+        list.length === 0 ? (
+          <div className="px-3 py-3 text-[11px] text-gray-400">当前对话暂无任务记录(mission)。</div>
+        ) : (
+          <div className="px-3 pb-3 space-y-1.5 overflow-y-auto">
+            {list.map(m => <MissionCard key={m.mission_id} mission={m} />)}
+          </div>
+        )
       )}
     </div>
   )

@@ -35,9 +35,7 @@ import {
   MotionFade,
   MotionScale,
   motion,
-  useAutoAnimate,
   AnimatePresence,
-  DataLoader,
 } from '@/lib/motion'
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -674,9 +672,6 @@ function LakehouseAgentChat() {
   const markedObjects = useMemo(() => objects.filter(o => o.mark), [objects])
   const joinKeyLinks = useMemo(() => causalities.filter(c => c.relationType === 'join_key'), [causalities])
 
-  // useAutoAnimate for the Od list (FLIP add/remove)
-  const odListRef = useAutoAnimate<HTMLDivElement>()
-
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   // Sync mode + threadId to URL
@@ -1132,36 +1127,12 @@ function LakehouseAgentChat() {
             layoutMode={graphLayoutMode}
           />
 
-          {/* Od List Panel */}
+          {/* 任务可达器 (MissionAct) — replaces the legacy Objects/Od list.
+              Always present; shows an empty-state line when the current
+              thread has no missions. max-h caps it so the graph keeps room. */}
           {!graphFullscreen && (
-            <div className="border-t border-gray-200 flex-shrink-0 max-h-[35%] overflow-y-auto bg-white">
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-200 bg-gray-50 sticky top-0">
-                <span className="text-[10px] font-semibold text-gray-500 tracking-wider uppercase">Objects</span>
-                <span className="text-[10px] text-gray-400">{markedObjects.length}</span>
-              </div>
-              <DataLoader loading={!objects} message={t('od_list.loading')} minHeight={120}>
-                <div ref={odListRef} className="divide-y divide-gray-100">
-                  {markedObjects.map((obj) => {
-                    const propCount = obj.properties?.length || 0
-                    const mapped = obj.properties?.filter(p => p.sourceColumn).length || 0
-                    return (
-                      <button
-                        key={obj.id}
-                        onClick={() => handleSend(t('od_list.view_props', { name: obj.name }))}
-                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 transition-colors text-left group"
-                      >
-                        <span className="inline-block w-2 h-2 rounded-full bg-gray-400 flex-shrink-0" />
-                        <span className="text-sm text-gray-700 group-hover:text-gray-900 transition-colors">{obj.name}</span>
-                        <span className="text-[10px] text-gray-400">{obj.kind}</span>
-                        <span className="ml-auto text-[10px] text-gray-400">{mapped}/{propCount}p</span>
-                      </button>
-                    )
-                  })}
-                </div>
-                {markedObjects.length === 0 && (
-                  <div className="px-3 py-4 text-xs text-gray-400 text-center">{t('od_list.empty')}</div>
-                )}
-              </DataLoader>
+            <div className="max-h-[40%] flex flex-col min-h-0">
+              <MissionLedger missions={missions} />
             </div>
           )}
         </div>
@@ -1388,9 +1359,6 @@ function LakehouseAgentChat() {
 
               <div ref={bottomRef} />
             </div>
-
-            {/* MissionAct M4 — mission ledger panel (renders nothing when empty) */}
-            <MissionLedger missions={missions} />
 
             {/* Input */}
             <div className="flex gap-2 px-4 py-3 border-t border-gray-200 flex-shrink-0 bg-white">
