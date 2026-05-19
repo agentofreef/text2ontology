@@ -1369,6 +1369,32 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 			}
 		}
 
+		// MissionAct 任务可达器 — reachability gate (M4).
+		// Runs BEFORE the ReAct loop. Fail-open: any LLM/parse error falls
+		// through to the normal loop unchanged. Only active when
+		// USE_MISSION_ACT is on AND agentType is "lakehouse" (builder has no
+		// recall Intents to gate against).
+		if missionActEnabled && agentType == "lakehouse" {
+			if infeasibleAnswer := runReachabilityJudge(ctx, db, shadowM, userQuestion, recallResult.MetricIntents); infeasibleAnswer != "" {
+				// Infeasible — stream the machine-templated answer and stop.
+				sendSSE("token", infeasibleAnswer)
+				// Persist as a zero-round assistant step so the turn is not blank.
+				stepIdx++
+				fcJSON, _ := json.Marshal(M{})
+				sentJSON, _ := json.Marshal(llmMessages)
+				db.Exec(`INSERT INTO ont_agent_step
+					(thread_id, step_index, role, content, thinking, function_call,
+					 system_prompt, llm_messages, duration_ms, prompt_tokens, completion_tokens, total_tokens, mission_id)
+					VALUES ($1, $2, 'assistant', $3, '', $4::jsonb, $5, $6::jsonb, 0, 0, 0, 0, $7)`,
+					threadID, stepIdx, infeasibleAnswer, string(fcJSON),
+					systemPrompt, string(sentJSON), nullableMissionID(shadowM))
+				lastAssistantContent := infeasibleAnswer
+				shadowM.finish(context.Background(), lastAssistantContent)
+				sendSSEFull("done", M{"promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "modelName": modelName})
+				return
+			}
+		}
+
 		var promptTokens, completionTokens, totalTokens int
 		const maxRounds = 20
 		// Counts Synthesizer self-check failures across rounds. Once it hits

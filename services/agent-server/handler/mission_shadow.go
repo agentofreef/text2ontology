@@ -267,6 +267,23 @@ func (sm *shadowMission) recordCompleteAnalysis(ctx context.Context, finalAnswer
 	}
 }
 
+// recordReachability stores the 任务可达器 verdict on the shadow mission and
+// saves best-effort. Called once per turn, before the ReAct loop. No-op when
+// the shadow path is inert.
+func (sm *shadowMission) recordReachability(ctx context.Context, verdict mission.ReachabilityVerdict) {
+	if sm == nil || sm.m == nil {
+		return
+	}
+	sm.m.Reachability = &verdict
+	if !verdict.Feasible {
+		sm.m.Status = mission.MissionUnanswerable
+	}
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: recordReachability save failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
 // featureRuntimeView is the minimal projection of analysis.FeatureRuntime
 // that seedTasksFromFeatures needs. Using this thin view avoids importing the
 // analysis package into mission_shadow.go (which would create a package
@@ -290,7 +307,12 @@ func (sm *shadowMission) finish(ctx context.Context, finalAnswer string) {
 		return
 	}
 	sm.m.Synthesis.Output = finalAnswer
-	sm.m.Status = mission.MissionComplete
+	// Preserve an unanswerable verdict — a reachability gate or a
+	// capability gap already set it; "the turn ended" must not relabel
+	// it as complete.
+	if sm.m.Status != mission.MissionUnanswerable {
+		sm.m.Status = mission.MissionComplete
+	}
 	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if err := sm.store.Save(ctx, sm.m); err != nil {
 		log.Printf("MISSION-ACT: shadow mission finalize failed (mission %s): %v", sm.m.MissionID, err)

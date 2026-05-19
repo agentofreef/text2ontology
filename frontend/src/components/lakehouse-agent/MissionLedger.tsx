@@ -42,6 +42,22 @@ export interface BlockedReason {
   suggested_fix?: string
 }
 
+// ReachabilityVerdict — the 任务可达器 judgment. The headline of every
+// mission: can the system answer this question from authorized data.
+export interface RequirementCoverage {
+  dimension: string
+  kind: string // metric | dimension | filter
+  covered: boolean
+  covered_by?: string[]
+  missing_note?: string
+}
+
+export interface ReachabilityVerdict {
+  feasible: boolean
+  requirements?: RequirementCoverage[]
+  reason: string
+}
+
 export interface Mission {
   mission_id: string
   thread_id: string
@@ -49,6 +65,7 @@ export interface Mission {
   parent_mission_id?: string
   question: string
   status: MissionStatus
+  reachability?: ReachabilityVerdict
   tasks?: MissionTask[]
   synthesis?: { template?: string; caveats?: string[]; output?: string; closest_reachable?: string }
   blocked_root?: BlockedReason
@@ -140,13 +157,48 @@ function CapabilityGapBanner({ reason }: { reason: BlockedReason }) {
   )
 }
 
+// ReachabilityBlock is the headline of a mission card — the 任务可达器
+// verdict: can the question be answered from authorized data, and why.
+function ReachabilityBlock({ v }: { v: ReachabilityVerdict }) {
+  const ok = v.feasible
+  const dims = (v.requirements || []).filter(r => r.kind === 'dimension' || r.kind === 'filter')
+  return (
+    <div className={`border rounded p-2 space-y-1 ${ok ? 'border-emerald-300 bg-emerald-50' : 'border-rose-300 bg-rose-50'}`}>
+      <div className="flex items-center gap-1.5">
+        {ok ? <Check size={12} className="text-emerald-600" /> : <AlertTriangle size={12} className="text-rose-600" />}
+        <span className={`text-[11px] font-semibold ${ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+          可达性判定:{ok ? '可行' : '不可行'}
+        </span>
+      </div>
+      <div className={`text-[11px] leading-relaxed ${ok ? 'text-emerald-800' : 'text-rose-800'}`}>{v.reason}</div>
+      {dims.length > 0 && (
+        <ul className="text-[10px] text-gray-600 space-y-0.5 pt-0.5">
+          {dims.map((r, i) => (
+            <li key={i} className="flex items-start gap-1">
+              {r.covered
+                ? <Check size={10} className="text-emerald-500 mt-0.5 shrink-0" />
+                : <X size={10} className="text-rose-500 mt-0.5 shrink-0" />}
+              <span>
+                <code className="text-gray-700">{r.dimension}</code>
+                {r.covered
+                  ? (r.covered_by && r.covered_by.length > 0 ? <> —— {r.covered_by.join('、')}</> : <> —— 已覆盖</>)
+                  : <> —— {r.missing_note || '无授权指标覆盖'}</>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function MissionCard({ mission }: { mission: Mission }) {
   const [open, setOpen] = useState(false)
   const ms = MISSION_STYLE[mission.status] || MISSION_STYLE.active
   const tasks = mission.tasks || []
 
   // Trivial-mission carve-out: ≤ 1 task with no synthesis → compact line.
-  const isTrivial = tasks.length <= 1 && !mission.synthesis?.output && !mission.blocked_root
+  const isTrivial = tasks.length <= 1 && !mission.synthesis?.output && !mission.blocked_root && !mission.reachability
   if (isTrivial) {
     return (
       <div className={`flex items-center gap-2 px-2 py-1.5 border ${ms.ring} ${ms.bg} rounded text-[11px]`}>
@@ -183,6 +235,7 @@ function MissionCard({ mission }: { mission: Mission }) {
 
       {open && (
         <div className="px-2.5 pb-2 space-y-1.5 border-t border-white/50">
+          {mission.reachability && <div className="pt-1.5"><ReachabilityBlock v={mission.reachability} /></div>}
           {mission.blocked_root && <div className="pt-1.5"><CapabilityGapBanner reason={mission.blocked_root} /></div>}
           {tasks.length > 0 && (
             <div className="space-y-1 pt-1.5">
