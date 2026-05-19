@@ -6,6 +6,7 @@ use (
 	./pkg/dsnguard
 	./pkg/httputil
 	./pkg/llmclient
+	./pkg/mission
 	./pkg/observability
 	./pkg/ontology
 	./services/agent-server

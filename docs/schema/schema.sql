@@ -543,6 +543,55 @@ CREATE TABLE IF NOT EXISTS ont_agent_step (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_step_thread ON ont_agent_step (thread_id, step_index);
 
+-- ── MissionAct (see .omc/specs/mission-act.md) ───────────────────────
+-- A mission is the unified per-turn state object: one row per user
+-- message. Single-query / compose / plan / capability_gap are all just
+-- different shapes of `state` (the full mission JSON).
+CREATE TABLE IF NOT EXISTS ont_mission (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id          UUID NOT NULL REFERENCES ont_agent_thread(id) ON DELETE CASCADE,
+    parent_mission_id  UUID REFERENCES ont_mission(id) ON DELETE SET NULL,
+    project_id         UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    question           TEXT NOT NULL DEFAULT '',
+    state              JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status             VARCHAR(16) NOT NULL DEFAULT 'active',
+    created_at         TIMESTAMPTZ DEFAULT now(),
+    updated_at         TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE ont_mission DROP CONSTRAINT IF EXISTS ont_mission_status_chk;
+ALTER TABLE ont_mission ADD CONSTRAINT ont_mission_status_chk
+    CHECK (status IN ('active','complete','partial','unanswerable'));
+CREATE INDEX IF NOT EXISTS idx_ont_mission_thread ON ont_mission (thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ont_mission_unanswerable
+    ON ont_mission (project_id, status) WHERE status = 'unanswerable';
+
+-- A declared + verified capability gap: a question dimension no Intent
+-- can serve. Not a log — a backlog signal for the ontology authors.
+CREATE TABLE IF NOT EXISTS capability_gap_log (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mission_id         UUID NOT NULL REFERENCES ont_mission(id) ON DELETE CASCADE,
+    project_id         UUID NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    intent_name        TEXT,
+    missing_dimension  TEXT NOT NULL,
+    gap_kind           VARCHAR(20) NOT NULL,
+    suggested_fix      TEXT DEFAULT '',
+    evidence           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at         TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE capability_gap_log DROP CONSTRAINT IF EXISTS capability_gap_kind_chk;
+ALTER TABLE capability_gap_log ADD CONSTRAINT capability_gap_kind_chk
+    CHECK (gap_kind IN ('no_param','shape_unsupported','no_data'));
+CREATE INDEX IF NOT EXISTS idx_capability_gap_dim
+    ON capability_gap_log (project_id, missing_dimension);
+
+-- Link agent steps to the mission they dispatched under. NULL for
+-- pre-MissionAct rows — fully backward compatible.
+ALTER TABLE ont_agent_step ADD COLUMN IF NOT EXISTS mission_id UUID
+    REFERENCES ont_mission(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_step_mission
+    ON ont_agent_step (mission_id) WHERE mission_id IS NOT NULL;
+-- ─────────────────────────────────────────────────────────────────────
+
 -- agent_type on ont_agent_thread (lakehouse, sql, workbench)
 ALTER TABLE ont_agent_thread ADD COLUMN IF NOT EXISTS agent_type VARCHAR(10) DEFAULT 'lakehouse';
 ALTER TABLE ont_agent_thread DROP CONSTRAINT IF EXISTS agent_type_chk;
