@@ -780,6 +780,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 为什么：大语言模型对长数字的转录天生不可靠，直接写数字会抄错。引用让"真值"只来自查询结果本身，
 你只负责"指哪个数"，不负责"报数"。非数值的结论 / 解读文字照常正常写，**只有数字和表格用引用**。
+` + capabilityGapPromptSection() + `
 ` + xmlToolSection + `
 ## 日期参考
 
@@ -953,6 +954,16 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					"properties": M{},
 				}},
 			}
+
+			// MissionAct M2 — append declare_capability_gap when flag is on.
+			// Zero impact when off: the tool is never added, never seen by LLM.
+			if missionActEnabled {
+				v2Tools = append(v2Tools, llmclient.ToolDef{
+					Name:        "declare_capability_gap",
+					Description: declareCapabilityGapToolDescription,
+					Parameters:  M(declareCapabilityGapToolDef()),
+				})
+			}
 		}
 
 		// Sub-Agent (branch thread) — temporarily disabled.
@@ -1096,6 +1107,10 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 			"start_analysis_plan": true,
 			"verify_feature":      true,
 			"complete_analysis":   true,
+			// MissionAct M2 — capability gap declaration. Only registered
+			// when USE_MISSION_ACT is on; the v2Tools block below mirrors
+			// this guard so the LLM never sees the tool when the flag is off.
+			"declare_capability_gap": missionActEnabled,
 		}
 
 		dispatchTool := func(name string, args map[string]interface{}) M {
@@ -1303,6 +1318,17 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 			case "complete_analysis":
 				_, res := runCompleteAnalysis(planState)
 				return res
+			case "declare_capability_gap":
+				// MissionAct M2 — capability gap declaration.
+				// Returns M{"finalAnswer": "..."} on an accepted gap (terminal,
+				// same shape as complete_analysis) so the three break-paths below
+				// handle it identically. Returns M{"error": "..."} on gate
+				// rejection (non-terminal — the agent loop continues).
+				r := runDeclareCapabilityGap(ctx, db, shadowM, recallResult.MetricIntents, args)
+				if r.terminal {
+					return M{"finalAnswer": r.finalAnswer}
+				}
+				return M(r.toolResult)
 			// remember 工具已撤销 — 查询模式只暴露 lookup + smartquery。
 			// 知识沉淀（anchor / causality / fact）暂无 LLM 入口，需要时通过
 			// builder mode 或独立 API 操作。
@@ -1408,7 +1434,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 						roundFC = M{"name": fcName, "arguments": fcArgs, "result": toolResult}
 						sendSSEFull("function_call", roundFC)
 						// Plan-mode terminal (streamed-XML path): see native path.
-						if fcName == "complete_analysis" {
+						// declare_capability_gap (M2) also returns finalAnswer on acceptance.
+						if fcName == "complete_analysis" || fcName == "declare_capability_gap" {
 							if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
 								sendSSE("token", fa)
 								saveRoundStep(sentMsgsSnapshot, fa, roundThinking, roundFC, roundPT, roundCT, roundTT, time.Since(roundStart).Milliseconds())
@@ -1477,7 +1504,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				// answer (machine-stitched synthesis — template + verbatim
 				// caveats). Emit it directly and end the turn; the LLM does
 				// not get to rephrase it (spec §9.5).
-				if tc.Name == "complete_analysis" {
+				// declare_capability_gap (M2) uses the same finalAnswer shape.
+				if tc.Name == "complete_analysis" || tc.Name == "declare_capability_gap" {
 					if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
 						roundContent = fa
 						sendSSE("token", fa)
@@ -1548,7 +1576,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				sendSSEFull("function_call", roundFC)
 
 				// Plan-mode terminal (XML path): see native path above.
-				if fcName == "complete_analysis" {
+				// declare_capability_gap (M2) uses the same finalAnswer shape.
+				if fcName == "complete_analysis" || fcName == "declare_capability_gap" {
 					if fa, ok := toolResult["finalAnswer"].(string); ok && fa != "" {
 						roundContent = fa
 						sendSSE("token", fa)

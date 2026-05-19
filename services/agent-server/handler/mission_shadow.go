@@ -103,6 +103,48 @@ func (sm *shadowMission) recordStep(result map[string]any) {
 	sm.m.StepResults[stepID] = mission.StepResult{Rows: rows}
 }
 
+// blockRoot marks the mission as unanswerable due to a root-level capability
+// gap and persists it. Called by the declare_capability_gap tool handler on an
+// accepted gap (M2). Best-effort: save failures are logged, never propagated.
+func (sm *shadowMission) blockRoot(ctx context.Context, reason mission.BlockedReason) {
+	if sm == nil || sm.m == nil {
+		return
+	}
+	sm.m.BlockedRoot = &reason
+	sm.m.Status = mission.MissionUnanswerable
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: shadow mission blockRoot failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
+// writeCapabilityGapLog persists a row to capability_gap_log. Best-effort:
+// a DB failure is logged, never propagated. Called after an accepted gap.
+func writeCapabilityGapLog(ctx context.Context, db *sql.DB, missionID, projectID string, reason mission.BlockedReason) {
+	if db == nil {
+		return
+	}
+	evidenceJSON, err := json.Marshal(reason.CandidatesChecked)
+	if err != nil {
+		evidenceJSON = []byte("[]")
+	}
+	var firstIntent any
+	if len(reason.CandidatesChecked) > 0 {
+		firstIntent = reason.CandidatesChecked[0].IntentName
+	}
+	_, dbErr := db.ExecContext(ctx, `
+		INSERT INTO capability_gap_log
+			(id, mission_id, project_id, intent_name, missing_dimension,
+			 gap_kind, suggested_fix, evidence)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+		uuid.NewString(), missionID, projectID, firstIntent,
+		reason.MissingDimension, string(reason.Kind), reason.SuggestedFix,
+		string(evidenceJSON))
+	if dbErr != nil {
+		log.Printf("MISSION-ACT: capability_gap_log write failed (mission %s): %v", missionID, dbErr)
+	}
+}
+
 // finish is the turn-end hook. It records the final assistant answer into
 // synthesis.output, marks the mission complete and persists it again.
 // Best-effort: a save failure is logged, never propagated.
