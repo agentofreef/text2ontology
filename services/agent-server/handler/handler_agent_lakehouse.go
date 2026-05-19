@@ -1377,9 +1377,16 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 		// lastAssistantContent tracks the most recent non-empty assistant
 		// text persisted this turn. The final saveRoundStep call of a turn
-		// carries the final answer, so this ends up holding it — used by the
-		// MissionAct M1 shadow-mission turn-end hook below.
+		// carries the final answer, so this ends up holding it.
 		var lastAssistantContent string
+
+		// MissionAct M1 — finalise the shadow mission on EVERY turn-exit
+		// path. The handler has several early returns (LLM error, synthesize
+		// short-circuit, plan-mode terminal); a deferred closure persists
+		// the accumulated step_results + final answer no matter how the turn
+		// ends. context.Background() so a cancelled request context cannot
+		// drop the final write. No-op when USE_MISSION_ACT is off.
+		defer func() { shadowM.finish(context.Background(), lastAssistantContent) }()
 
 		// saveRoundStep persists one LLM call round to ont_agent_step.
 		// sentMsgs is the exact llmMessages snapshot sent to the LLM this round.
@@ -1679,10 +1686,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// NOTE: builder ledger save is now done via `defer` near the load block,
 		// so it fires even on LLM-error early-return paths.
 
-		// MissionAct M1 — shadow mission (turn end). Records the final answer
-		// into synthesis.output, marks the mission complete and persists it.
-		// nil + no-op when USE_MISSION_ACT is off. See mission_shadow.go.
-		shadowM.finish(ctx, lastAssistantContent)
+		// MissionAct M1 shadow-mission finalisation runs via the deferred
+		// closure registered before the round loop — see above.
 
 		sendSSEFull("done", M{
 			"promptTokens": promptTokens, "completionTokens": completionTokens,
