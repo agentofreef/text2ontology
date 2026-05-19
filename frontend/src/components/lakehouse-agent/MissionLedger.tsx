@@ -47,6 +47,8 @@ export interface BlockedReason {
 export interface RequirementCoverage {
   dimension: string
   kind: string // metric | dimension | filter
+  shape?: string
+  why?: string
   covered: boolean
   covered_by?: string[]
   missing_note?: string
@@ -159,34 +161,63 @@ function CapabilityGapBanner({ reason }: { reason: BlockedReason }) {
 
 // ReachabilityBlock is the headline of a mission card — the 任务可达器
 // verdict: can the question be answered from authorized data, and why.
+const REQ_KIND_STYLE: Record<string, { label: string; chip: string }> = {
+  metric:    { label: '指标', chip: 'bg-sky-100 text-sky-700' },
+  dimension: { label: '维度', chip: 'bg-indigo-100 text-indigo-700' },
+  filter:    { label: '筛选', chip: 'bg-amber-100 text-amber-700' },
+}
+
+// RequirementRow renders one decomposed element of the question — its
+// kind, name, shape, why, and (for dimension/filter) whether an
+// authorized Intent reaches it.
+function RequirementRow({ r }: { r: RequirementCoverage }) {
+  const ks = REQ_KIND_STYLE[r.kind] || { label: r.kind, chip: 'bg-gray-100 text-gray-600' }
+  const isMetric = r.kind === 'metric'
+  return (
+    <div className="border border-gray-200 bg-white rounded px-2 py-1.5 space-y-0.5">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className={`text-[9px] px-1 py-0.5 rounded font-semibold ${ks.chip}`}>{ks.label}</span>
+        <code className="text-[11px] font-semibold text-gray-800">{r.dimension}</code>
+        {r.shape && <span className="text-[9px] text-gray-400">· {r.shape}</span>}
+        {!isMetric && (
+          r.covered
+            ? <span className="ml-auto text-[9px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 flex items-center gap-0.5"><Check size={9} />可达</span>
+            : <span className="ml-auto text-[9px] px-1 py-0.5 rounded bg-rose-100 text-rose-700 flex items-center gap-0.5"><X size={9} />不可达</span>
+        )}
+      </div>
+      {r.why && <div className="text-[10px] text-gray-500 leading-relaxed">{r.why}</div>}
+      {!isMetric && (
+        <div className="text-[10px]">
+          {r.covered
+            ? <span className="text-emerald-600">由 {(r.covered_by || []).join('、') || '已授权指标'} 覆盖</span>
+            : <span className="text-rose-600">{r.missing_note || '无授权指标覆盖'}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ReachabilityBlock is the headline of a mission card — the 任务可达器
+// verdict plus the full question decomposition that produced it.
 function ReachabilityBlock({ v }: { v: ReachabilityVerdict }) {
   const ok = v.feasible
-  const dims = (v.requirements || []).filter(r => r.kind === 'dimension' || r.kind === 'filter')
+  const reqs = v.requirements || []
   return (
-    <div className={`border rounded p-2 space-y-1 ${ok ? 'border-emerald-300 bg-emerald-50' : 'border-rose-300 bg-rose-50'}`}>
-      <div className="flex items-center gap-1.5">
+    <div className={`border rounded overflow-hidden ${ok ? 'border-emerald-300' : 'border-rose-300'}`}>
+      <div className={`flex items-center gap-1.5 px-2 py-1.5 ${ok ? 'bg-emerald-50' : 'bg-rose-50'}`}>
         {ok ? <Check size={12} className="text-emerald-600" /> : <AlertTriangle size={12} className="text-rose-600" />}
         <span className={`text-[11px] font-semibold ${ok ? 'text-emerald-700' : 'text-rose-700'}`}>
-          可达性判定:{ok ? '可行' : '不可行'}
+          任务可达器:{ok ? '可行' : '不可行'}
         </span>
       </div>
-      <div className={`text-[11px] leading-relaxed ${ok ? 'text-emerald-800' : 'text-rose-800'}`}>{v.reason}</div>
-      {dims.length > 0 && (
-        <ul className="text-[10px] text-gray-600 space-y-0.5 pt-0.5">
-          {dims.map((r, i) => (
-            <li key={i} className="flex items-start gap-1">
-              {r.covered
-                ? <Check size={10} className="text-emerald-500 mt-0.5 shrink-0" />
-                : <X size={10} className="text-rose-500 mt-0.5 shrink-0" />}
-              <span>
-                <code className="text-gray-700">{r.dimension}</code>
-                {r.covered
-                  ? (r.covered_by && r.covered_by.length > 0 ? <> —— {r.covered_by.join('、')}</> : <> —— 已覆盖</>)
-                  : <> —— {r.missing_note || '无授权指标覆盖'}</>}
-              </span>
-            </li>
-          ))}
-        </ul>
+      <div className={`px-2 py-1 text-[11px] leading-relaxed ${ok ? 'text-emerald-800 bg-emerald-50/50' : 'text-rose-800 bg-rose-50/50'}`}>
+        {v.reason}
+      </div>
+      {reqs.length > 0 && (
+        <div className="px-2 py-1.5 space-y-1 bg-white">
+          <div className="text-[10px] font-semibold text-gray-500 tracking-wider">问题拆解({reqs.length})</div>
+          {reqs.map((r, i) => <RequirementRow key={i} r={r} />)}
+        </div>
       )}
     </div>
   )

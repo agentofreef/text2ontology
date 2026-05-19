@@ -26,10 +26,14 @@ import (
 // fully deterministic.
 
 // RequirementCoverage is one decomposed requirement and whether the
-// authorized Intents cover it.
+// authorized Intents cover it. It carries the full decomposition detail
+// (shape, why) so the 任务可达器 panel can render the breakdown, not
+// just a verdict.
 type RequirementCoverage struct {
 	Dimension   string   `json:"dimension"`
-	Kind        string   `json:"kind"` // metric | dimension | filter
+	Kind        string   `json:"kind"`            // metric | dimension | filter
+	Shape       string   `json:"shape,omitempty"` // scalar | group-by | range | ...
+	Why         string   `json:"why,omitempty"`   // why the question needs this element
 	Covered     bool     `json:"covered"`
 	CoveredBy   []string `json:"covered_by,omitempty"`   // Intent names that cover it (the "why feasible")
 	MissingNote string   `json:"missing_note,omitempty"` // why it is uncovered (the "why not")
@@ -52,7 +56,7 @@ type ReachabilityVerdict struct {
 func Judge(decomposition []DecompItem, intents []IntentSpec) ReachabilityVerdict {
 	v := ReachabilityVerdict{Feasible: true}
 	for _, d := range decomposition {
-		rc := RequirementCoverage{Dimension: d.Name, Kind: d.Kind}
+		rc := RequirementCoverage{Dimension: d.Name, Kind: d.Kind, Shape: d.Shape, Why: d.WhyRequired}
 		if d.Kind != "dimension" && d.Kind != "filter" {
 			rc.Covered = true // metric / other — not a coverage gate
 			v.Requirements = append(v.Requirements, rc)

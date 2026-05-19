@@ -101,13 +101,15 @@ func decomposeQuestion(
 	systemPrompt := `你是一个分析助手。将用户问题拆解为它所需的数据要素。
 
 只输出一个 JSON 数组，不要包裹 markdown 代码块，不要输出任何其他文字：
-[{"kind":"metric|dimension|filter","name":"..."}]
+[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"..."}]
 
 规则：
 - kind="metric" 表示用户想查询的指标（如销售额、数量）。
 - kind="dimension" 表示用户想按其分组的维度（如按地区、按月份）。
 - kind="filter" 表示用户想按其筛选的条件（如某员工、某城市）。
 - 对于 dimension 和 filter，name 必须使用下方"可用参数"列表中已有的参数 property 名称；如果不存在匹配的参数，使用问题中的原始词。
+- shape 用一两个词描述该要素的形态：metric 用"标量/求和/计数"等；dimension 用"分组"；filter 用"等值/范围/区间"等。
+- why 用一句话说明这个问题为什么需要这个要素。
 - 如果问题只是通用查询（无特定筛选），只返回 metric 项。
 - 数组元素不超过 8 个。`
 
@@ -176,8 +178,10 @@ func parseDecompJSON(raw string) ([]mission.DecompItem, error) {
 	// ExtractJSON may return an object {}; we need an array [...].
 	// If it starts with '{', wrap attempt would fail — just try parsing as-is.
 	var items []struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
+		Kind  string `json:"kind"`
+		Name  string `json:"name"`
+		Shape string `json:"shape"`
+		Why   string `json:"why"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &items); err != nil {
 		return nil, fmt.Errorf("decompose JSON parse failed (%q): %w", truncateStr(cleaned, 120), err)
@@ -195,9 +199,11 @@ func parseDecompJSON(raw string) ([]mission.DecompItem, error) {
 			continue
 		}
 		out = append(out, mission.DecompItem{
-			ID:   fmt.Sprintf("d%d", i+1),
-			Kind: kind,
-			Name: name,
+			ID:          fmt.Sprintf("d%d", i+1),
+			Kind:        kind,
+			Name:        name,
+			Shape:       strings.TrimSpace(it.Shape),
+			WhyRequired: strings.TrimSpace(it.Why),
 		})
 	}
 	return out, nil
