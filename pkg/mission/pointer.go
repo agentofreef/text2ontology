@@ -44,18 +44,25 @@ func (v Violation) Error() string {
 		v.Literal, v.Path, v.ShouldBe)
 }
 
+// Exempt is a predicate that whitelists individual literals — used to
+// pass through question-origin tokens (substring-tested against the
+// question; see QuestionExempt) and any other declared escapes. A nil
+// Exempt means no literal is exempt.
+type Exempt func(literal string) bool
+
 // ScanForLiteral walks value (string / map / slice, as produced by JSON
 // unmarshalling) and returns the first string leaf that exactly matches
 // a cell already present in steps — i.e. a value the LLM copied that
-// should be a reference. Literals in exempt (e.g. question-origin
-// tokens) are allowed through. The scan is deterministic: maps are
-// walked in sorted key order so the "first" violation is stable.
+// should be a reference. Literals approved by exempt (typically
+// question-origin) are allowed through. The scan is deterministic:
+// maps are walked in sorted key order so the "first" violation is
+// stable.
 //
 // Numeric leaves are not scanned in this milestone — the dominant
 // transcription risk (enum/dimension values, WHERE filter values) is
 // string-typed, and answer-text numbers are already covered by the
 // data-template references. Numeric dispatch-arg scanning lands in M2.
-func ScanForLiteral(value any, steps map[string]StepResult, exempt map[string]bool) (Violation, bool) {
+func ScanForLiteral(value any, steps map[string]StepResult, exempt Exempt) (Violation, bool) {
 	return scan(value, "$", buildCellIndex(steps), exempt)
 }
 
@@ -89,11 +96,14 @@ func buildCellIndex(steps map[string]StepResult) map[string]string {
 	return idx
 }
 
-func scan(value any, path string, index map[string]string, exempt map[string]bool) (Violation, bool) {
+func scan(value any, path string, index map[string]string, exempt Exempt) (Violation, bool) {
 	switch v := value.(type) {
 	case string:
 		s := strings.TrimSpace(v)
-		if s == "" || IsRef(s) || exempt[s] {
+		if s == "" || IsRef(s) {
+			return Violation{}, false
+		}
+		if exempt != nil && exempt(s) {
 			return Violation{}, false
 		}
 		if ref, hit := index[s]; hit {

@@ -155,10 +155,9 @@ func applyRetry(m *Mission, taskID string) error {
 
 // GateDispatch enforces the pointer invariant on a dispatch's args: any
 // literal copied out of a prior step result is rejected and must be
-// rewritten as a reference. exempt holds question-origin literals,
-// which are allowed (spec §0.5). Every dispatch passes this gate before
-// its task runs.
-func GateDispatch(d Dispatch, steps map[string]StepResult, exempt map[string]bool) error {
+// rewritten as a reference. exempt approves question-origin literals
+// (spec §0.5). Every dispatch passes this gate before its task runs.
+func GateDispatch(d Dispatch, steps map[string]StepResult, exempt Exempt) error {
 	if len(d.Args) == 0 {
 		return nil
 	}

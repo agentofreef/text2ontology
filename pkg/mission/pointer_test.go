@@ -53,7 +53,8 @@ func TestScanForLiteral(t *testing.T) {
 	}
 
 	// T12: a question-origin literal is exempt.
-	if _, found := ScanForLiteral(args, steps, map[string]bool{"上海": true}); found {
+	exemptShanghai := func(s string) bool { return s == "上海" }
+	if _, found := ScanForLiteral(args, steps, exemptShanghai); found {
 		t.Error("an exempt literal must not be flagged")
 	}
 

@@ -175,7 +175,8 @@ func TestGateDispatch(t *testing.T) {
 	}
 
 	// A question-origin literal is exempt.
-	if err := GateDispatch(bad, steps, map[string]bool{"上海": true}); err != nil {
+	exemptShanghai := func(s string) bool { return s == "上海" }
+	if err := GateDispatch(bad, steps, exemptShanghai); err != nil {
 		t.Fatalf("exempt literal should pass: %v", err)
 	}
 
