@@ -22,6 +22,7 @@ import { BuilderProposeIntentCard } from '@/components/lakehouse-agent/BuilderPr
 import { BuilderProposeLinkCard } from '@/components/lakehouse-agent/BuilderProposeLinkCard'
 import { PlanGraph, type PlanTrace } from '@/components/lakehouse-agent/PlanGraph'
 import { AnalysisPlan, type AnalysisPlanResult } from '@/components/lakehouse-agent/AnalysisPlan'
+import { MissionLedger, type Mission } from '@/components/lakehouse-agent/MissionLedger'
 import { renderDataTemplates } from '@/components/lakehouse-agent/dataTemplate'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -575,6 +576,8 @@ function LakehouseAgentChat() {
   const [loading, setLoading] = useState(false)
   const [loadingThread, setLoadingThread] = useState(false)
   const [threadId, setThreadId] = useState(searchParams.get('threadId') || '')
+  // MissionAct M4 — the mission ledger for the current thread.
+  const [missions, setMissions] = useState<Mission[]>([])
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<number>>(new Set())
   const [expandedAnnotations, setExpandedAnnotations] = useState<Set<number>>(new Set())
@@ -703,6 +706,23 @@ function LakehouseAgentChat() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showMemory, threadId])
+
+  // MissionAct M4 — fetch the mission ledger whenever the thread changes.
+  // Empty list is the legitimate response (USE_MISSION_ACT off, or no
+  // missions yet); the component renders nothing in that case.
+  useEffect(() => {
+    if (!threadId) { setMissions([]); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await api<{ missions?: Mission[] }>(`/ontology/lakehouse-missions?thread_id=${encodeURIComponent(threadId)}`)
+        if (!cancelled) setMissions(res?.missions ?? [])
+      } catch {
+        if (!cancelled) setMissions([])
+      }
+    })()
+    return () => { cancelled = true }
+  }, [threadId, messages.length])
 
   const loadThread = useCallback(async (id: string) => {
     if (!id) return
@@ -1368,6 +1388,9 @@ function LakehouseAgentChat() {
 
               <div ref={bottomRef} />
             </div>
+
+            {/* MissionAct M4 — mission ledger panel (renders nothing when empty) */}
+            <MissionLedger missions={missions} />
 
             {/* Input */}
             <div className="flex gap-2 px-4 py-3 border-t border-gray-200 flex-shrink-0 bg-white">
