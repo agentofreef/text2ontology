@@ -79,11 +79,12 @@ function stripQuotes(s: string): string {
  * may carry result.step_id + result.execution_result (a JSON string of rows).
  */
 export function collectStepResults(
-  functionCalls: Array<{ result?: { step_id?: string; execution_result?: string } }> | undefined,
+  functionCalls: Array<{ result?: { step_id?: string; execution_result?: string } } | null | undefined> | undefined,
 ): Map<string, StepResult> {
   const out = new Map<string, StepResult>()
   if (!functionCalls) return out
   for (const fc of functionCalls) {
+    if (!fc) continue
     const sid = fc.result?.step_id
     const raw = fc.result?.execution_result
     if (!sid || !raw) continue
@@ -399,7 +400,7 @@ export function resolveReference(inner: string, steps: Map<string, StepResult>):
  */
 export function renderDataTemplates(
   text: string,
-  functionCalls: Array<{ result?: { step_id?: string; execution_result?: string } }> | undefined,
+  functionCalls: Array<{ result?: { step_id?: string; execution_result?: string } } | null | undefined> | undefined,
 ): string {
   if (!text || text.indexOf('「') < 0) return text
   const steps = collectStepResults(functionCalls)
