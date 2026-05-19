@@ -147,13 +147,27 @@ type FilterSpec struct {
 // .omc/specs/plan-mode-composite-intent.md follow-up).
 type MetricIntentParameter struct {
 	Name        string      `json:"name"`
-	Type        string      `json:"type"` // "int" | "string" | "property_filter"
+	Type        string      `json:"type"` // "int" | "string" | "property_filter" | "enum_ref"
 	Property    string      `json:"property,omitempty"`
 	Op          string      `json:"op,omitempty"`
 	Default     interface{} `json:"default,omitempty"`
 	Optional    bool        `json:"optional,omitempty"`
 	Description string      `json:"description,omitempty"`
 	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
+
+	// AllowedValues — runtime view used only when Type=="enum_ref".
+	// Populated by recall-server (queries lakehouse_keyword for the
+	// project + property) so the prompt renderer can surface the finite
+	// candidate set to the LLM. Mirrors smartquery.IntentParameter's
+	// AllowedValues semantics — spec
+	// .omc/specs/bounded-value-ref-contract.md §3.3.
+	//
+	// JSON-tagged (NOT json:"-") because the wire path is recall-server
+	// → agent-server: the upstream service queries the keyword set and
+	// hands the result over the network. Empty/missing on the wire =
+	// "candidate set unavailable / too large", rendering then degrades to
+	// the type:string form (no candidate hint).
+	AllowedValues []string `json:"allowedValues,omitempty"`
 }
 
 type MetricIntent struct {

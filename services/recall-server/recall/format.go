@@ -367,10 +367,28 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, _ []string) {
 					}
 					targetStr = fmt.Sprintf(" → filter `%s %s {value}`", p.Property, op)
 				}
+			case "enum_ref":
+				op := p.Op
+				if op == "" {
+					op = "="
+				}
+				targetStr = fmt.Sprintf(" → filter `%s %s {value}`", p.Property, op)
 			}
 			desc := p.Description
 			if desc == "" {
 				desc = "（无说明）"
+			}
+			// enum_ref with candidates — render the finite candidate set
+			// inline. Spec .omc/specs/bounded-value-ref-contract.md §3.3:
+			// without the list the LLM guesses → PARAM_VALUE_UNKNOWN retry
+			// loop. Empty AllowedValues (recall couldn't resolve or list >
+			// cap) falls through to the plain line so the markdown stays
+			// clean.
+			if p.Type == "enum_ref" && len(p.AllowedValues) > 0 {
+				sb.WriteString(fmt.Sprintf("    - `%s` (%s, %s%s, **必须从以下选一个**: %s)%s — %s\n",
+					p.Name, p.Type, required, defaultStr,
+					strings.Join(p.AllowedValues, ", "), targetStr, desc))
+				continue
 			}
 			sb.WriteString(fmt.Sprintf("    - `%s` (%s, %s%s)%s — %s\n",
 				p.Name, p.Type, required, defaultStr, targetStr, desc))

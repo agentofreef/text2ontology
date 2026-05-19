@@ -3,6 +3,7 @@ package smartquery
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // BindIntentParams applies LLM-provided params to spec per the intent's
@@ -102,6 +103,61 @@ func applyOneParam(spec *QuerySpec, p IntentParameter, raw interface{}) error {
 			spec.Filters = append(spec.Filters, FilterItem{
 				Prop: p.Property, Op: op, Value: s, FuzzyMatch: p.FuzzyMatch,
 			})
+		}
+	case "enum_ref":
+		// Bounded value-ref contract — spec
+		// .omc/specs/bounded-value-ref-contract.md. Lock-step copy of the
+		// agent-server case (services/agent-server/smartquery/intent_params.go).
+		// Both implementations must stay byte-for-byte equivalent on rules so
+		// the dry-run validator here and the runtime binder in agent-server
+		// produce the same ResolveError codes for the same inputs.
+		if p.Property == "" {
+			return &ResolveError{
+				Code:    "PARAM_SCHEMA_INVALID",
+				Message: fmt.Sprintf("参数 %q 类型 enum_ref 必须声明 property", p.Name),
+				Detail:  map[string]any{"name": p.Name},
+			}
+		}
+		s, ok := coerceString(raw)
+		if !ok {
+			return &ResolveError{
+				Code:    "PARAM_TYPE_ERROR",
+				Message: fmt.Sprintf("参数 %q 期望 string 值（enum_ref），得到 %v (%T)", p.Name, raw, raw),
+				Detail:  map[string]any{"name": p.Name, "got": raw},
+			}
+		}
+		op := p.Op
+		if op == "" {
+			op = "="
+		}
+		// nil AllowedValues = caller signaled "no candidate context"; fall
+		// back to type:string semantics so ValidateIntentDryRun (no DB) and
+		// legacy callers keep working.
+		if p.AllowedValues == nil {
+			spec.Filters = append(spec.Filters, FilterItem{
+				Prop: p.Property, Op: op, Value: s, FuzzyMatch: p.FuzzyMatch,
+			})
+			return nil
+		}
+		trimmed := strings.TrimSpace(s)
+		for _, av := range p.AllowedValues {
+			if strings.EqualFold(strings.TrimSpace(av), trimmed) {
+				spec.Filters = append(spec.Filters, FilterItem{
+					Prop: p.Property, Op: op, Value: av, FuzzyMatch: p.FuzzyMatch,
+				})
+				return nil
+			}
+		}
+		allowedCopy := append([]string(nil), p.AllowedValues...)
+		return &ResolveError{
+			Code: "PARAM_VALUE_UNKNOWN",
+			Message: fmt.Sprintf("参数 %s 的值 %q 不在已知集合中。可选：[%s]",
+				p.Name, s, strings.Join(p.AllowedValues, ", ")),
+			Detail: map[string]any{
+				"param":   p.Name,
+				"got":     s,
+				"allowed": allowedCopy,
+			},
 		}
 	case "property_filter":
 		if p.Property == "" {

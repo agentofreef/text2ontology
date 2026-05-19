@@ -418,6 +418,20 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, recalledOds []stri
 			if desc == "" {
 				desc = "（无说明）"
 			}
+			// enum_ref + populated AllowedValues — render the candidate set
+			// inline so the LLM picks instead of guesses. Spec §3.3 makes
+			// this mandatory, NOT a cosmetic upgrade: without the candidate
+			// hint the LLM consistently invents plausible-but-wrong values
+			// and the binder responds with PARAM_VALUE_UNKNOWN, burning
+			// retries. When AllowedValues is empty (recall couldn't resolve
+			// the set or it exceeded the 50-cap) fall back to the plain
+			// line — no half-rendered "必须从以下选一个: " with an empty list.
+			if p.Type == "enum_ref" && len(p.AllowedValues) > 0 {
+				sb.WriteString(fmt.Sprintf("    - `%s` (%s, %s%s, **必须从以下选一个**: %s) — %s\n",
+					p.Name, p.Type, required, defaultStr,
+					strings.Join(p.AllowedValues, ", "), desc))
+				continue
+			}
 			sb.WriteString(fmt.Sprintf("    - `%s` (%s, %s%s) — %s\n",
 				p.Name, p.Type, required, defaultStr, desc))
 		}

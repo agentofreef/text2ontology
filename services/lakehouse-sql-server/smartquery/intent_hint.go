@@ -81,6 +81,20 @@ type IntentParameter struct {
 	Optional    bool        `json:"optional,omitempty"`
 	Description string      `json:"description,omitempty"`
 	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
+
+	// AllowedValues is a runtime-only view (not persisted in JSON). For
+	// Type=="enum_ref" the caller (handler) populates this slice from the
+	// project's lakehouse_keyword table — see spec
+	// .omc/specs/bounded-value-ref-contract.md §3.2. Semantics:
+	//   - nil   → caller could not / chose not to populate (e.g. dry-run
+	//             save validation without DB context); binding falls back
+	//             to Type="string" pass-through. Preserves backward compat
+	//             so structural validators still pass.
+	//   - non-nil (possibly empty) → caller asserts this is the full
+	//             candidate set; binding fails loudly with PARAM_VALUE_UNKNOWN
+	//             when the LLM-supplied value is not in the set.
+	// json:"-" so it doesn't accidentally serialize back into Intent records.
+	AllowedValues []string `json:"-"`
 }
 
 // applyIntentHint mutates spec in place per the rules originally implemented

@@ -7,12 +7,18 @@
 //
 // Reference grammar:
 //   「tN」                                 → the whole table tN
+//   「tN.col[i]」                           → a single cell: column col, row i
+//                                            (0-based) of table tN
 //   「<expr>」                              → an arithmetic expression, evaluated
 //                                            to a scalar
 //
 // An <expr> is built from:
-//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE fcol='value')
+//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE fcol=<val>)
 //                       agg ∈ sum|avg|count|min|max
+//                       <val> is either a literal ('上海') or a cell ref
+//                       tN.col[i] — a cell ref pulls the filter value out of
+//                       real data, so it is never a literal the LLM typed
+//                       (and therefore never mistyped / hallucinated)
 //   - numeric literals
 //   - operators + - * /  and parentheses
 //
@@ -53,6 +59,8 @@ const SCALAR_RE = /^([a-zA-Z_]+)\(\s*(.+?)\s*\)$/
 const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(\S+?)\s*==?\s*(.+?))?$/i
 // tN
 const TABLE_RE = /^(t\d+)$/
+// tN.col[i] — one cell: column `col`, row i (0-based) of step tN.
+const CELL_RE = /^(t\d+)\.([^[\]]+)\[(\d+)\]$/
 
 // stripQuotes removes a single pair of surrounding ' or " quotes.
 function stripQuotes(s: string): string {
@@ -184,6 +192,26 @@ export function rowsToMarkdownTable(rows: Array<Record<string, unknown>>): strin
 }
 
 /**
+ * resolveCellRef resolves a single-cell reference `tN.col[i]` to its raw cell
+ * value as a string, or null if it cannot be resolved. The value is returned
+ * verbatim (no number formatting) so it is usable as a filter value — the
+ * point of a cell ref is that the value comes from real data, never typed.
+ */
+function resolveCellRef(text: string, steps: Map<string, StepResult>): string | null {
+  const m = text.trim().match(CELL_RE)
+  if (!m) return null
+  const step = steps.get(m[1])
+  if (!step) return null
+  const idx = Number(m[3])
+  if (!Number.isInteger(idx) || idx < 0 || idx >= step.rows.length) return null
+  const row = step.rows[idx]
+  const column = resolveColumn(Object.keys(row), m[2].trim())
+  if (!column) return null
+  const v = row[column]
+  return v === null || v === undefined ? null : String(v)
+}
+
+/**
  * resolveScalarRef resolves ONE aggregate atom — agg(tN.column) optionally with
  * a WHERE clause — to a number, or null if it cannot be resolved.
  */
@@ -197,7 +225,20 @@ function resolveScalarRef(refText: string, steps: Map<string, StepResult>): numb
   const stepId = inner[1]
   const column = inner[2].trim()
   const filterCol = inner[3]?.trim()
-  const filterVal = inner[4] !== undefined ? stripQuotes(inner[4]) : undefined
+  // The filter value is either a cell ref (tN.col[i] — resolved from real
+  // data) or a quoted literal. A cell ref that fails to resolve aborts the
+  // whole reference (null) rather than degrading to a literal lookup.
+  let filterVal: string | undefined
+  if (inner[4] !== undefined) {
+    const rawVal = inner[4].trim()
+    if (CELL_RE.test(rawVal)) {
+      const cell = resolveCellRef(rawVal, steps)
+      if (cell === null) return null
+      filterVal = cell
+    } else {
+      filterVal = stripQuotes(rawVal)
+    }
+  }
 
   const step = steps.get(stepId)
   if (!step) return null
@@ -334,6 +375,14 @@ export function resolveReference(inner: string, steps: Map<string, StepResult>):
   if (table) {
     const step = steps.get(table[1])
     return step ? rowsToMarkdownTable(step.rows) : null
+  }
+
+  // single-cell form  tN.col[i]
+  if (CELL_RE.test(trimmed)) {
+    const cell = resolveCellRef(trimmed, steps)
+    if (cell === null) return null
+    const n = toNum(cell)
+    return n !== null ? formatNumber(n) : cell
   }
 
   // arithmetic expression (a single agg(...) atom is a one-term expression)

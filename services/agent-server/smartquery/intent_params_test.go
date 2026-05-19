@@ -2,6 +2,7 @@ package smartquery
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,136 @@ func TestBindIntentParams_UnknownType(t *testing.T) {
 	err := BindIntentParams(spec, map[string]interface{}{"x": "v"}, schema)
 	if err == nil {
 		t.Fatal("expected unknown type rejected")
+	}
+}
+
+// T1 · enum_ref schema validation — type without a Property declaration
+// must fail with PARAM_SCHEMA_INVALID. This is the schema-level guard that
+// catches "someone wrote type:enum_ref but forgot which property's keyword
+// table to look up" — an Intent author mistake, not an LLM mistake.
+func TestBindIntentParams_EnumRefMissingProperty(t *testing.T) {
+	spec := &QuerySpec{}
+	schema := []IntentParameter{
+		{Name: "city", Type: "enum_ref" /* no Property */, Optional: true},
+	}
+	err := BindIntentParams(spec, map[string]interface{}{"city": "上海"}, schema)
+	if err == nil {
+		t.Fatal("expected schema-invalid rejection for enum_ref without property")
+	}
+	var re *ResolveError
+	if !errors.As(err, &re) || re.Code != "PARAM_SCHEMA_INVALID" {
+		t.Errorf("expected PARAM_SCHEMA_INVALID, got code=%q err=%v",
+			func() string {
+				if re != nil {
+					return re.Code
+				}
+				return ""
+			}(), err)
+	}
+}
+
+// T2 · enum_ref happy path — value in AllowedValues matches and produces a
+// FilterItem with the canonical (allowed-list) value.
+func TestBindIntentParams_EnumRefHappy(t *testing.T) {
+	spec := &QuerySpec{}
+	schema := []IntentParameter{
+		{
+			Name: "city", Type: "enum_ref", Property: "city", Optional: true,
+			AllowedValues: []string{"上海", "北京"},
+		},
+	}
+	err := BindIntentParams(spec, map[string]interface{}{"city": "上海"}, schema)
+	if err != nil {
+		t.Fatalf("expected enum_ref happy bind, got %v", err)
+	}
+	if len(spec.Filters) != 1 {
+		t.Fatalf("expected 1 filter, got %d (%+v)", len(spec.Filters), spec.Filters)
+	}
+	f := spec.Filters[0]
+	if f.Prop != "city" || f.Op != "=" || f.Value != "上海" {
+		t.Errorf("expected city=上海 filter, got %+v", f)
+	}
+}
+
+// T3 · enum_ref unhappy path — value not in AllowedValues must fail loudly
+// with PARAM_VALUE_UNKNOWN and the message + detail must list candidates so
+// the agent loop can pick a valid one on retry.
+func TestBindIntentParams_EnumRefUnknown(t *testing.T) {
+	spec := &QuerySpec{}
+	schema := []IntentParameter{
+		{
+			Name: "city", Type: "enum_ref", Property: "city", Optional: true,
+			AllowedValues: []string{"上海", "北京"},
+		},
+	}
+	err := BindIntentParams(spec, map[string]interface{}{"city": "Mars"}, schema)
+	if err == nil {
+		t.Fatal("expected PARAM_VALUE_UNKNOWN for value not in allowed list")
+	}
+	var re *ResolveError
+	if !errors.As(err, &re) || re.Code != "PARAM_VALUE_UNKNOWN" {
+		t.Fatalf("expected PARAM_VALUE_UNKNOWN, got %v", err)
+	}
+	// Message must surface "Mars" + both allowed values so the agent's
+	// next-retry decision is unambiguous.
+	if !strings.Contains(re.Message, "Mars") {
+		t.Errorf("message must include offending value %q, got %q", "Mars", re.Message)
+	}
+	if !strings.Contains(re.Message, "上海") || !strings.Contains(re.Message, "北京") {
+		t.Errorf("message must list allowed values, got %q", re.Message)
+	}
+	// Detail must carry a complete machine-readable allowed slice so a future
+	// agent layer can render the prompt without re-parsing the human message.
+	allowed, _ := re.Detail["allowed"].([]string)
+	if len(allowed) != 2 || allowed[0] != "上海" || allowed[1] != "北京" {
+		t.Errorf("detail.allowed must equal [上海 北京], got %v", re.Detail["allowed"])
+	}
+	if got, _ := re.Detail["got"].(string); got != "Mars" {
+		t.Errorf("detail.got must equal %q, got %v", "Mars", re.Detail["got"])
+	}
+}
+
+// T4 · enum_ref tolerance — case-insensitive match (ASCII), trim leading /
+// trailing whitespace. Canonical Value is the AllowedValues entry, NOT the
+// raw LLM input — so SQL gets the DB literal.
+func TestBindIntentParams_EnumRefCaseAndTrim(t *testing.T) {
+	spec := &QuerySpec{}
+	schema := []IntentParameter{
+		{
+			Name: "city", Type: "enum_ref", Property: "city", Optional: true,
+			AllowedValues: []string{"上海", "Shanghai"},
+		},
+	}
+	if err := BindIntentParams(spec, map[string]interface{}{"city": "上海 "}, schema); err != nil {
+		t.Fatalf("expected trim match, got %v", err)
+	}
+	if got := spec.Filters[0].Value; got != "上海" {
+		t.Errorf("expected canonical 上海, got %q", got)
+	}
+	// Reset and try ASCII case-insensitive match.
+	spec.Filters = nil
+	if err := BindIntentParams(spec, map[string]interface{}{"city": "shanghai"}, schema); err != nil {
+		t.Fatalf("expected case-insensitive match, got %v", err)
+	}
+	if got := spec.Filters[0].Value; got != "Shanghai" {
+		t.Errorf("expected canonical Shanghai, got %q", got)
+	}
+}
+
+// Backward compat — enum_ref with NIL AllowedValues (e.g. dry-run validation
+// path where caller has no DB context) MUST NOT fail; it falls back to
+// string-typed behavior. Otherwise dry-run save would refuse every Intent
+// that uses enum_ref.
+func TestBindIntentParams_EnumRefNilAllowedFallback(t *testing.T) {
+	spec := &QuerySpec{}
+	schema := []IntentParameter{
+		{Name: "city", Type: "enum_ref", Property: "city", Optional: true /* AllowedValues unset */},
+	}
+	if err := BindIntentParams(spec, map[string]interface{}{"city": "anything"}, schema); err != nil {
+		t.Fatalf("nil AllowedValues must skip strict check, got %v", err)
+	}
+	if len(spec.Filters) != 1 || spec.Filters[0].Value != "anything" {
+		t.Errorf("expected pass-through filter when AllowedValues is nil, got %+v", spec.Filters)
 	}
 }
 

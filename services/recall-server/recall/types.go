@@ -129,13 +129,27 @@ type FilterSpec struct {
 // canonical) — keep field names identical so JSON unmarshals are interchangeable.
 type MetricIntentParameter struct {
 	Name        string      `json:"name"`
-	Type        string      `json:"type"` // "int" | "string" | "property_filter"
+	Type        string      `json:"type"` // "int" | "string" | "property_filter" | "enum_ref"
 	Property    string      `json:"property,omitempty"`
 	Op          string      `json:"op,omitempty"`
 	Default     interface{} `json:"default,omitempty"`
 	Optional    bool        `json:"optional,omitempty"`
 	Description string      `json:"description,omitempty"`
 	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
+
+	// AllowedValues — runtime view for Type=="enum_ref". recall-server
+	// queries lakehouse_keyword (project_id + property name) and fills
+	// this slice before serializing the MetricIntent to agent-server. The
+	// agent-server prompt renderer (recall/format.go::formatMetricIntent)
+	// reads this to surface the candidate set to the LLM, and the bound
+	// value-ref binder (smartquery.BindIntentParams) uses the matching
+	// slice on smartquery.IntentParameter to fail loudly on unknown
+	// values. Spec: .omc/specs/bounded-value-ref-contract.md §3.3.
+	//
+	// Wire semantics: empty / missing on the wire = "candidate set
+	// unavailable or too large", rendering and binding both degrade to
+	// string-typed pass-through.
+	AllowedValues []string `json:"allowedValues,omitempty"`
 }
 
 // MetricIntent represents a recalled "query intent shortcut" — a canonical

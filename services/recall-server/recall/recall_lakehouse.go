@@ -1346,6 +1346,13 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 				params = nil
 			}
 		}
+		// Bounded value-ref contract (spec
+		// .omc/specs/bounded-value-ref-contract.md §3.3): populate
+		// AllowedValues for every enum_ref parameter so the agent-server
+		// prompt renderer can list candidates to the LLM. Cheap noop for
+		// intents without enum_ref params (hot path stays unchanged for
+		// every existing Intent).
+		params = fillEnumRefAllowedValues(db, projectID, params)
 		mi := MetricIntent{
 			IntentID:           id,
 			Name:               name,

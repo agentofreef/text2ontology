@@ -3,6 +3,7 @@ package smartquery
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // BindIntentParams applies LLM-provided params to spec per the intent's
@@ -108,6 +109,80 @@ func applyOneParam(spec *QuerySpec, p IntentParameter, raw interface{}) error {
 			spec.Filters = append(spec.Filters, FilterItem{
 				Prop: p.Property, Op: op, Value: s, FuzzyMatch: p.FuzzyMatch,
 			})
+		}
+	case "enum_ref":
+		// Bounded value-ref contract — spec
+		// .omc/specs/bounded-value-ref-contract.md. The Intent declares the
+		// param value MUST come from a finite set (the project's
+		// lakehouse_keyword rows for p.Property). The caller has already
+		// resolved that set into p.AllowedValues; the binder is pure and
+		// only compares against that in-memory list.
+		//
+		// Three failure modes worth distinguishing:
+		//   1. Schema bug: p.Property is empty → PARAM_SCHEMA_INVALID.
+		//      Catches "wrote type:enum_ref but forgot which keyword
+		//      column" early, before any LLM input is examined.
+		//   2. Caller didn't populate AllowedValues (nil slice) → fall back
+		//      to type:string pass-through. Required by dry-run save
+		//      validation, which has no DB to enumerate candidates with.
+		//   3. AllowedValues populated AND raw not in it → PARAM_VALUE_UNKNOWN
+		//      with full candidate list, so the agent loop can choose a
+		//      valid one without guessing.
+		if p.Property == "" {
+			return &ResolveError{
+				Code:    "PARAM_SCHEMA_INVALID",
+				Message: fmt.Sprintf("参数 %q 类型 enum_ref 必须声明 property", p.Name),
+				Detail:  map[string]any{"name": p.Name},
+			}
+		}
+		s, ok := coerceString(raw)
+		if !ok {
+			return &ResolveError{
+				Code:    "PARAM_TYPE_ERROR",
+				Message: fmt.Sprintf("参数 %q 期望 string 值（enum_ref），得到 %v (%T)", p.Name, raw, raw),
+				Detail:  map[string]any{"name": p.Name, "got": raw},
+			}
+		}
+		op := p.Op
+		if op == "" {
+			op = "="
+		}
+		// nil AllowedValues = caller signaled "no candidate context"; behave
+		// like type:string so dry-run / legacy callers don't regress.
+		if p.AllowedValues == nil {
+			spec.Filters = append(spec.Filters, FilterItem{
+				Prop: p.Property, Op: op, Value: s, FuzzyMatch: p.FuzzyMatch,
+			})
+			return nil
+		}
+		// Strict mode: match against the candidate set. Match rules mirror
+		// the corrector's Tier 1 (case-insensitive) plus a defensive Trim
+		// so trailing whitespace from the LLM doesn't tank the bind. The
+		// canonical value we push is the AllowedValues entry, NOT the raw
+		// LLM string — that way the FilterItem.Value matches the DB literal
+		// exactly even when LLM typed `shanghai` for `Shanghai`.
+		trimmed := strings.TrimSpace(s)
+		for _, av := range p.AllowedValues {
+			if strings.EqualFold(strings.TrimSpace(av), trimmed) {
+				spec.Filters = append(spec.Filters, FilterItem{
+					Prop: p.Property, Op: op, Value: av, FuzzyMatch: p.FuzzyMatch,
+				})
+				return nil
+			}
+		}
+		// Snapshot the allowed slice into Detail so callers can render a
+		// hint without re-reading the schema; copy avoids the caller mutating
+		// the schema's slice through the error.
+		allowedCopy := append([]string(nil), p.AllowedValues...)
+		return &ResolveError{
+			Code: "PARAM_VALUE_UNKNOWN",
+			Message: fmt.Sprintf("参数 %s 的值 %q 不在已知集合中。可选：[%s]",
+				p.Name, s, strings.Join(p.AllowedValues, ", ")),
+			Detail: map[string]any{
+				"param":   p.Name,
+				"got":     s,
+				"allowed": allowedCopy,
+			},
 		}
 	case "property_filter":
 		if p.Property == "" {
