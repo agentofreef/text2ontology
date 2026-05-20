@@ -42,6 +42,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # QEMU lets the amd64 runner emulate arm64 so build-push-action can
+      # produce a multi-arch manifest (Apple Silicon / arm servers can then
+      # pull natively). arm64 layers build under emulation and are slower.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -77,6 +83,7 @@ jobs:
           # so a per-service context would break vendor / go.work resolution.
           context: .
           file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
