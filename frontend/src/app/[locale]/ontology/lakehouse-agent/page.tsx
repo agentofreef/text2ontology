@@ -631,7 +631,7 @@ function LakehouseAgentChat() {
   const pendingBranchSwitch = useRef<PendingSwitch | null>(null)
 
   const [graphFullscreen, setGraphFullscreen] = useState(false)
-  const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-all')
+  const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-od')
 
   // Agent LLM binding — 让用户在顶部直接切换 Agent 用的模型，
   // 写入 /llm-role-binding（roleName=agent）。下一轮发送即生效。
@@ -847,6 +847,10 @@ function LakehouseAgentChat() {
       const decoder = new TextDecoder()
       let buffer = ''
       let current: ChatMessage = { role: 'assistant', content: '', functionCalls: [] }
+      // Effective thread id for this stream — the closure's threadId is stale
+      // for a brand-new thread (empty at send time); the 'thread' event below
+      // fills it in. Used to live-refetch the mission ledger as the turn runs.
+      let streamThreadId = threadId
 
       while (true) {
         const { done, value } = await reader.read()
@@ -862,6 +866,7 @@ function LakehouseAgentChat() {
           try {
             const evt = JSON.parse(data) as Record<string, unknown>
             if (evt.type === 'thread' && evt.threadId) {
+              streamThreadId = evt.threadId as string
               setThreadId(evt.threadId as string)
               // Reconcile mode if backend reported a different agentType
               const incomingAgentType = evt.agentType as string | undefined
@@ -909,6 +914,14 @@ function LakehouseAgentChat() {
               n[assistantIdx] = { ...current }
               return n
             })
+            // Live-refresh the 任务可达器 panel on every structural SSE event
+            // (a new turn step, tool call, todo update, done) — but NOT on the
+            // streaming text events (token / thinking), which fire per-character
+            // and would hammer the endpoint. The reachability verdict lands
+            // early in the turn, so this surfaces it without waiting for 'done'.
+            if (evt.type !== 'token' && evt.type !== 'thinking') {
+              void refetchMissions(streamThreadId)
+            }
           } catch { /* skip */ }
         }
       }
@@ -1121,7 +1134,8 @@ function LakehouseAgentChat() {
             </div>
           </div>
 
-          {/* ECharts Graph — unchanged (industrial-colored per spec) */}
+          {/* ECharts Graph — top half of the left pane (50/50 with the
+              reachability panel below; full height when graph is fullscreen). */}
           <OntologyGraph
             className="flex-1 min-h-0 w-full"
             markedObjects={markedObjects}
@@ -1135,11 +1149,10 @@ function LakehouseAgentChat() {
             layoutMode={graphLayoutMode}
           />
 
-          {/* 任务可达器 (MissionAct) — replaces the legacy Objects/Od list.
-              Always present; shows an empty-state line when the current
-              thread has no missions. max-h caps it so the graph keeps room. */}
+          {/* 任务可达器 (MissionAct) — bottom half of the left pane. Shows the
+              current mission's full detail inline; history opens a modal. */}
           {!graphFullscreen && (
-            <div className="max-h-[40%] flex flex-col min-h-0">
+            <div className="flex-1 flex flex-col min-h-0">
               <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
             </div>
           )}
