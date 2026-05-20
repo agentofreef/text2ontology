@@ -1,35 +1,62 @@
-# docker-compose.yml — lakehouse2ontology Phase 0 service mesh
+# docker-compose.yml — lakehouse2ontology service mesh
 #
-# Per plan OQ-1: external Postgres at 172.18.96.1:5438 is the default.
-# The `postgres` service below is OPTIONAL — uncomment the `postgres` block
-# and the `depends_on` postgres entries to run a local Postgres instead.
+# Architecture: `gateway` (nginx) is the SOLE external port-forwarding
+# entry/exit for the whole stack. Every other service binds only on the
+# compose network; the gateway proxies the public URL surface (frontend +
+# /api/* + /connector/* + /mcp + /api/mcp/*) to the right service via
+# compose DNS. See services/gateway/nginx.conf for the routing rules.
+# Postgres is the one deliberate exception — its 5438 port stays open for
+# DB administration tooling.
 #
 # Operator checklist before first run:
 #   cp .env.shared.example .env.shared   # fill in DATABASE_URL + API keys
 #   docker compose up -d
-#   for p in 8090 8092 8093 8094 8095; do curl -s localhost:$p/healthz; done
+#   curl -s http://localhost:18080/healthz   # gateway liveness
+#   open  http://localhost:18080             # UI (or http://localhost:10020)
 
 services:
 
-  # ── Frontend + API gateway (unified entrypoint) ─────────────────────────────
-  # nginx:alpine serves the Next.js static export AND reverse-proxies
-  # /lakehouse/api/* to the correct sidecar (agent-server / recall-server /
-  # backend-api). Two host ports:
-  #   - 18080 : legacy, kept for dev / scripts that still hit it directly
-  #   - 10020 : canonical public entrypoint; put your reverse proxy or
-  #             firewall rule in front of this one
-  # Bundle is built with empty NEXT_PUBLIC_*_URL so the browser uses
-  # same-origin URLs — no cross-origin cookies, no CORS preflight for
-  # internal calls (backend CORSMiddleware still accepts external origins
-  # configured via CORS_ALLOW_ORIGINS).
+  # ── Gateway: SOLE external port-forwarding ingress ──────────────────────────
+  # text2ontology-gateway is a thin nginx that reverse-proxies the public URL
+  # surface to the right service over compose DNS. The browser hits ONE host
+  # port; every other service binds only on the compose network. See
+  # services/gateway/nginx.conf for the authoritative routing rules.
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-gateway:latest
+    ports:
+      - "18080:80"
+      - "10020:80"
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+      agent-server:
+        condition: service_healthy
+      collector-server:
+        condition: service_healthy
+      mcp-tools-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── Frontend (Next.js static, served by an internal nginx) ─────────────────
+  # Reached only via the gateway in production; bundle is built with empty
+  # NEXT_PUBLIC_*_URL so the browser uses same-origin URLs that the gateway
+  # then dispatches by path.
   frontend:
     build:
       context: .
       dockerfile: services/frontend/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-frontend:latest
-    ports:
-      - "18080:80"
-      - "10020:80"
     depends_on:
       backend-api:
         condition: service_healthy
@@ -60,8 +87,6 @@ services:
       context: .
       dockerfile: services/backend-api/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-backend-api:latest
-    ports:
-      - "18090:8090"
     command: ["-port", "8090"]
     env_file:
       - .env.shared
@@ -94,8 +119,6 @@ services:
       context: .
       dockerfile: services/agent-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-agent-server:latest
-    ports:
-      - "18092:8092"
     command: ["-port", "8092"]
     env_file:
       - .env.shared
@@ -130,8 +153,6 @@ services:
       context: .
       dockerfile: services/recall-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-recall-server:latest
-    ports:
-      - "18093:8093"
     command: ["-port", "8093"]
     env_file:
       - .env.shared
@@ -158,8 +179,6 @@ services:
       context: .
       dockerfile: services/lakehouse-sql-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:latest
-    ports:
-      - "18094:8094"
     command: ["-port", "8094"]
     env_file:
       - .env.shared
@@ -190,8 +209,6 @@ services:
       context: .
       dockerfile: services/mcp-tools-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:latest
-    ports:
-      - "18095:8095"
     command: ["-port", "8095"]
     env_file:
       - .env.shared
@@ -228,8 +245,6 @@ services:
       context: .
       dockerfile: services/collector-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-collector-server:latest
-    ports:
-      - "18096:8096"
     command: ["-port", "8096"]
     env_file:
       - .env.shared
