@@ -3,10 +3,6 @@
 import { useTranslations } from 'next-intl'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
-  ReactFlow,
-  Background,
-  Controls,
-  MiniMap,
   type Node,
   type Edge,
   type NodeTypes,
@@ -14,8 +10,7 @@ import {
   useEdgesState,
   MarkerType,
 } from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
-import dagre from '@dagrejs/dagre'
+import { ErCanvas, layoutGraph } from '@/components/er-canvas/ErCanvas'
 import { useProject } from '@/lib/project'
 import { api } from '@/lib/api'
 import { useStyleMode } from '@/lib/style-mode'
@@ -30,35 +25,6 @@ import { Plus, Network } from 'lucide-react'
 
 const nodeTypes: NodeTypes = {
   erTable: TableNode as unknown as NodeTypes['erTable'],
-}
-
-const NODE_WIDTH = 220
-const NODE_HEIGHT = 100
-
-function layoutGraph(nodes: Node[], edges: Edge[]): Node[] {
-  const g = new dagre.graphlib.Graph()
-  g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'LR', nodesep: 60, ranksep: 100 })
-
-  for (const node of nodes) {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT })
-  }
-  for (const edge of edges) {
-    g.setEdge(edge.source, edge.target)
-  }
-
-  dagre.layout(g)
-
-  return nodes.map((node) => {
-    const pos = g.node(node.id)
-    return {
-      ...node,
-      position: {
-        x: pos.x - NODE_WIDTH / 2,
-        y: pos.y - NODE_HEIGHT / 2,
-      },
-    }
-  })
 }
 
 export default function ErDiagramPageMinimal() {
@@ -351,7 +317,7 @@ export default function ErDiagramPageMinimal() {
         <DataLoader loading={loading} message={t('loading')} minHeight="50vh">
         <div className="flex flex-1 overflow-hidden">
           <div className="flex-1 relative">
-            <ReactFlow
+            <ErCanvas
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
@@ -360,24 +326,14 @@ export default function ErDiagramPageMinimal() {
               onNodeClick={handleNodeClick}
               onEdgeClick={handleEdgeClick}
               onPaneClick={handlePaneClick}
-              fitView
-              fitViewOptions={{ padding: 0.2 }}
-              minZoom={0.1}
-              maxZoom={2}
-            >
-              <Background gap={16} color="#F3F4F6" />
-              <Controls />
-              <MiniMap
-                nodeColor={(n) => {
-                  const origin = (n.data as unknown as ErNode).origin
-                  if (origin === 'pbix-data') return '#BFDBFE'
-                  if (origin === 'manual-upload') return '#0A0A0A'
-                  if (origin === 'derived-view') return '#D1D5DB'
-                  return '#E5E7EB'
-                }}
-                style={{ border: '1px solid #E5E7EB', borderRadius: 8 }}
-              />
-            </ReactFlow>
+              miniMapNodeColor={(n) => {
+                const origin = (n.data as unknown as ErNode).origin
+                if (origin === 'pbix-data') return '#BFDBFE'
+                if (origin === 'manual-upload') return '#0A0A0A'
+                if (origin === 'derived-view') return '#D1D5DB'
+                return '#E5E7EB'
+              }}
+            />
           </div>
 
           {sidePanelSelected && (

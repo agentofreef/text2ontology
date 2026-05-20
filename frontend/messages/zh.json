@@ -735,6 +735,8 @@
     "delete_title": "删除",
     "no_project_message": "未选择项目",
     "no_project_hint": "从左侧切换项目继续",
+    "view_architecture": "数据架构",
+    "view_list": "列表",
     "page_title": "湖仓对象",
     "page_subtitle": "{count} 对象 · SQL 语义层",
     "filter_all": "全部 ({count})",

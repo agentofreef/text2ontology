@@ -120,6 +120,7 @@ func handleObjects(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`SELECT id, project_id, name, COALESCE(display_name,''), kind,
 			COALESCE(description,''), COALESCE(source_table,''), bridged_from, mark, COALESCE(note,''),
 			COALESCE(semantic_sql,''), COALESCE(canonical_query,''), validated_at,
+			data_source_id::text,
 			created_at, updated_at
 			FROM ont_object_type
 			WHERE project_id = $1
@@ -135,12 +136,13 @@ func handleObjects(db *sql.DB) http.HandlerFunc {
 			var id, projectID, name, displayName, kind, desc, sourceTable, note string
 			var semanticSQL, canonicalQuery string
 			var validatedAt sql.NullTime
-			var bridgedFrom sql.NullString
+			var bridgedFrom, dataSourceID sql.NullString
 			var mark bool
 			var createdAt, updatedAt time.Time
 			rows.Scan(&id, &projectID, &name, &displayName, &kind, &desc, &sourceTable,
 				&bridgedFrom, &mark, &note,
 				&semanticSQL, &canonicalQuery, &validatedAt,
+				&dataSourceID,
 				&createdAt, &updatedAt)
 
 			// Fetch properties for this object. The two enrichment columns
@@ -192,9 +194,10 @@ func handleObjects(db *sql.DB) http.HandlerFunc {
 				"description": desc, "sourceTable": sourceTable,
 				"bridgedFrom": NullStr(bridgedFrom), "mark": mark, "note": note,
 				"semanticSql": semanticSQL, "canonicalQuery": canonicalQuery,
-				"validatedAt": NullTimeStr(validatedAt),
-				"properties":  props,
-				"createdAt":   createdAt.Format(time.RFC3339), "updatedAt": updatedAt.Format(time.RFC3339),
+				"validatedAt":  NullTimeStr(validatedAt),
+				"dataSourceId": NullStr(dataSourceID),
+				"properties":   props,
+				"createdAt":    createdAt.Format(time.RFC3339), "updatedAt": updatedAt.Format(time.RFC3339),
 			})
 		}
 		if list == nil {
@@ -303,17 +306,19 @@ func handleObjectByID(db *sql.DB) http.HandlerFunc {
 				projectID, name, displayName, kind, desc, sourceTable, note string
 				semanticSQL, canonicalQuery                                  string
 				validatedAt                                                  sql.NullTime
-				bridgedFrom                                                  sql.NullString
+				bridgedFrom, dataSourceID                                    sql.NullString
 				mark                                                         bool
 				createdAt, updatedAt                                         time.Time
 			)
 			err := db.QueryRow(`SELECT project_id, name, COALESCE(display_name,''), kind,
 				COALESCE(description,''), COALESCE(source_table,''), bridged_from, mark, COALESCE(note,''),
 				COALESCE(semantic_sql,''), COALESCE(canonical_query,''), validated_at,
+				data_source_id::text,
 				created_at, updated_at
 				FROM ont_object_type WHERE id = $1`, id).Scan(
 				&projectID, &name, &displayName, &kind, &desc, &sourceTable,
 				&bridgedFrom, &mark, &note, &semanticSQL, &canonicalQuery, &validatedAt,
+				&dataSourceID,
 				&createdAt, &updatedAt)
 			if err == sql.ErrNoRows {
 				w.WriteHeader(http.StatusNotFound)
@@ -370,9 +375,10 @@ func handleObjectByID(db *sql.DB) http.HandlerFunc {
 				"description": desc, "sourceTable": sourceTable,
 				"bridgedFrom": NullStr(bridgedFrom), "mark": mark, "note": note,
 				"semanticSql": semanticSQL, "canonicalQuery": canonicalQuery,
-				"validatedAt": NullTimeStr(validatedAt),
-				"properties":  props,
-				"createdAt":   createdAt.Format(time.RFC3339), "updatedAt": updatedAt.Format(time.RFC3339),
+				"validatedAt":  NullTimeStr(validatedAt),
+				"dataSourceId": NullStr(dataSourceID),
+				"properties":   props,
+				"createdAt":    createdAt.Format(time.RFC3339), "updatedAt": updatedAt.Format(time.RFC3339),
 			})
 			return
 		}

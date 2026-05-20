@@ -435,7 +435,9 @@ func handleImport(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		if _, err := PopulateOntology(tx, req.ProjectId, finalSchema, pbit, derivedResults); err != nil {
+		// The PBIT/PBIX batch import is keyed by import_id and has no data_source
+		// row, so leave data_source_id NULL ("").
+		if _, err := PopulateOntology(tx, req.ProjectId, finalSchema, pbit, derivedResults, ""); err != nil {
 			tx.Rollback() //nolint:errcheck
 			failImport("populate ontology: " + err.Error())
 			return

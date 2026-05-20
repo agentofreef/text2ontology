@@ -735,6 +735,8 @@
     "delete_title": "Delete",
     "no_project_message": "No project selected",
     "no_project_hint": "Switch project on the left to continue",
+    "view_architecture": "Data Architecture",
+    "view_list": "List",
     "page_title": "Lakehouse Objects",
     "page_subtitle": "{count} objects · SQL semantic layer",
     "filter_all": "All ({count})",

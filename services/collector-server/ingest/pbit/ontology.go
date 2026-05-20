@@ -31,11 +31,17 @@ type OntologyStats struct {
 //	                  link_name, fk_column, cardinality, mark
 //	ont_metric      : id, project_id, name, display_name,
 //	                  metric_type, mark
+// dsID is the data_source instance these objects were imported from. Pass ""
+// to leave ont_object_type.data_source_id NULL (e.g. the PBIT/PBIX batch path,
+// which is keyed by import_id and has no data_source row). When non-empty it is
+// inserted via NULLIF(dsID,'')::uuid so the data-architecture view can group
+// objects by their originating source.
 func PopulateOntology(
 	tx *sql.Tx,
 	projectID, schema string,
 	pbit *PbitSchema,
 	derived []DerivedResult,
+	dsID string,
 ) (OntologyStats, error) {
 	var stats OntologyStats
 
@@ -59,17 +65,18 @@ func PopulateOntology(
 		err := tx.QueryRow(`
 			INSERT INTO ont_object_type
 			  (project_id, name, display_name, kind,
-			   source_table, mark, source_type, origin)
+			   source_table, mark, source_type, origin, data_source_id)
 			VALUES
 			  ($1, $2, $3, 'entity',
-			   $4, false, 'csv', $5)
+			   $4, false, 'csv', $5, NULLIF($6,'')::uuid)
 			ON CONFLICT (project_id, name) DO UPDATE
-			  SET source_table = EXCLUDED.source_table,
-			      source_type  = EXCLUDED.source_type,
-			      origin       = EXCLUDED.origin
+			  SET source_table   = EXCLUDED.source_table,
+			      source_type    = EXCLUDED.source_type,
+			      origin         = EXCLUDED.origin,
+			      data_source_id = COALESCE(EXCLUDED.data_source_id, ont_object_type.data_source_id)
 			RETURNING id`,
 			projectID, t.Name, t.Name,
-			sourceTable, origin,
+			sourceTable, origin, dsID,
 		).Scan(&objID)
 		if err != nil {
 			return stats, fmt.Errorf("pbitlakehouse: insert ont_object_type %q: %w", t.Name, err)

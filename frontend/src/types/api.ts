@@ -94,6 +94,9 @@ export interface OntObjectType {
   description: string
   sourceTable: string
   sourceType: string
+  // dataSourceId links an object to its originating connector data source.
+  // Backend is rolling this out — treat missing/empty as null (folder grouping).
+  dataSourceId?: string | null
   bridgedFrom: string
   semanticSql: string
   canonicalQuery: string

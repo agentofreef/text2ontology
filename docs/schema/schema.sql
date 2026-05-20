@@ -610,6 +610,16 @@ ALTER TABLE ont_agent_thread ADD COLUMN IF NOT EXISTS thread_state JSONB DEFAULT
 -- source_type on ont_object_type
 ALTER TABLE ont_object_type ADD COLUMN IF NOT EXISTS source_type VARCHAR(30) DEFAULT 'powerbi';
 
+-- data_source_id: the data_source instance this object was imported from.
+-- NULL = manual/builder-created or legacy (the data-architecture view buckets
+-- NULL + file-type sources into a single shared "CSV folder"; pg/sqlite/pbi
+-- instances each render as their own node). ON DELETE SET NULL keeps objects
+-- when a source is removed. See docs/.../lakehouse-objects data-architecture view.
+ALTER TABLE ont_object_type ADD COLUMN IF NOT EXISTS data_source_id UUID
+  REFERENCES data_source(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_ont_object_type_data_source
+  ON ont_object_type(data_source_id) WHERE data_source_id IS NOT NULL;
+
 -- generated_sql on ont_query_log
 ALTER TABLE ont_query_log ADD COLUMN IF NOT EXISTS generated_sql TEXT;
 ALTER TABLE ont_query_log ADD COLUMN IF NOT EXISTS source_type VARCHAR(20) DEFAULT 'pipeline';
