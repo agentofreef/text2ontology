@@ -147,6 +147,55 @@ test('renderDataTemplates: no refs → unchanged', () => {
   assert.equal(renderDataTemplates('普通文本无引用', fcs), '普通文本无引用')
 })
 
+// ── cell-ref atoms in expressions + bare (index-less) column refs ──────────
+// Mirrors a real e2e failure: a multi-row channel table (t2) plus a
+// single-row total (t3), with the LLM writing cell arithmetic and a bare
+// scalar ref instead of forcing everything through agg(...).
+const cellFcs = [
+  {
+    result: {
+      step_id: 't2',
+      execution_result: JSON.stringify([
+        { channel: '堂食',   Total_amount: 17139065.69 },
+        { channel: '美团',   Total_amount: 5051860.88 },
+        { channel: '自营app', Total_amount: 0 },
+        { channel: '饿了么', Total_amount: 5027332.28 },
+      ]),
+    },
+  },
+  { result: { step_id: 't3', execution_result: JSON.stringify([{ Total_amount: 27218258.85 }]) } },
+]
+
+test('resolveReference: standalone bare cell ref on single-row table', () => {
+  const m = collectStepResults(cellFcs)
+  assert.equal(resolveReference('t3.Total_amount', m), '27,218,258.85')
+})
+
+test('resolveReference: bare cell ref on multi-row table → null (ambiguous)', () => {
+  const m = collectStepResults(cellFcs)
+  assert.equal(resolveReference('t2.Total_amount', m), null)
+})
+
+test('resolveReference: cell-ref arithmetic (sum of two rows)', () => {
+  const m = collectStepResults(cellFcs)
+  // 美团[1] + 饿了么[3] = 5,051,860.88 + 5,027,332.28 = 10,079,193.16
+  assert.equal(resolveReference('t2.Total_amount[1] + t2.Total_amount[3]', m), '10,079,193.16')
+})
+
+test('resolveReference: cell-ref ratio with bare scalar denominator', () => {
+  const m = collectStepResults(cellFcs)
+  // (5,051,860.88 + 5,027,332.28) / 27,218,258.85 * 100 = 37.03...
+  assert.equal(
+    resolveReference('(t2.Total_amount[1] + t2.Total_amount[3]) / t3.Total_amount * 100', m),
+    '37.03',
+  )
+})
+
+test('resolveReference: cell-ref atom out-of-range row → null', () => {
+  const m = collectStepResults(cellFcs)
+  assert.equal(resolveReference('t2.Total_amount[9] + t2.Total_amount[1]', m), null)
+})
+
 test('rowsToMarkdownTable: 1x1 result renders as a bare number', () => {
   assert.equal(rowsToMarkdownTable([{ total: 8380820 }]), '8,380,820')
 })

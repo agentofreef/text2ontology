@@ -61,6 +61,10 @@ const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(\S+?)\s*==?\s*(.+?))?$/i
 const TABLE_RE = /^(t\d+)$/
 // tN.col[i] — one cell: column `col`, row i (0-based) of step tN.
 const CELL_RE = /^(t\d+)\.([^[\]]+)\[(\d+)\]$/
+// tN.col — a column reference WITHOUT a row index. Only resolvable when the
+// table has exactly one row (a scalar result), in which case it means row 0.
+// LLMs naturally write this for single-value tables (e.g. a total).
+const BARE_CELL_RE = /^(t\d+)\.([^[\]]+)$/
 
 // stripQuotes removes a single pair of surrounding ' or " quotes.
 function stripQuotes(s: string): string {
@@ -213,12 +217,47 @@ function resolveCellRef(text: string, steps: Map<string, StepResult>): string | 
 }
 
 /**
- * resolveScalarRef resolves ONE aggregate atom — agg(tN.column) optionally with
- * a WHERE clause — to a number, or null if it cannot be resolved.
+ * resolveAtom resolves ONE expression atom to a number, or null. An atom is
+ * one of three forms (checked in this order):
+ *   - agg(tN.column [WHERE fcol=<val>])  — an aggregate
+ *   - tN.column[i]                       — a single cell (row i)
+ *   - tN.column                          — a column ref with no index, valid
+ *                                          only on a single-row (scalar) table
+ *
+ * The last two let the LLM write natural cell arithmetic like
+ *   (t2.amount[1] + t2.amount[3]) / t3.total * 100
+ * instead of forcing every term through an agg(...).
  */
-function resolveScalarRef(refText: string, steps: Map<string, StepResult>): number | null {
-  const scalar = refText.match(SCALAR_RE)
-  if (!scalar) return null
+function resolveAtom(refText: string, steps: Map<string, StepResult>): number | null {
+  const t = refText.trim()
+
+  // Form 2: single cell  tN.col[i]
+  if (CELL_RE.test(t)) {
+    const cell = resolveCellRef(t, steps)
+    return cell === null ? null : toNum(cell)
+  }
+
+  // Form 1: aggregate  agg(tN.col [WHERE ...])
+  const scalar = t.match(SCALAR_RE)
+  if (scalar && AGGS[scalar[1].toLowerCase()]) {
+    return resolveAggAtom(scalar, steps)
+  }
+
+  // Form 3: bare column ref  tN.col  (single-row table → row 0)
+  const bare = t.match(BARE_CELL_RE)
+  if (bare) {
+    const step = steps.get(bare[1])
+    if (!step || step.rows.length !== 1) return null // ambiguous unless scalar
+    const col = resolveColumn(Object.keys(step.rows[0]), bare[2].trim())
+    if (!col) return null
+    return toNum(step.rows[0][col])
+  }
+
+  return null
+}
+
+/** resolveAggAtom handles the agg(tN.col [WHERE fcol=val]) form. */
+function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>): number | null {
   const agg = AGGS[scalar[1].toLowerCase()]
   if (!agg) return null
   const inner = scalar[2].match(INNER_RE)
@@ -287,23 +326,43 @@ function tokenizeExpr(s: string): Token[] | null {
       i = j
       continue
     }
-    // identifier → must be an agg(...) atom with balanced parens
+    // identifier → an atom in one of three forms:
+    //   agg(...)        — word immediately followed by balanced parens
+    //   tN.col[i]       — a cell ref
+    //   tN.col          — a bare column ref (scalar table)
     if (/[a-zA-Z_]/.test(c)) {
       let j = i
-      while (j < n && /[a-zA-Z0-9_]/.test(s[j])) j++
+      while (j < n && /[a-zA-Z0-9_]/.test(s[j])) j++ // the leading word (agg name or tN)
       let k = j
       while (k < n && (s[k] === ' ' || s[k] === '\t')) k++
-      if (k >= n || s[k] !== '(') return null
-      let depth = 0
-      let m = k
-      for (; m < n; m++) {
-        if (s[m] === '(') depth++
-        else if (s[m] === ')') { depth--; if (depth === 0) { m++; break } }
+      if (k < n && s[k] === '(') {
+        // agg(...) — read to the matching close paren.
+        let depth = 0
+        let m = k
+        for (; m < n; m++) {
+          if (s[m] === '(') depth++
+          else if (s[m] === ')') { depth--; if (depth === 0) { m++; break } }
+        }
+        if (depth !== 0) return null
+        toks.push({ t: 'ref', v: s.slice(i, m).trim() })
+        i = m
+        continue
       }
-      if (depth !== 0) return null
-      toks.push({ t: 'ref', v: s.slice(i, m).trim() })
-      i = m
-      continue
+      if (j < n && s[j] === '.') {
+        // tN.col  or  tN.col[i] — read the column name up to a delimiter,
+        // then an optional [index].
+        let m = j + 1
+        while (m < n && !/[\s+\-*/()[\]]/.test(s[m])) m++
+        if (m < n && s[m] === '[') {
+          const close = s.indexOf(']', m)
+          if (close < 0) return null
+          m = close + 1
+        }
+        toks.push({ t: 'ref', v: s.slice(i, m).trim() })
+        i = m
+        continue
+      }
+      return null // bare identifier — not a valid atom
     }
     return null // unknown character
   }
@@ -320,7 +379,7 @@ function evalExpr(toks: Token[], steps: Map<string, StepResult>): number | null 
     if (tk.t === 'op' && tk.v === '-') { pos++; const f = parseFactor(); return f === null ? null : -f }
     if (tk.t === 'op' && tk.v === '+') { pos++; return parseFactor() }
     if (tk.t === 'num') { pos++; return tk.v }
-    if (tk.t === 'ref') { pos++; return resolveScalarRef(tk.v, steps) }
+    if (tk.t === 'ref') { pos++; return resolveAtom(tk.v, steps) }
     if (tk.t === 'lp') {
       pos++
       const e = parseExpr()
