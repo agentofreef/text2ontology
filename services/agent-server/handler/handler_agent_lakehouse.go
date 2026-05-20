@@ -637,6 +637,13 @@ params  按 Intent 的 parameters schema 填，常见 key：
 		}
 
 		odCatalog := buildODCatalogBlock(ctx, db, projectID)
+		// Real data coverage window — keeps the LLM from defaulting an
+		// unspecified period to the wall-clock year when the data lags it.
+		dataCoverage := dataCoverageWindow(db, projectID, recallResult.MetricIntents)
+		dataCoverageLine := ""
+		if dataCoverage != "" {
+			dataCoverageLine = "- 数据实际覆盖范围: " + dataCoverage + "\n  ⚠ 用户未指定时间范围时，**默认查询数据最新可用区间**（上面这个范围的末端），不要臆断为当前自然年——当前自然年很可能没有数据。\n"
+		}
 		systemPrompt := `你是 ` + projectName + ` 的数据湖仓分析助手。
 
 ` + odCatalog + `
@@ -786,7 +793,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 - 今天: ` + time.Now().Format("2006-01-02") + `
 - 去年同期: ` + time.Now().AddDate(-1, 0, 0).Format("2006-01-02") + `
-- 最近6个月: ` + time.Now().AddDate(0, -6, 0).Format("2006-01-02") + ` ~ ` + time.Now().Format("2006-01-02")
+- 最近6个月: ` + time.Now().AddDate(0, -6, 0).Format("2006-01-02") + ` ~ ` + time.Now().Format("2006-01-02") + `
+` + dataCoverageLine
 
 		// ── Override system prompt for branch (clarification) threads ──
 		// Branch threads get a distilled seed prompt with only the original question
