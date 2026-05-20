@@ -149,9 +149,11 @@ func buildIntentSpecs(intents []recall.MetricIntent) []mission.IntentSpec {
 		spec := mission.IntentSpec{Name: mi.Name}
 		for _, p := range mi.Parameters {
 			spec.Params = append(spec.Params, mission.IntentParam{
-				Name:     p.Name,
-				Type:     p.Type,
-				Property: p.Property,
+				Name:        p.Name,
+				Type:        p.Type,
+				Property:    p.Property,
+				Op:          p.Op,
+				Description: p.Description,
 			})
 		}
 		specs = append(specs, spec)

@@ -18,10 +18,18 @@ import (
 
 // IntentParam is the minimal declared-parameter view the coverage check
 // needs — a projection of lakehouse_metric_intent.parameters.
+//
+// Op and Description are carried so the *semantic* half of the coverage
+// check — does this parameter actually support the shape (range / prefix /
+// equality) the question asks for — has the evidence it needs. Without
+// them a question asking for a year range would silently match a
+// single-month prefix parameter, producing a false-positive verdict.
 type IntentParam struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`     // string | int | enum_ref | property_filter | ...
-	Property string `json:"property"` // the ontology property the param filters on
+	Name        string `json:"name"`
+	Type        string `json:"type"`     // string | int | enum_ref | property_filter | ...
+	Property    string `json:"property"` // the ontology property the param filters on
+	Op          string `json:"op,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // IntentSpec is a candidate Intent as the coverage check sees it.

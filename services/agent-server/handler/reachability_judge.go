@@ -3,20 +3,32 @@ package handler
 // reachability_judge.go — MissionAct 任务可达器 (reachability judge).
 //
 // Runs BEFORE the ReAct loop on every lakehouse question when
-// USE_MISSION_ACT is on. Two steps:
+// USE_MISSION_ACT is on. ONE LLM call does both decomposition AND
+// shape-aware coverage in one shot:
 //
-//  1. Decompose: one lean LLM call breaks the question into required
-//     elements (metrics, dimensions, filters). Fail-open: any LLM or
-//     parse error is logged and we fall through to the normal loop.
+//   - Decompose the question into required elements (metric / dimension /
+//     filter) plus the *shape* each one needs ("年范围", "单月前缀",
+//     "等值", "枚举集合", …).
+//   - For every dimension/filter, judge — based on the candidate Intent
+//     parameter table (property + op + type + description) — whether some
+//     Intent's parameter actually supports that shape, and name which.
 //
-//  2. Judge: pure deterministic call to mission.Judge — no LLM. A
-//     single uncovered dimension makes the whole question infeasible.
+// Pure name-match used to be enough but produced false positives: a
+// "year range" filter happily matched a "starts-with YYYY-MM" parameter
+// even though answering the question would need 13 separate calls. The
+// LLM gets the full parameter schema so it can refuse those.
+//
+// Deterministic guard rails in buildVerdictFromLLMHints:
+//   - covered_by names are sanitised against the real Intent set, so a
+//     hallucinated name cannot prop up a feasible verdict.
+//   - if the LLM says covered but cites no real intent, fall back to the
+//     declarative name match; if even that fails, force uncovered.
 //
 // Gate:
-//   - Feasible        → return nil (caller continues into ReAct loop).
+//   - Feasible        → return "" (caller continues into ReAct loop).
 //   - Infeasible      → return non-empty finalAnswer string (caller
 //     streams it and returns; no ReAct loop runs).
-//   - Judge skipped   → return nil (fail-open).
+//   - Judge skipped   → return "" (fail-open).
 //
 // All side-effects (recordReachability, mission status) are
 // best-effort: they never fail the turn.
@@ -33,6 +45,21 @@ import (
 	"github.com/lakehouse2ontology/mission"
 	"github.com/lakehouse2ontology/services/agent-server/recall"
 )
+
+// llmRequirementHint is what the LLM returns per decomposed item — both the
+// decomposition itself and its shape-aware coverage verdict against the
+// candidate Intent parameter table. The verdict half (Covered / CoveredBy /
+// UncoveredReason) is the LLM's job because shape matching ("year range" vs
+// "single-month YYYY-MM prefix") is semantic, not declarative.
+type llmRequirementHint struct {
+	Kind            string   `json:"kind"`
+	Name            string   `json:"name"`
+	Shape           string   `json:"shape"`
+	Why             string   `json:"why"`
+	Covered         *bool    `json:"covered"`
+	CoveredBy       []string `json:"covered_by"`
+	UncoveredReason string   `json:"uncovered_reason"`
+}
 
 // runReachabilityJudge is the single hook call made by
 // handleAgentStreamLakehouse. It returns the machine-templated infeasibility
@@ -51,31 +78,150 @@ func runReachabilityJudge(
 		return ""
 	}
 
-	// ── Step 1: Decompose (LLM call, fail-open) ──────────────────────────────
-	decomp, err := decomposeQuestion(ctx, db, question, intents)
+	// ── LLM call: decomposition + shape-aware coverage in one pass ───────────
+	hints, err := decomposeQuestion(ctx, db, question, intents)
 	if err != nil {
 		log.Printf("MISSION-ACT: reachability decompose skipped (fail-open): %v", err)
 		return ""
 	}
-	if len(decomp) == 0 {
-		// Empty decomposition — nothing to gate on; proceed normally.
+	if len(hints) == 0 {
 		return ""
 	}
 
-	// ── Step 2: Judge (pure deterministic) ───────────────────────────────────
-	specs := buildIntentSpecs(intents)
-	verdict := mission.Judge(decomp, specs)
+	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
+	verdict := buildVerdictFromLLMHints(hints, intents)
 
-	// ── Persist reachability verdict (best-effort) ────────────────────────────
+	// ── Persist (best-effort) ────────────────────────────────────────────────
 	sm.recordReachability(ctx, verdict)
 
-	// ── Gate ─────────────────────────────────────────────────────────────────
 	if verdict.Feasible {
 		return ""
 	}
-
-	// Infeasible — build machine-templated answer (NOT LLM-generated).
 	return buildInfeasibilityAnswer(verdict)
+}
+
+// buildVerdictFromLLMHints turns the LLM's per-item judgement into a
+// ReachabilityVerdict. The LLM owns the shape-aware coverage decision; this
+// function adds two deterministic guards:
+//
+//   - covered_by names are sanitised against the real Intent name set, so a
+//     hallucinated intent name cannot prop up a feasible verdict.
+//   - if after sanitisation a dimension/filter has covered=true but no real
+//     covered_by, it falls back to declarative name-match against the
+//     intent parameter table; if that also fails the item is forced uncovered.
+func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.MetricIntent) mission.ReachabilityVerdict {
+	realIntentNames := map[string]bool{}
+	for _, mi := range intents {
+		realIntentNames[mi.Name] = true
+	}
+	specs := buildIntentSpecs(intents) // for fallback declarative match
+
+	v := mission.ReachabilityVerdict{Feasible: true}
+	for _, h := range hints {
+		rc := mission.RequirementCoverage{
+			Dimension: h.Name,
+			Kind:      h.Kind,
+			Shape:     h.Shape,
+			Why:       h.Why,
+		}
+
+		// metric / unknown kinds never gate feasibility — they're query targets.
+		if h.Kind != "dimension" && h.Kind != "filter" {
+			rc.Covered = true
+			v.Requirements = append(v.Requirements, rc)
+			continue
+		}
+
+		// Sanitise covered_by against real intent names.
+		var realCoveredBy []string
+		for _, n := range h.CoveredBy {
+			if realIntentNames[n] {
+				realCoveredBy = append(realCoveredBy, n)
+			}
+		}
+
+		llmSaysCovered := h.Covered != nil && *h.Covered
+		switch {
+		case llmSaysCovered && len(realCoveredBy) > 0:
+			rc.Covered = true
+			rc.CoveredBy = realCoveredBy
+		case llmSaysCovered && len(realCoveredBy) == 0:
+			// LLM said covered but cited no real intent — fall back to declarative
+			// name match. If even that fails, force uncovered.
+			fallback := mission.CoveringIntents(mission.DecompItem{Name: h.Name, Kind: h.Kind}, specs)
+			if len(fallback) > 0 {
+				rc.Covered = true
+				rc.CoveredBy = fallback
+			} else {
+				rc.MissingNote = "LLM 标可达但未指明真实 Intent；按参数表也无匹配"
+				v.Feasible = false
+			}
+		default: // LLM says uncovered (or didn't decide).
+			if h.UncoveredReason != "" {
+				rc.MissingNote = h.UncoveredReason
+			} else {
+				rc.MissingNote = fmt.Sprintf("没有已授权 Intent 以「%s」形态覆盖「%s」", h.Shape, h.Name)
+			}
+			v.Feasible = false
+		}
+		v.Requirements = append(v.Requirements, rc)
+	}
+	v.Reason = buildVerdictReason(v)
+	return v
+}
+
+// buildVerdictReason composes the human-readable verdict explanation from the
+// finalised requirements list. Feasible: name the dimensions covered.
+// Infeasible: name the uncovered ones AND surface the LLM's shape reason
+// (since the failure is usually about shape mismatch, not absence).
+func buildVerdictReason(v mission.ReachabilityVerdict) string {
+	type un struct {
+		name, shape, why string
+	}
+	var uncovered []un
+	var covered []string
+	for _, r := range v.Requirements {
+		if r.Kind != "dimension" && r.Kind != "filter" {
+			continue
+		}
+		if r.Covered {
+			covered = append(covered, r.Dimension)
+		} else {
+			uncovered = append(uncovered, un{name: r.Dimension, shape: r.Shape, why: r.MissingNote})
+		}
+	}
+	if v.Feasible {
+		if len(covered) == 0 {
+			return "可行：问题不涉及需要授权的筛选维度。"
+		}
+		return fmt.Sprintf("可行：所需维度（%s）均被已授权 Intent 以匹配形态覆盖。", strings.Join(collectNames(covered), "、"))
+	}
+	var parts []string
+	for _, u := range uncovered {
+		s := fmt.Sprintf("「%s」", u.name)
+		if u.shape != "" {
+			s += fmt.Sprintf("（需要 %s 形态）", u.shape)
+		}
+		if u.why != "" {
+			s += "：" + u.why
+		}
+		parts = append(parts, s)
+	}
+	return "不可行：" + strings.Join(parts, "；") + "。"
+}
+
+// collectNames dedupes a string slice while preserving order.
+func collectNames(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // decomposeQuestion calls the agent LLM with a lean prompt to break the
@@ -92,24 +238,37 @@ func decomposeQuestion(
 	db *sql.DB,
 	question string,
 	intents []recall.MetricIntent,
-) ([]mission.DecompItem, error) {
+) ([]llmRequirementHint, error) {
 	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
 	if baseURL == "" {
 		return nil, fmt.Errorf("no agent LLM config available")
 	}
 
-	systemPrompt := `你是一个分析助手。将用户问题拆解为它所需的数据要素。
+	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的 Intent 参数表，必须做两件事：
+
+第一件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
+第二件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个 Intent 真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
 
 只输出一个 JSON 数组，不要包裹 markdown 代码块，不要输出任何其他文字：
-[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"..."}]
+[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a","intent_b"],"uncovered_reason":"..."}]
 
-规则：
+字段规则：
 - kind="metric" 表示用户想查询的指标（如销售额、数量）。
-- kind="dimension" 表示用户想按其分组的维度（如按地区、按月份）。
-- kind="filter" 表示用户想按其筛选的条件（如某员工、某城市）。
-- 对于 dimension 和 filter，name 必须使用下方"可用参数"列表中已有的参数 property 名称；如果不存在匹配的参数，使用问题中的原始词。
-- shape 用一两个词描述该要素的形态：metric 用"标量/求和/计数"等；dimension 用"分组"；filter 用"等值/范围/区间"等。
-- why 用一句话说明这个问题为什么需要这个要素。
+- kind="dimension" 表示用户想按其分组的维度。
+- kind="filter" 表示用户想按其筛选的条件。
+- name：对于 dimension/filter，必须使用下方参数表中真实出现的参数 property 名称；如果整张参数表里没有匹配的 property，用问题中的原始词，并把这一项标为 covered=false。
+- shape：一两个词描述该要素的形态。
+  - metric 用"标量/求和/计数"等。
+  - dimension 用"分组"。
+  - filter 用具体形态："等值"/"单值"/"前缀匹配"/"区间"/"年范围"/"月范围"/"日期范围"/"枚举集合" 等。**形态必须精确**，不要笼统写"范围"。
+- why：一句话说明问题为什么需要这个要素。
+- covered（仅 dimension/filter 需要；metric 可省略，等同 true）：
+  - true 仅当存在某个 Intent 的参数同时满足：(a) property 与 name 一致；(b) op/type/描述 表明它能支撑这个 shape。
+  - 例如 shape="年范围" 但参数 op="starts with" 且 描述="YYYY-MM" → 单月前缀，无法直接覆盖年范围 → covered=false。
+  - 例如 shape="等值" 且参数 op="=" → 覆盖。
+  - 例如 shape="枚举集合" 且参数 type="enum_ref" 且 op="=" → 单次只能选一个枚举值 → 仍是 covered=false（除非问题就是单值）。
+- covered_by：covered=true 时，列出真正满足形态的 Intent 名（必须出现在参数表里）。
+- uncovered_reason：covered=false 时，一句话说明为什么形态对不上（例如"参数仅支持 YYYY-MM 单月前缀，不直接支持 2024-2025 年范围"）。
 - 如果问题只是通用查询（无特定筛选），只返回 metric 项。
 - 数组元素不超过 8 个。`
 
@@ -123,7 +282,7 @@ func decomposeQuestion(
 	content, _, err := llmclient.DoChatWithUsage(baseURL, apiKey, map[string]interface{}{
 		"model":       modelName,
 		"messages":    llmMessages,
-		"max_tokens":  400,
+		"max_tokens":  1200,
 		"temperature": 0.1,
 		"_vendor":     vendor,
 	})
@@ -134,76 +293,91 @@ func decomposeQuestion(
 	return parseDecompJSON(llmclient.StripThinkTags(content))
 }
 
-// buildDecomposeUserPrompt constructs the user-turn prompt for the decompose
-// call. It lists every Intent with its parameter property names so the LLM can
-// use the exact property tokens in dimension/filter names.
+// buildDecomposeUserPrompt constructs the user-turn prompt. For every Intent
+// it lists each parameter's full schema (property, op, type, description) so
+// the LLM can shape-match — name match alone is not enough to judge whether
+// a question's "year range" filter can really be served by a "starts-with
+// YYYY-MM" parameter.
 func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent) string {
 	var sb strings.Builder
 	sb.WriteString("## 用户问题\n")
 	sb.WriteString(question)
-	sb.WriteString("\n\n## 可用参数（Intent 名称 → 参数 property 列表）\n")
+	sb.WriteString("\n\n## 可用 Intent 参数表（按形态判断可达性时必须以此为准）\n")
 	if len(intents) == 0 {
 		sb.WriteString("（无已召回 Intent）\n")
 	} else {
 		for _, mi := range intents {
-			sb.WriteString(fmt.Sprintf("- %s：", mi.Name))
-			props := make([]string, 0, len(mi.Parameters))
+			sb.WriteString(fmt.Sprintf("### Intent: %s\n", mi.Name))
+			if len(mi.Parameters) == 0 {
+				sb.WriteString("（无参数）\n")
+				continue
+			}
 			for _, p := range mi.Parameters {
-				if p.Property != "" {
-					props = append(props, p.Property)
-				} else if p.Name != "" {
-					props = append(props, p.Name)
+				prop := p.Property
+				if prop == "" {
+					prop = p.Name
 				}
+				sb.WriteString(fmt.Sprintf("  - property=%q, name=%q, type=%q, op=%q",
+					prop, p.Name, p.Type, p.Op))
+				if p.Description != "" {
+					sb.WriteString(fmt.Sprintf(", desc=%q", p.Description))
+				}
+				if len(p.AllowedValues) > 0 {
+					// Cap allowed-values length so very large enums don't blow the prompt.
+					vs := p.AllowedValues
+					if len(vs) > 8 {
+						vs = append(append([]string{}, vs[:8]...), "…")
+					}
+					sb.WriteString(fmt.Sprintf(", allowed=[%s]", strings.Join(vs, ",")))
+				}
+				sb.WriteString("\n")
 			}
-			if len(props) == 0 {
-				sb.WriteString("（无参数）")
-			} else {
-				sb.WriteString(strings.Join(props, "、"))
-			}
-			sb.WriteString("\n")
 		}
 	}
 	sb.WriteString("\n请输出 JSON 数组。")
 	return sb.String()
 }
 
-// parseDecompJSON parses the LLM's JSON array reply into []mission.DecompItem.
-// Tolerates leading/trailing whitespace and code-block wrappers.
-func parseDecompJSON(raw string) ([]mission.DecompItem, error) {
+// parseDecompJSON parses the LLM's JSON array reply into []llmRequirementHint.
+// Tolerates leading/trailing whitespace and code-block wrappers. `covered`
+// uses *bool so we can distinguish "LLM didn't decide" from "explicit false".
+func parseDecompJSON(raw string) ([]llmRequirementHint, error) {
 	cleaned := llmclient.ExtractJSON(raw)
 	if cleaned == "" {
-		// Try raw string directly in case ExtractJSON doesn't find braces.
 		cleaned = strings.TrimSpace(raw)
 	}
-	// ExtractJSON may return an object {}; we need an array [...].
-	// If it starts with '{', wrap attempt would fail — just try parsing as-is.
 	var items []struct {
-		Kind  string `json:"kind"`
-		Name  string `json:"name"`
-		Shape string `json:"shape"`
-		Why   string `json:"why"`
+		Kind            string   `json:"kind"`
+		Name            string   `json:"name"`
+		Shape           string   `json:"shape"`
+		Why             string   `json:"why"`
+		Covered         *bool    `json:"covered"`
+		CoveredBy       []string `json:"covered_by"`
+		UncoveredReason string   `json:"uncovered_reason"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &items); err != nil {
-		return nil, fmt.Errorf("decompose JSON parse failed (%q): %w", truncateStr(cleaned, 120), err)
+		return nil, fmt.Errorf("decompose JSON parse failed (%q): %w", truncateStr(cleaned, 200), err)
 	}
-	out := make([]mission.DecompItem, 0, len(items))
-	for i, it := range items {
+	out := make([]llmRequirementHint, 0, len(items))
+	for _, it := range items {
 		kind := strings.ToLower(strings.TrimSpace(it.Kind))
 		switch kind {
 		case "metric", "dimension", "filter":
 		default:
-			kind = "metric" // safe default
+			kind = "metric"
 		}
 		name := strings.TrimSpace(it.Name)
 		if name == "" {
 			continue
 		}
-		out = append(out, mission.DecompItem{
-			ID:          fmt.Sprintf("d%d", i+1),
-			Kind:        kind,
-			Name:        name,
-			Shape:       strings.TrimSpace(it.Shape),
-			WhyRequired: strings.TrimSpace(it.Why),
+		out = append(out, llmRequirementHint{
+			Kind:            kind,
+			Name:            name,
+			Shape:           strings.TrimSpace(it.Shape),
+			Why:             strings.TrimSpace(it.Why),
+			Covered:         it.Covered,
+			CoveredBy:       it.CoveredBy,
+			UncoveredReason: strings.TrimSpace(it.UncoveredReason),
 		})
 	}
 	return out, nil
