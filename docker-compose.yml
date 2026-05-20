@@ -26,7 +26,7 @@ services:
     build:
       context: .
       dockerfile: services/frontend/Dockerfile
-    image: lakehouse/frontend:phase1
+    image: ghcr.io/agentofreef/text2ontology-frontend:latest
     ports:
       - "18080:80"
       - "10020:80"
@@ -59,7 +59,7 @@ services:
     build:
       context: .
       dockerfile: services/backend-api/Dockerfile
-    image: lakehouse/backend-api:phase1
+    image: ghcr.io/agentofreef/text2ontology-backend-api:latest
     ports:
       - "18090:8090"
     command: ["-port", "8090"]
@@ -93,7 +93,7 @@ services:
     build:
       context: .
       dockerfile: services/agent-server/Dockerfile
-    image: lakehouse/agent-server:phase1
+    image: ghcr.io/agentofreef/text2ontology-agent-server:latest
     ports:
       - "18092:8092"
     command: ["-port", "8092"]
@@ -129,7 +129,7 @@ services:
     build:
       context: .
       dockerfile: services/recall-server/Dockerfile
-    image: lakehouse/recall-server:phase1
+    image: ghcr.io/agentofreef/text2ontology-recall-server:latest
     ports:
       - "18093:8093"
     command: ["-port", "8093"]
@@ -157,7 +157,7 @@ services:
     build:
       context: .
       dockerfile: services/lakehouse-sql-server/Dockerfile
-    image: lakehouse/lakehouse-sql-server:phase1
+    image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:latest
     ports:
       - "18094:8094"
     command: ["-port", "8094"]
@@ -189,7 +189,7 @@ services:
     build:
       context: .
       dockerfile: services/mcp-tools-server/Dockerfile
-    image: lakehouse/mcp-tools-server:phase1
+    image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:latest
     ports:
       - "18095:8095"
     command: ["-port", "8095"]
@@ -227,7 +227,7 @@ services:
     build:
       context: .
       dockerfile: services/collector-server/Dockerfile
-    image: lakehouse/collector-server:phase1
+    image: ghcr.io/agentofreef/text2ontology-collector-server:latest
     ports:
       - "18096:8096"
     command: ["-port", "8096"]
