@@ -18,6 +18,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/llmclient"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/agent-server/smartquery"
@@ -400,6 +401,20 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(projectID) {
 			sendSSE("error", "projectId required")
 			return
+		}
+
+		// Cross-project access guard: projectId arrives in the body, which the
+		// authmw middleware does NOT gate (it only gates ?projectId= query
+		// string). Without this a user could run the agent against any project
+		// by naming its id. SSE headers are already sent, so report denial as
+		// an SSE error event. /internal/* service calls are middleware-authed.
+		if !strings.HasPrefix(r.URL.Path, "/internal/") {
+			tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			uid, verr := authmw.VerifyToken(tok)
+			if verr != nil || authmw.UserCanAccessProject(r.Context(), db, uid, projectID) != nil {
+				sendSSE("error", "forbidden")
+				return
+			}
 		}
 
 		rawMsgs, _ := body["messages"].([]interface{})
@@ -4208,6 +4223,12 @@ func handleLakehouseAgentThreadByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/ontology/lakehouse-agent-threads")
+
+		// Cross-project IDOR guard: confirm the caller can access this
+		// thread's project before any read/mutate by id.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_agent_thread", "id", id) {
+			return
+		}
 
 		if r.Method == http.MethodDelete {
 			db.Exec(`DELETE FROM ont_agent_thread WHERE id = $1`, id)

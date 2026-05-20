@@ -10,6 +10,7 @@ import (
 
 	"github.com/lakehouse2ontology/llmclient"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -111,6 +112,10 @@ func handleTokenAnnotationByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/ontology/token-annotations")
+		// Cross-project IDOR guard: verify project access before touching this annotation.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_token_annotation", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(r.URL.Path, "/mark") {
 			body := ReadBody(r)

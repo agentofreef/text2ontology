@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/llmclient"
 	"github.com/lakehouse2ontology/services/agent-server/recall"
 
@@ -134,6 +135,12 @@ func handleAgentAnnotationByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/ontology/agent-annotations")
+
+		// Cross-project IDOR guard: confirm the caller can access this
+		// annotation's project before any read/mutate by id.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_agent_annotation", "id", id) {
+			return
+		}
 
 		if r.Method == http.MethodDelete {
 			db.Exec(`DELETE FROM ont_agent_annotation WHERE id = $1`, id)

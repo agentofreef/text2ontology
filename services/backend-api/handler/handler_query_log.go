@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -159,6 +160,11 @@ func handleQueryLogByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/query-logs")
+		// Cross-project IDOR guard: verify project access before touching this
+		// query log (covers the /{id}/feedback subtree too).
+		if !authmw.EnforceEntityProject(w, r, db, "ont_query_log", "id", id) {
+			return
+		}
 
 		// POST /api/ontology/query-logs/{id}/feedback
 		if strings.HasSuffix(path, "/feedback") && r.Method == http.MethodPost {

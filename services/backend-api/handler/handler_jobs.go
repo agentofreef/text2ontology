@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -172,6 +173,10 @@ func HandleJobByID(db *sql.DB) http.HandlerFunc {
 		jobID := segments[0]
 		if !IsValidUUID(jobID) {
 			JsonError(w, http.StatusBadRequest, M{"error": "invalid job id"})
+			return
+		}
+		// Cross-project IDOR guard: verify project access before reading/cancelling this job.
+		if !authmw.EnforceEntityProject(w, r, db, "ingest_job", "id", jobID) {
 			return
 		}
 

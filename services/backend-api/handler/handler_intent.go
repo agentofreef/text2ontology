@@ -10,6 +10,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/ontology"
 )
@@ -146,6 +147,10 @@ func handleMetricIntentByID(db *sql.DB) http.HandlerFunc {
 		id := ExtractID(r.URL.Path, "/api/ontology/metric-intents")
 		if !IsValidUUID(id) {
 			http.NotFound(w, r)
+			return
+		}
+		// Cross-project IDOR guard: verify project access before touching this metric intent.
+		if !authmw.EnforceEntityProject(w, r, db, "lakehouse_metric_intent", "id", id) {
 			return
 		}
 

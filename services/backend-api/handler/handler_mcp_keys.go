@@ -122,6 +122,11 @@ func handleMCPKeyByID(db *sql.DB) http.HandlerFunc {
 			JsonResp(w, M{"error": "missing id"})
 			return
 		}
+		// Cross-user IDOR guard: only the owning user (or a global admin) may
+		// operate on this key. Bypasses /internal/* service calls.
+		if !authmw.EnforceEntityOwner(w, r, db, "mcp_api_key", "id", "user_id", id) {
+			return
+		}
 
 		if r.Method != http.MethodDelete {
 			w.WriteHeader(405)

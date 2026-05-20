@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -107,6 +108,10 @@ func handleLearnedFactByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/learned-facts")
+		// Cross-project IDOR guard: verify project access before touching this learned fact.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_learned_fact", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)
@@ -353,6 +358,10 @@ func handleFactDefinitionByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/fact-definitions")
+		// Cross-project IDOR guard: verify project access before touching this fact definition.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_fact_definition", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)
@@ -482,6 +491,10 @@ func handleFactLinkByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/ontology/fact-links")
+		// Cross-project IDOR guard: verify project access before touching this fact link.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_fact_link", "id", id) {
+			return
+		}
 
 		if r.Method == http.MethodDelete {
 			db.Exec(`DELETE FROM ont_fact_link WHERE id = $1`, id)

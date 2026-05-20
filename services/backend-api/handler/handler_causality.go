@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -108,6 +109,10 @@ func handleCausalityByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/causality")
+		// Cross-project IDOR guard: verify project access before touching this causality row.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_causality", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)

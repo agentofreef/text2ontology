@@ -17,6 +17,7 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/llmclient"
 	"github.com/lakehouse2ontology/services/agent-server/recall"
 
@@ -84,6 +85,11 @@ func handleLHTestSuites(db *sql.DB) http.HandlerFunc {
 				JsonResp(w, M{"error": "name and projectId required"})
 				return
 			}
+			// Body projectId is not gated by the middleware (only ?projectId=
+			// query is) — verify access before creating in that project.
+			if !authmw.EnforceProjectAccess(w, r, db, pid) {
+				return
+			}
 			var id string
 			err := db.QueryRow(`INSERT INTO ont_test_suite (project_id, name, source_type, concurrency)
 				VALUES ($1, $2, 'lakehouse', $3) RETURNING id`, pid, name, concurrency).Scan(&id)
@@ -110,6 +116,17 @@ func handleLHTestSuiteByID(db *sql.DB) http.HandlerFunc {
 
 		path := r.URL.Path
 		suiteID := ExtractID(path, "/api/ontology/lh-test-suites")
+
+		// Cross-project IDOR guard: every sub-route below dispatches on this
+		// suiteID (cases, runs, tags, compare, mark, retry, export, upload,
+		// bulk-*), so one check here protects the whole subtree. Skip when
+		// suiteID == "" — that case falls through to list/create, which is
+		// already middleware-gated via ?projectId=.
+		if suiteID != "" {
+			if !authmw.EnforceEntityProject(w, r, db, "ont_test_suite", "id", suiteID) {
+				return
+			}
+		}
 
 		// Route: /api/ontology/lh-test-suites/{id}/compare/case/{caseId}?runs=...
 		// Lazy detail loader for the N-way Excel compare. Returns the FULL
@@ -1408,6 +1425,13 @@ func handleLHTestRunCancel(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(runID) {
 			w.WriteHeader(400)
 			JsonResp(w, M{"error": "invalid run id"})
+			return
+		}
+
+		// Cross-project IDOR guard: ont_test_run has no project_id of its own,
+		// so resolve it via JOIN up to the owning suite before any access.
+		if !authmw.EnforceEntityProjectVia(w, r, db,
+			"SELECT s.project_id FROM ont_test_run r JOIN ont_test_suite s ON s.id = r.suite_id WHERE r.id = $1", runID) {
 			return
 		}
 

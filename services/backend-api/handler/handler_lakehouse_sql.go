@@ -305,6 +305,10 @@ func handleLakehouseSQLSnippetByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/lakehouse-sql/snippets")
+		// Cross-project IDOR guard: verify project access before touching this snippet.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_lakehouse_sql_snippet", "id", id) {
+			return
+		}
 		if r.Method == http.MethodDelete {
 			db.Exec(`DELETE FROM ont_lakehouse_sql_snippet WHERE id = $1`, id)
 			JsonResp(w, M{"success": true})

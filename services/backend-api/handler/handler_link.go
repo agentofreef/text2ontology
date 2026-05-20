@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -92,6 +93,10 @@ func handleLinkByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/links")
+		// Cross-project IDOR guard: verify project access before touching this link type.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_link_type", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -84,6 +85,10 @@ func handleRuleByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/rules")
+		// Cross-project IDOR guard: verify project access before touching this rule.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_resolution_rule", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)

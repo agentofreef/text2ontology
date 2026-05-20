@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/services/agent-server/ledger"
 
 	. "github.com/lakehouse2ontology/httputil"
@@ -80,6 +81,12 @@ func HandleLakehouseLedgerGet(db *sql.DB) http.HandlerFunc {
 		threadID := r.URL.Query().Get("threadId")
 		if !IsValidUUID(threadID) {
 			http.Error(w, "threadId is required (uuid)", http.StatusBadRequest)
+			return
+		}
+
+		// Cross-project IDOR guard: confirm the caller can access this
+		// thread's project before reading its ledger.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_agent_thread", "id", threadID) {
 			return
 		}
 

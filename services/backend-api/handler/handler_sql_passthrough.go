@@ -401,6 +401,10 @@ func handleSQLPassthroughSnippetByID(db *sql.DB) http.HandlerFunc {
 		}
 		CorsHeaders(w)
 		id := ExtractID(r.URL.Path, "/api/ontology/sql-passthrough/snippets")
+		// Cross-project IDOR guard: verify project access before touching this snippet.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_sql_passthrough_snippet", "id", id) {
+			return
+		}
 		if r.Method == http.MethodDelete {
 			db.Exec(`DELETE FROM ont_sql_passthrough_snippet WHERE id = $1`, id)
 			JsonResp(w, M{"success": true})

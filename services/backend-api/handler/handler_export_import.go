@@ -11,6 +11,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -549,6 +550,11 @@ func handleOntologyImport(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(pid) {
 			w.WriteHeader(400)
 			JsonResp(w, M{"error": "projectId required"})
+			return
+		}
+		// Import writes into the named project; body projectId is not gated by
+		// the middleware, so verify access before importing.
+		if !authmw.EnforceProjectAccess(w, r, db, pid) {
 			return
 		}
 		mode := strings.ToLower(StrVal(body, "mode"))

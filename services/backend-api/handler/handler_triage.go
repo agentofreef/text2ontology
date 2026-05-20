@@ -9,6 +9,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -365,6 +366,10 @@ func handleTriageAssign(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(projectID) || token == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			JsonResp(w, M{"error": "projectId and token are required"})
+			return
+		}
+		// Body projectId is not gated by the middleware — verify access.
+		if !authmw.EnforceProjectAccess(w, r, db, projectID) {
 			return
 		}
 		ignore := false
@@ -851,6 +856,10 @@ func handleIntentTriggers(db *sql.DB) http.HandlerFunc {
 		intentID := parts[0]
 		if !IsValidUUID(intentID) {
 			http.NotFound(w, r)
+			return
+		}
+		// Cross-project IDOR guard: triggers belong to the intent's project.
+		if !authmw.EnforceEntityProject(w, r, db, "lakehouse_metric_intent", "id", intentID) {
 			return
 		}
 

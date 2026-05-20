@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -98,6 +99,10 @@ func handleMethodByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/methods")
+		// Cross-project IDOR guard: verify project access before touching this method.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_method", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)

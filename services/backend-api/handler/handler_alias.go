@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -99,6 +100,10 @@ func handleAliasByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/aliases")
+		// Cross-project IDOR guard: verify project access before touching this alias.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_alias", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)

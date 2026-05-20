@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -111,6 +112,10 @@ func handleSkillByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/skills")
+		// Cross-project IDOR guard: verify project access before touching this skill.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_skill", "id", id) {
+			return
+		}
 
 		if r.Method == http.MethodPut {
 			body := ReadBody(r)

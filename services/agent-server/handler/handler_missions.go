@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/mission"
 )
@@ -32,6 +33,11 @@ func HandleMissionsByThread(db *sql.DB) http.HandlerFunc {
 		if threadID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			JsonResp(w, M{"error": "thread_id is required"})
+			return
+		}
+		// Cross-project IDOR guard: confirm the caller can access this
+		// thread's project before listing its missions.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_agent_thread", "id", threadID) {
 			return
 		}
 		store := mission.NewStore(db)

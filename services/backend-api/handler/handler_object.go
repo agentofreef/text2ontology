@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 )
 
@@ -83,6 +84,11 @@ func handleObjects(db *sql.DB) http.HandlerFunc {
 			if !IsValidUUID(pid) {
 				w.WriteHeader(400)
 				JsonResp(w, M{"error": "projectId is required"})
+				return
+			}
+			// A body projectId can override the (middleware-gated) query value,
+			// so re-verify access against the effective pid before creating.
+			if !authmw.EnforceProjectAccess(w, r, db, pid) {
 				return
 			}
 			sourceType := StrVal(body, "sourceType")
@@ -207,6 +213,11 @@ func handleObjectByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/objects")
+		// Cross-project IDOR guard: confirm the caller can access the object's
+		// project before any operation on this id (covers the whole /{id}/* subtree).
+		if !authmw.EnforceEntityProject(w, r, db, "ont_object_type", "id", id) {
+			return
+		}
 
 		// POST /api/ontology/objects/{id}/properties — create property
 		if strings.HasSuffix(path, "/properties") && r.Method == http.MethodPost {
@@ -516,6 +527,10 @@ func handlePropertyByID(db *sql.DB) http.HandlerFunc {
 		CorsHeaders(w)
 		path := r.URL.Path
 		id := ExtractID(path, "/api/ontology/properties")
+		// Cross-project IDOR guard: verify project access before touching this property.
+		if !authmw.EnforceEntityProject(w, r, db, "ont_property", "id", id) {
+			return
+		}
 
 		if strings.HasSuffix(path, "/mark") {
 			body := ReadBody(r)
