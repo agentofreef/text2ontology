@@ -11,7 +11,7 @@
 // no synthesis renders as a compact one-liner so the legacy single-query
 // UI stays visually unchanged.
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronRight, Sparkles, Check, X, CircleSlash, Loader2, AlertTriangle } from 'lucide-react'
 
 // ─── API shapes (match the JSON tags of pkg/mission Go types) ───────────────
@@ -223,70 +223,92 @@ function ReachabilityBlock({ v }: { v: ReachabilityVerdict }) {
   )
 }
 
-function MissionCard({ mission }: { mission: Mission }) {
-  // Default-expanded: the headline of every mission is the reachability
-  // verdict + its decomposition; folding it behind a click hides the
-  // primary value of the panel.
-  const [open, setOpen] = useState(true)
+// MissionSummary is the compact row shown in the panel — click to open
+// the detail modal. Headline only: question + reachability verdict
+// badge (when present) + status.
+function MissionSummary({ mission, onOpen }: { mission: Mission; onOpen: () => void }) {
+  const ms = MISSION_STYLE[mission.status] || MISSION_STYLE.active
+  const reach = mission.reachability
+  return (
+    <button
+      onClick={onOpen}
+      className={`w-full flex items-center gap-2 px-2 py-1.5 border ${ms.ring} ${ms.bg} rounded text-left hover:brightness-95 transition-all cursor-pointer`}
+    >
+      <Sparkles size={12} className={`${ms.text} shrink-0`} />
+      <span className={`text-[11px] font-semibold ${ms.text} flex-1 min-w-0 truncate`}>
+        {mission.question.slice(0, 80)}{mission.question.length > 80 ? '…' : ''}
+      </span>
+      {reach && (
+        <span className={`text-[9px] px-1 py-0.5 rounded font-semibold shrink-0 ${reach.feasible ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+          {reach.feasible ? '可行' : '不可行'}
+        </span>
+      )}
+      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 ${ms.badge}`}>{ms.label}</span>
+    </button>
+  )
+}
+
+// MissionModal is the full-screen overlay showing one mission's full
+// reachability detail — verdict + decomposition + (if present) tasks +
+// synthesis answer + capability gap. Click outside or ✕ to close.
+function MissionModal({ mission, onClose }: { mission: Mission; onClose: () => void }) {
   const ms = MISSION_STYLE[mission.status] || MISSION_STYLE.active
   const tasks = mission.tasks || []
 
-  // Trivial-mission carve-out: ≤ 1 task with no synthesis → compact line.
-  const isTrivial = tasks.length <= 1 && !mission.synthesis?.output && !mission.blocked_root && !mission.reachability
-  if (isTrivial) {
-    return (
-      <div className={`flex items-center gap-2 px-2 py-1.5 border ${ms.ring} ${ms.bg} rounded text-[11px]`}>
-        <Sparkles size={12} className={ms.text} />
-        <span className={`font-semibold ${ms.text} truncate`}>{mission.question.slice(0, 80)}{mission.question.length > 80 ? '…' : ''}</span>
-        <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded font-mono ${ms.badge}`}>{ms.label}</span>
-      </div>
-    )
-  }
-
-  const passingCount = tasks.filter(t => t.status === 'passing').length
-  const blockedCount = tasks.filter(t => t.status === 'blocked').length
-  const activeCount  = tasks.filter(t => t.status === 'active').length
-  const pendingCount = tasks.filter(t => t.status === 'pending' || t.status === 'pending_retry').length
+  // ESC to close.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   return (
-    <div className={`border ${ms.ring} ${ms.bg} rounded`}>
-      <button className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left" onClick={() => setOpen(v => !v)}>
-        {open ? <ChevronDown size={12} className="text-gray-400 shrink-0" /> : <ChevronRight size={12} className="text-gray-400 shrink-0" />}
-        <Sparkles size={12} className={`${ms.text} shrink-0`} />
-        <span className={`text-[11px] font-semibold ${ms.text} flex-1 min-w-0 truncate`}>
-          {mission.question.slice(0, 80)}{mission.question.length > 80 ? '…' : ''}
-        </span>
-        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 ${ms.badge}`}>{ms.label}</span>
-        {tasks.length > 0 && (
-          <span className="flex items-center gap-1 shrink-0">
-            {passingCount > 0 && <span className="text-[10px] px-1 rounded bg-emerald-100 text-emerald-700 font-mono">{passingCount}✓</span>}
-            {blockedCount > 0 && <span className="text-[10px] px-1 rounded bg-amber-100 text-amber-700 font-mono">{blockedCount}!</span>}
-            {activeCount  > 0 && <span className="text-[10px] px-1 rounded bg-sky-100 text-sky-700 font-mono">{activeCount}▶</span>}
-            {pendingCount > 0 && <span className="text-[10px] px-1 rounded bg-gray-100 text-gray-500 font-mono">{pendingCount}·</span>}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div className="px-2.5 pb-2 space-y-1.5 border-t border-white/50">
-          {mission.reachability && <div className="pt-1.5"><ReachabilityBlock v={mission.reachability} /></div>}
-          {mission.blocked_root && <div className="pt-1.5"><CapabilityGapBanner reason={mission.blocked_root} /></div>}
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 bg-indigo-50/60 shrink-0">
+          <Sparkles size={16} className="text-indigo-500" />
+          <span className="text-sm font-semibold text-indigo-700 tracking-wide">任务可达器</span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${ms.badge}`}>{ms.label}</span>
+          <button
+            onClick={onClose}
+            className="ml-auto text-gray-400 hover:text-gray-700 transition-colors p-1 rounded hover:bg-gray-100"
+            aria-label="关闭"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div>
+            <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1">问题</div>
+            <div className="text-[13px] text-gray-800 leading-relaxed">{mission.question}</div>
+          </div>
+          {mission.reachability && <ReachabilityBlock v={mission.reachability} />}
+          {mission.blocked_root && <CapabilityGapBanner reason={mission.blocked_root} />}
           {tasks.length > 0 && (
-            <div className="space-y-1 pt-1.5">
-              {tasks.map(task => <TaskRow key={task.id} task={task} />)}
+            <div className="space-y-1">
+              <div className="text-[10px] font-semibold text-gray-500 tracking-wider">任务({tasks.length})</div>
+              {tasks.map((task) => <TaskRow key={task.id} task={task} />)}
             </div>
           )}
           {mission.synthesis?.output && (
-            <div className="border border-emerald-200 bg-white rounded p-2 mt-1">
-              <div className="text-[10px] text-emerald-700 font-semibold mb-1">综合</div>
-              <pre className="text-[11px] text-gray-900 whitespace-pre-wrap font-sans leading-relaxed">{mission.synthesis.output}</pre>
+            <div className="border border-emerald-200 bg-emerald-50/30 rounded p-3">
+              <div className="text-[10px] text-emerald-700 font-semibold mb-1 tracking-wider">综合答复</div>
+              <pre className="text-[12px] text-gray-900 whitespace-pre-wrap font-sans leading-relaxed">{mission.synthesis.output}</pre>
             </div>
           )}
-          <div className="text-[10px] text-gray-400 pt-0.5">
-            <code className="bg-white/70 px-1 rounded">{mission.mission_id.slice(0, 8)}…</code>
+          <div className="text-[10px] text-gray-400 pt-2 border-t border-gray-100">
+            <code className="bg-gray-50 px-1 rounded">mission_id={mission.mission_id}</code>
           </div>
         </div>
-      )}
+      </div>
     </div>
   )
 }
@@ -300,6 +322,7 @@ interface MissionLedgerProps {
 
 export function MissionLedger({ missions, loading }: MissionLedgerProps) {
   const [collapsed, setCollapsed] = useState(false)
+  const [selected, setSelected] = useState<Mission | null>(null)
 
   if (loading) {
     return (
@@ -312,27 +335,31 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
 
   const list = missions || []
 
-  // The panel is always present (it occupies the left column's lower
-  // slot), so an empty list renders an empty-state line rather than
-  // returning null.
   return (
-    <div className="border-t border-indigo-200 bg-indigo-50/40 flex-shrink-0 flex flex-col min-h-0">
-      <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left hover:bg-indigo-50/70 transition-colors shrink-0" onClick={() => setCollapsed(v => !v)}>
-        {collapsed ? <ChevronRight size={12} className="text-indigo-400" /> : <ChevronDown size={12} className="text-indigo-400" />}
-        <Sparkles size={12} className="text-indigo-500" />
-        <span className="text-[11px] font-semibold text-indigo-700 tracking-wider">任务可达器</span>
-        <span className="text-[10px] text-indigo-400 ml-1">({list.length})</span>
-      </button>
+    <>
+      <div className="border-t border-indigo-200 bg-indigo-50/40 flex-shrink-0 flex flex-col min-h-0">
+        <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left hover:bg-indigo-50/70 transition-colors shrink-0" onClick={() => setCollapsed(v => !v)}>
+          {collapsed ? <ChevronRight size={12} className="text-indigo-400" /> : <ChevronDown size={12} className="text-indigo-400" />}
+          <Sparkles size={12} className="text-indigo-500" />
+          <span className="text-[11px] font-semibold text-indigo-700 tracking-wider">任务可达器</span>
+          <span className="text-[10px] text-indigo-400 ml-1">({list.length})</span>
+        </button>
 
-      {!collapsed && (
-        list.length === 0 ? (
-          <div className="px-3 py-3 text-[11px] text-gray-400">当前对话暂无任务记录(mission)。</div>
-        ) : (
-          <div className="px-3 pb-3 space-y-1.5 overflow-y-auto">
-            {list.map(m => <MissionCard key={m.mission_id} mission={m} />)}
-          </div>
-        )
-      )}
-    </div>
+        {!collapsed && (
+          list.length === 0 ? (
+            <div className="px-3 py-3 text-[11px] text-gray-400">当前对话暂无任务记录(mission)。</div>
+          ) : (
+            <div className="px-3 pb-3 space-y-1.5 overflow-y-auto">
+              {list.map(m => (
+                <MissionSummary key={m.mission_id} mission={m} onOpen={() => setSelected(m)} />
+              ))}
+              <div className="text-[10px] text-gray-400 text-center pt-1">点击任一条查看可达性详情</div>
+            </div>
+          )
+        )}
+      </div>
+
+      {selected && <MissionModal mission={selected} onClose={() => setSelected(null)} />}
+    </>
   )
 }
