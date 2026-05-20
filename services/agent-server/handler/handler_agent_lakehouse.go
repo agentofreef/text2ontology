@@ -1412,7 +1412,13 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// the accumulated step_results + final answer no matter how the turn
 		// ends. context.Background() so a cancelled request context cannot
 		// drop the final write. No-op when USE_MISSION_ACT is off.
-		defer func() { shadowM.finish(context.Background(), lastAssistantContent) }()
+		defer func() {
+			// MissionAct M3-lite — reconcile the sub-question task list against
+			// the final answer (one LLM call, fail-open) before finalising. No-op
+			// when there are no sub-question tasks.
+			reconcileMissionTasks(context.Background(), db, shadowM, lastAssistantContent)
+			shadowM.finish(context.Background(), lastAssistantContent)
+		}()
 
 		// saveRoundStep persists one LLM call round to ont_agent_step.
 		// sentMsgs is the exact llmMessages snapshot sent to the LLM this round.

@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -267,6 +268,61 @@ func (sm *shadowMission) recordCompleteAnalysis(ctx context.Context, finalAnswer
 	}
 }
 
+// seedTasksFromSubQuestions builds one pending task per distinct
+// sub-question the reachability judge found. The task completion list is
+// reconciled against the final answer at turn-end (reconcileMissionTasks).
+// No-op when the shadow path is inert or there are no sub-questions.
+func (sm *shadowMission) seedTasksFromSubQuestions(ctx context.Context, subQuestions []string) {
+	if sm == nil || sm.m == nil || len(subQuestions) == 0 {
+		return
+	}
+	tasks := make([]mission.Task, 0, len(subQuestions))
+	for i, q := range subQuestions {
+		tasks = append(tasks, mission.Task{
+			ID:       fmt.Sprintf("q%d", i+1),
+			Type:     "answer",
+			Behavior: q,
+			Status:   mission.TaskPending,
+		})
+	}
+	sm.m.Tasks = tasks
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: seedTasksFromSubQuestions save failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
+// applyTaskReconciliation records the turn-end verdict for each sub-question
+// task (passing if answered, blocked otherwise) and recomputes mission
+// status. The status→answer mapping is computed by reconcileMissionTasks
+// (one LLM call); this method just persists it. No-op when inert or no tasks.
+func (sm *shadowMission) applyTaskReconciliation(ctx context.Context, results map[string]bool) {
+	if sm == nil || sm.m == nil || len(sm.m.Tasks) == 0 || len(results) == 0 {
+		return
+	}
+	for i := range sm.m.Tasks {
+		t := &sm.m.Tasks[i]
+		answered, ok := results[t.ID]
+		if !ok {
+			continue
+		}
+		if answered {
+			t.Status = mission.TaskPassing
+		} else {
+			t.Status = mission.TaskBlocked
+		}
+	}
+	// Only let task states drive status when the reachability gate hasn't
+	// already declared the mission unanswerable.
+	if sm.m.Status != mission.MissionUnanswerable {
+		sm.m.Status = mission.DeriveStatus(sm.m.Tasks, sm.m.BlockedRoot)
+	}
+	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := sm.store.Save(ctx, sm.m); err != nil {
+		log.Printf("MISSION-ACT: applyTaskReconciliation save failed (mission %s): %v", sm.m.MissionID, err)
+	}
+}
+
 // recordReachability stores the 任务可达器 verdict on the shadow mission and
 // saves best-effort. Called once per turn, before the ReAct loop. No-op when
 // the shadow path is inert.
@@ -307,10 +363,17 @@ func (sm *shadowMission) finish(ctx context.Context, finalAnswer string) {
 		return
 	}
 	sm.m.Synthesis.Output = finalAnswer
-	// Preserve an unanswerable verdict — a reachability gate or a
-	// capability gap already set it; "the turn ended" must not relabel
-	// it as complete.
-	if sm.m.Status != mission.MissionUnanswerable {
+	switch {
+	case sm.m.Status == mission.MissionUnanswerable:
+		// Preserve — a reachability gate or capability gap already set it;
+		// "the turn ended" must not relabel it as complete.
+	case len(sm.m.Tasks) > 0:
+		// Sub-question tasks were seeded and reconciled (reconcileMissionTasks
+		// runs just before finish in the turn-end defer). Let their terminal
+		// states drive the mission status — do NOT force complete, or a turn
+		// that failed to answer would be mislabelled.
+		sm.m.Status = mission.DeriveStatus(sm.m.Tasks, sm.m.BlockedRoot)
+	default:
 		sm.m.Status = mission.MissionComplete
 	}
 	sm.m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)

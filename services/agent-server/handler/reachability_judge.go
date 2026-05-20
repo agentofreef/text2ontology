@@ -61,6 +61,14 @@ type llmRequirementHint struct {
 	UncoveredReason string   `json:"uncovered_reason"`
 }
 
+// decomposeResult is the full decompose-LLM output: the distinct
+// sub-questions the user asked (so a multi-part question becomes a task
+// completion list) plus the per-element coverage hints.
+type decomposeResult struct {
+	SubQuestions []string
+	Requirements []llmRequirementHint
+}
+
 // runReachabilityJudge is the single hook call made by
 // handleAgentStreamLakehouse. It returns the machine-templated infeasibility
 // answer (non-empty) when the gate fires, or "" to proceed normally.
@@ -79,20 +87,29 @@ func runReachabilityJudge(
 	}
 
 	// ── LLM call: decomposition + shape-aware coverage in one pass ───────────
-	hints, err := decomposeQuestion(ctx, db, question, intents)
+	res, err := decomposeQuestion(ctx, db, question, intents)
 	if err != nil {
 		log.Printf("MISSION-ACT: reachability decompose skipped (fail-open): %v", err)
 		return ""
 	}
-	if len(hints) == 0 {
+	if len(res.Requirements) == 0 {
 		return ""
 	}
 
 	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
-	verdict := buildVerdictFromLLMHints(hints, intents)
+	verdict := buildVerdictFromLLMHints(res.Requirements, intents)
 
 	// ── Persist (best-effort) ────────────────────────────────────────────────
 	sm.recordReachability(ctx, verdict)
+
+	// ── Seed the task completion list for multi-part questions ───────────────
+	// Only when the question is feasible AND has 2+ distinct sub-questions —
+	// a single atomic question needs no checklist. reconcileMissionTasks (run
+	// in the turn-end defer) flips each task passing/blocked against the
+	// final answer.
+	if verdict.Feasible && len(res.SubQuestions) >= 2 {
+		sm.seedTasksFromSubQuestions(ctx, res.SubQuestions)
+	}
 
 	if verdict.Feasible {
 		return ""
@@ -224,35 +241,43 @@ func collectNames(in []string) []string {
 	return out
 }
 
-// decomposeQuestion calls the agent LLM with a lean prompt to break the
-// question into required elements. Returns nil,err on any failure (fail-open).
+// decomposeQuestion calls the agent LLM once to do both jobs: identify the
+// distinct sub-questions and break the question into shape-aware coverage
+// hints. Returns a zero-value result + err on any failure (fail-open).
 //
-// Prompt contract: returns ONLY a JSON array:
+// Prompt contract: returns ONLY a JSON object:
 //
-//	[{"kind":"metric|dimension|filter","name":"..."}]
+//	{"sub_questions":["..."],"requirements":[{"kind":"...","name":"...",...}]}
 //
-// For dimension/filter items, name MUST use the candidate Intent parameter
-// property names — that is what the deterministic coverage match keys on.
+// For dimension/filter requirements, name MUST use the candidate Intent
+// parameter property names — that is what the coverage match keys on.
 func decomposeQuestion(
 	ctx context.Context,
 	db *sql.DB,
 	question string,
 	intents []recall.MetricIntent,
-) ([]llmRequirementHint, error) {
+) (decomposeResult, error) {
+	var zero decomposeResult
 	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
 	if baseURL == "" {
-		return nil, fmt.Errorf("no agent LLM config available")
+		return zero, fmt.Errorf("no agent LLM config available")
 	}
 
-	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的 Intent 参数表，必须做两件事：
+	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的 Intent 参数表，做三件事：
 
-第一件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
-第二件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个 Intent 真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
+第一件：把用户这一句里包含的「独立子问题」分出来。一句话里可能并列了多个问题（例如"上海的总营收是多少？外卖占比是多少？"是两个子问题）。每个子问题用一句自然语言描述。如果只有一个问题，就只返回一个。
+第二件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
+第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个 Intent 真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
 
-只输出一个 JSON 数组，不要包裹 markdown 代码块，不要输出任何其他文字：
-[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a","intent_b"],"uncovered_reason":"..."}]
+只输出一个 JSON 对象，不要包裹 markdown 代码块，不要输出任何其他文字：
+{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a"],"uncovered_reason":"..."}]}
 
-字段规则：
+sub_questions 规则：
+- 每个元素是一句完整的自然语言子问题，尽量保留用户原话里的关键词。
+- 并列的问题要分开；递进/修饰同一目标的不要硬拆。
+- 最多 6 个。
+
+requirements 字段规则：
 - kind="metric" 表示用户想查询的指标（如销售额、数量）。
 - kind="dimension" 表示用户想按其分组的维度。
 - kind="filter" 表示用户想按其筛选的条件。
@@ -269,8 +294,8 @@ func decomposeQuestion(
   - 例如 shape="枚举集合" 且参数 type="enum_ref" 且 op="=" → 单次只能选一个枚举值 → 仍是 covered=false（除非问题就是单值）。
 - covered_by：covered=true 时，列出真正满足形态的 Intent 名（必须出现在参数表里）。
 - uncovered_reason：covered=false 时，一句话说明为什么形态对不上（例如"参数仅支持 YYYY-MM 单月前缀，不直接支持 2024-2025 年范围"）。
-- 如果问题只是通用查询（无特定筛选），只返回 metric 项。
-- 数组元素不超过 8 个。`
+- 如果问题只是通用查询（无特定筛选），requirements 只返回 metric 项。
+- requirements 元素不超过 8 个。`
 
 	userPrompt := buildDecomposeUserPrompt(question, intents)
 
@@ -282,12 +307,12 @@ func decomposeQuestion(
 	content, _, err := llmclient.DoChatWithUsage(baseURL, apiKey, map[string]interface{}{
 		"model":       modelName,
 		"messages":    llmMessages,
-		"max_tokens":  1200,
+		"max_tokens":  1600,
 		"temperature": 0.1,
 		"_vendor":     vendor,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("decompose LLM call failed: %w", err)
+		return zero, fmt.Errorf("decompose LLM call failed: %w", err)
 	}
 
 	return parseDecompJSON(llmclient.StripThinkTags(content))
@@ -334,30 +359,54 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent) st
 			}
 		}
 	}
-	sb.WriteString("\n请输出 JSON 数组。")
+	sb.WriteString("\n请输出 JSON 对象。")
 	return sb.String()
 }
 
-// parseDecompJSON parses the LLM's JSON array reply into []llmRequirementHint.
-// Tolerates leading/trailing whitespace and code-block wrappers. `covered`
-// uses *bool so we can distinguish "LLM didn't decide" from "explicit false".
-func parseDecompJSON(raw string) ([]llmRequirementHint, error) {
+// reqItemJSON is one requirement entry as the LLM emits it. `covered` is
+// *bool so we can distinguish "LLM didn't decide" from "explicit false".
+type reqItemJSON struct {
+	Kind            string   `json:"kind"`
+	Name            string   `json:"name"`
+	Shape           string   `json:"shape"`
+	Why             string   `json:"why"`
+	Covered         *bool    `json:"covered"`
+	CoveredBy       []string `json:"covered_by"`
+	UncoveredReason string   `json:"uncovered_reason"`
+}
+
+// parseDecompJSON parses the LLM reply into a decomposeResult. The contract is
+// an object {sub_questions, requirements}; for resilience it also accepts a
+// bare requirements array (older shape) and treats sub_questions as empty.
+func parseDecompJSON(raw string) (decomposeResult, error) {
 	cleaned := llmclient.ExtractJSON(raw)
 	if cleaned == "" {
 		cleaned = strings.TrimSpace(raw)
 	}
-	var items []struct {
-		Kind            string   `json:"kind"`
-		Name            string   `json:"name"`
-		Shape           string   `json:"shape"`
-		Why             string   `json:"why"`
-		Covered         *bool    `json:"covered"`
-		CoveredBy       []string `json:"covered_by"`
-		UncoveredReason string   `json:"uncovered_reason"`
+
+	// Preferred shape: object.
+	var obj struct {
+		SubQuestions []string      `json:"sub_questions"`
+		Requirements []reqItemJSON `json:"requirements"`
 	}
-	if err := json.Unmarshal([]byte(cleaned), &items); err != nil {
-		return nil, fmt.Errorf("decompose JSON parse failed (%q): %w", truncateStr(cleaned, 200), err)
+	if err := json.Unmarshal([]byte(cleaned), &obj); err == nil && (len(obj.Requirements) > 0 || len(obj.SubQuestions) > 0) {
+		return decomposeResult{
+			SubQuestions: cleanSubQuestions(obj.SubQuestions),
+			Requirements: normalizeReqItems(obj.Requirements),
+		}, nil
 	}
+
+	// Fallback shape: bare array of requirements.
+	var arr []reqItemJSON
+	if err := json.Unmarshal([]byte(cleaned), &arr); err != nil {
+		return decomposeResult{}, fmt.Errorf("decompose JSON parse failed (%q): %w", truncateStr(cleaned, 200), err)
+	}
+	return decomposeResult{Requirements: normalizeReqItems(arr)}, nil
+}
+
+// normalizeReqItems maps raw LLM items to llmRequirementHint, defaulting an
+// unknown kind to "metric" and dropping nameless entries.
+func normalizeReqItems(items []reqItemJSON) []llmRequirementHint {
 	out := make([]llmRequirementHint, 0, len(items))
 	for _, it := range items {
 		kind := strings.ToLower(strings.TrimSpace(it.Kind))
@@ -380,7 +429,22 @@ func parseDecompJSON(raw string) ([]llmRequirementHint, error) {
 			UncoveredReason: strings.TrimSpace(it.UncoveredReason),
 		})
 	}
-	return out, nil
+	return out
+}
+
+// cleanSubQuestions trims, drops empties, and dedupes the sub-question list.
+func cleanSubQuestions(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // buildInfeasibilityAnswer assembles the machine-templated stop answer.
@@ -396,6 +460,60 @@ func buildInfeasibilityAnswer(verdict mission.ReachabilityVerdict) string {
 		sb.WriteString(" —— 但你的问题需要整体回答，目前做不到。")
 	}
 	return sb.String()
+}
+
+// reconcileMissionTasks is the turn-end hook. Given the mission's
+// sub-question task list and the final assistant answer, it asks the LLM
+// once which sub-questions the answer actually addressed, then records the
+// per-task passing/blocked verdict. Fail-open and best-effort: any LLM /
+// parse error is logged and leaves the tasks as-is. No-op when the shadow
+// path is inert or there are no sub-question tasks.
+func reconcileMissionTasks(ctx context.Context, db *sql.DB, sm *shadowMission, finalAnswer string) {
+	if !missionActEnabled || sm == nil || sm.m == nil || len(sm.m.Tasks) == 0 {
+		return
+	}
+	if strings.TrimSpace(finalAnswer) == "" {
+		return
+	}
+
+	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
+	if baseURL == "" {
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## 子问题清单（id → 子问题）\n")
+	for _, t := range sm.m.Tasks {
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", t.ID, t.Behavior))
+	}
+	sb.WriteString("\n## 系统给出的最终回答\n")
+	sb.WriteString(finalAnswer)
+	sb.WriteString("\n\n请判断每个子问题是否在最终回答里得到了实际回答。只输出 JSON 对象，键是子问题 id，值是 true/false：\n{\"q1\":true,\"q2\":false}")
+
+	systemPrompt := `你是一个核对助手。给定一组子问题与系统的最终回答，判断每个子问题是否被实际回答了（有具体数值/结论才算 true；只是提到、回避、或说做不到算 false）。只输出 JSON 对象，不要包裹 markdown，不要多余文字。`
+
+	content, _, err := llmclient.DoChatWithUsage(baseURL, apiKey, map[string]interface{}{
+		"model":       modelName,
+		"messages":    []map[string]interface{}{{"role": "system", "content": systemPrompt}, {"role": "user", "content": sb.String()}},
+		"max_tokens":  300,
+		"temperature": 0.1,
+		"_vendor":     vendor,
+	})
+	if err != nil {
+		log.Printf("MISSION-ACT: reconcile skipped (fail-open): %v", err)
+		return
+	}
+
+	cleaned := llmclient.ExtractJSON(llmclient.StripThinkTags(content))
+	if cleaned == "" {
+		cleaned = strings.TrimSpace(content)
+	}
+	var results map[string]bool
+	if err := json.Unmarshal([]byte(cleaned), &results); err != nil {
+		log.Printf("MISSION-ACT: reconcile parse failed (%q): %v", truncateStr(cleaned, 200), err)
+		return
+	}
+	sm.applyTaskReconciliation(ctx, results)
 }
 
 // truncateStr truncates s to max bytes for log messages.
