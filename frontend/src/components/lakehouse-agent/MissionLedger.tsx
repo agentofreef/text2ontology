@@ -318,9 +318,13 @@ function MissionModal({ mission, onClose }: { mission: Mission; onClose: () => v
 interface MissionLedgerProps {
   missions: Mission[]
   loading?: boolean
+  // Called when the user clicks a mission to open the modal — gives the
+  // parent a chance to refetch so the modal sees the freshest reachability /
+  // synthesis instead of the snapshot taken at threadId-mount time.
+  onRefresh?: () => void | Promise<void>
 }
 
-export function MissionLedger({ missions, loading }: MissionLedgerProps) {
+export function MissionLedger({ missions, loading, onRefresh }: MissionLedgerProps) {
   const [collapsed, setCollapsed] = useState(false)
   // Track by id, not object, so the modal sees the freshest mission
   // version each render (the parent refetches as the turn progresses).
@@ -354,7 +358,17 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
           ) : (
             <div className="px-3 pb-3 space-y-1.5 overflow-y-auto">
               {list.map(m => (
-                <MissionSummary key={m.mission_id} mission={m} onOpen={() => setSelectedId(m.mission_id)} />
+                <MissionSummary
+                  key={m.mission_id}
+                  mission={m}
+                  onOpen={() => {
+                    // Refetch first so the modal sees the freshest version;
+                    // state update is async, so id-based lookup picks it up
+                    // once the new list lands.
+                    if (onRefresh) void onRefresh()
+                    setSelectedId(m.mission_id)
+                  }}
+                />
               ))}
               <div className="text-[10px] text-gray-400 text-center pt-1">点击任一条查看可达性详情</div>
             </div>

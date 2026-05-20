@@ -705,18 +705,19 @@ function LakehouseAgentChat() {
   // MissionAct M4 — fetch the mission ledger whenever the thread changes.
   // Empty list is the legitimate response (USE_MISSION_ACT off, or no
   // missions yet); the component renders nothing in that case.
+  const refetchMissions = useCallback(async (tid?: string | null) => {
+    const id = tid ?? threadId
+    if (!id) { setMissions([]); return }
+    try {
+      const res = await api<{ missions?: Mission[] }>(`/ontology/lakehouse-missions?thread_id=${encodeURIComponent(id)}`)
+      setMissions(res?.missions ?? [])
+    } catch {
+      setMissions([])
+    }
+  }, [threadId])
   useEffect(() => {
-    if (!threadId) { setMissions([]); return }
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await api<{ missions?: Mission[] }>(`/ontology/lakehouse-missions?thread_id=${encodeURIComponent(threadId)}`)
-        if (!cancelled) setMissions(res?.missions ?? [])
-      } catch {
-        if (!cancelled) setMissions([])
-      }
-    })()
-    return () => { cancelled = true }
+    void refetchMissions(threadId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, messages.length])
 
   const loadThread = useCallback(async (id: string) => {
@@ -931,6 +932,13 @@ function LakehouseAgentChat() {
       if (showMemory && threadId) {
         void fetchLedger(threadId)
       }
+      // MissionAct — turn just ended; refetch the mission so the panel
+      // picks up the latest reachability / synthesis / status. Without
+      // this, the panel shows the early snapshot taken at threadId-mount
+      // time, before reachability was persisted.
+      if (threadId) {
+        void refetchMissions(threadId)
+      }
     }
   }
 
@@ -1132,7 +1140,7 @@ function LakehouseAgentChat() {
               thread has no missions. max-h caps it so the graph keeps room. */}
           {!graphFullscreen && (
             <div className="max-h-[40%] flex flex-col min-h-0">
-              <MissionLedger missions={missions} />
+              <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
             </div>
           )}
         </div>
