@@ -44,7 +44,59 @@ import (
 	"github.com/lakehouse2ontology/llmclient"
 	"github.com/lakehouse2ontology/mission"
 	"github.com/lakehouse2ontology/services/agent-server/recall"
+	"github.com/lib/pq"
 )
+
+// shapeCap is one row of the data-driven shape vocabulary (table
+// lakehouse_shape_capability). It is loaded fresh on every gate
+// invocation. The Name is treated as opaque by every Go file: nothing
+// elsewhere in the codebase compares against a specific shape string.
+// The gate only does Name-equality between what the LLM emits as the
+// required shape and what an Intent parameter declares.
+type shapeCap struct {
+	Name        string
+	Description string
+	Examples    []string
+	// Satisfies is the subsumption list: a parameter declaring this shape
+	// can also serve a requirement the LLM classified as any name here
+	// (plus this shape itself). Strictly broader→narrower; see
+	// docs/schema/schema.sql > lakehouse_shape_capability.
+	Satisfies []string
+}
+
+// loadShapeVocab reads the registered shape vocabulary from the database.
+// Any error or an unpopulated table returns nil, in which case the gate
+// degrades to its prior LLM-only judgement (no deterministic shape
+// match). Safe default: a missing / empty vocab MUST NEVER make the gate
+// stricter than the legacy path.
+func loadShapeVocab(ctx context.Context, db *sql.DB) []shapeCap {
+	if db == nil {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, COALESCE(description, ''), COALESCE(examples, '{}'::text[]),
+		       COALESCE(satisfies, '{}'::text[])
+		FROM lakehouse_shape_capability
+		ORDER BY name`)
+	if err != nil {
+		log.Printf("MISSION-ACT: shape vocab load skipped (fail-open): %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []shapeCap
+	for rows.Next() {
+		var sc shapeCap
+		var ex, sat pq.StringArray
+		if err := rows.Scan(&sc.Name, &sc.Description, &ex, &sat); err != nil {
+			log.Printf("MISSION-ACT: shape vocab scan: %v", err)
+			continue
+		}
+		sc.Examples = []string(ex)
+		sc.Satisfies = []string(sat)
+		out = append(out, sc)
+	}
+	return out
+}
 
 // llmRequirementHint is what the LLM returns per decomposed item — both the
 // decomposition itself and its shape-aware coverage verdict against the
@@ -86,8 +138,13 @@ func runReachabilityJudge(
 		return ""
 	}
 
+	// Load the data-driven shape vocabulary once per gate invocation. Empty
+	// or error → vocab is nil → all downstream code degrades to legacy
+	// behaviour (LLM-only shape judgement, no deterministic match check).
+	vocab := loadShapeVocab(ctx, db)
+
 	// ── LLM call: decomposition + shape-aware coverage in one pass ───────────
-	res, err := decomposeQuestion(ctx, db, question, intents)
+	res, err := decomposeQuestion(ctx, db, question, intents, vocab)
 	if err != nil {
 		log.Printf("MISSION-ACT: reachability decompose skipped (fail-open): %v", err)
 		return ""
@@ -97,7 +154,7 @@ func runReachabilityJudge(
 	}
 
 	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
-	verdict := buildVerdictFromLLMHints(res.Requirements, intents)
+	verdict := buildVerdictFromLLMHints(res.Requirements, intents, vocab)
 
 	// ── Persist (best-effort) ────────────────────────────────────────────────
 	sm.recordReachability(ctx, verdict)
@@ -126,10 +183,16 @@ func runReachabilityJudge(
 //   - if after sanitisation a dimension/filter has covered=true but no real
 //     covered_by, it falls back to declarative name-match against the
 //     intent parameter table; if that also fails the item is forced uncovered.
-func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.MetricIntent) mission.ReachabilityVerdict {
+func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap) mission.ReachabilityVerdict {
 	realIntentNames := map[string]bool{}
 	for _, mi := range intents {
 		realIntentNames[mi.Name] = true
+	}
+	vocabKnown := map[string]bool{}
+	satisfies := map[string][]string{}
+	for _, sc := range vocab {
+		vocabKnown[sc.Name] = true
+		satisfies[sc.Name] = sc.Satisfies
 	}
 	specs := buildIntentSpecs(intents) // for fallback declarative match
 
@@ -160,6 +223,19 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 		llmSaysCovered := h.Covered != nil && *h.Covered
 		switch {
 		case llmSaysCovered && len(realCoveredBy) > 0:
+			// Hole-2 guard: when shape is a registered vocab name, the cited
+			// Intents must ALSO declare a parameter with the same
+			// shapeCapability. Without this, "real intent name + wrong shape"
+			// slips through — which is the exact bug class this gate exists
+			// to catch. Skipped (legacy behaviour) when shape is empty / not
+			// in the vocab, so an unpopulated vocab never causes regression.
+			if vocabKnown[h.Shape] && !anyCitedIntentServesShape(realCoveredBy, h.Shape, intents, satisfies) {
+				rc.MissingNote = fmt.Sprintf(
+					"已授权 Intent (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
+					strings.Join(realCoveredBy, "、"), h.Shape)
+				v.Feasible = false
+				break
+			}
 			rc.Covered = true
 			rc.CoveredBy = realCoveredBy
 		case llmSaysCovered && len(realCoveredBy) == 0:
@@ -185,6 +261,48 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 	}
 	v.Reason = buildVerdictReason(v)
 	return v
+}
+
+// anyCitedIntentServesShape reports whether at least one of the cited
+// Intents has a parameter that can serve the required shape — either by
+// declaring it exactly, or by declaring a broader shape that subsumes it
+// (declaredShape ∈ satisfies-closure). Used by the hole-2 guard in
+// buildVerdictFromLLMHints.
+//
+// The subsumption tolerance is what prevents false refusals when the LLM
+// classifies a requirement with a narrower-but-compatible label than the
+// parameter's declaration (e.g. param declares a range shape, LLM labels
+// the requirement as the point shape the range subsumes). Empty required
+// shape returns false — by then the gate has already decided to skip the
+// deterministic check for that requirement.
+func anyCitedIntentServesShape(cited []string, required string, intents []recall.MetricIntent, satisfies map[string][]string) bool {
+	if required == "" {
+		return false
+	}
+	citedSet := map[string]bool{}
+	for _, n := range cited {
+		citedSet[n] = true
+	}
+	for _, mi := range intents {
+		if !citedSet[mi.Name] {
+			continue
+		}
+		for _, p := range mi.Parameters {
+			declared := p.ShapeCapability
+			if declared == "" {
+				continue
+			}
+			if declared == required {
+				return true
+			}
+			for _, sat := range satisfies[declared] {
+				if sat == required {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // buildVerdictReason composes the human-readable verdict explanation from the
@@ -256,6 +374,7 @@ func decomposeQuestion(
 	db *sql.DB,
 	question string,
 	intents []recall.MetricIntent,
+	vocab []shapeCap,
 ) (decomposeResult, error) {
 	var zero decomposeResult
 	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
@@ -297,7 +416,7 @@ requirements 字段规则：
 - 如果问题只是通用查询（无特定筛选），requirements 只返回 metric 项。
 - requirements 元素不超过 8 个。`
 
-	userPrompt := buildDecomposeUserPrompt(question, intents)
+	userPrompt := buildDecomposeUserPrompt(question, intents, vocab)
 
 	llmMessages := []map[string]interface{}{
 		{"role": "system", "content": systemPrompt},
@@ -323,7 +442,7 @@ requirements 字段规则：
 // the LLM can shape-match — name match alone is not enough to judge whether
 // a question's "year range" filter can really be served by a "starts-with
 // YYYY-MM" parameter.
-func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent) string {
+func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vocab []shapeCap) string {
 	var sb strings.Builder
 	sb.WriteString("## 用户问题\n")
 	sb.WriteString(question)
@@ -347,6 +466,9 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent) st
 				if p.Description != "" {
 					sb.WriteString(fmt.Sprintf(", desc=%q", p.Description))
 				}
+				if p.ShapeCapability != "" {
+					sb.WriteString(fmt.Sprintf(", shape_capability=%q", p.ShapeCapability))
+				}
 				if len(p.AllowedValues) > 0 {
 					// Cap allowed-values length so very large enums don't blow the prompt.
 					vs := p.AllowedValues
@@ -358,6 +480,17 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent) st
 				sb.WriteString("\n")
 			}
 		}
+	}
+	if len(vocab) > 0 {
+		sb.WriteString("\n## 形态词表（封闭词表 — shape 字段必须从下面挑一个 name；都不匹配就留空字符串）\n")
+		for _, sc := range vocab {
+			sb.WriteString(fmt.Sprintf("  - %s — %s", sc.Name, sc.Description))
+			if len(sc.Examples) > 0 {
+				sb.WriteString(fmt.Sprintf("（例：%s）", strings.Join(sc.Examples, "; ")))
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n仅当某 Intent 的某个参数声明了 shape_capability 等于该要素 shape 时，才算形态对得上；否则即便 property 名字一致，也要把 covered 置为 false。\n")
 	}
 	sb.WriteString("\n请输出 JSON 对象。")
 	return sb.String()

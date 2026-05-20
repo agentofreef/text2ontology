@@ -290,6 +290,11 @@ ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS replace_group_by BO
 -- user-level parameters so agent-server can synthesise a focused tool def
 -- per matched intent. Parameters JSONB schema convention:
 -- {label, kind, options?, required?} per parameter.
+--
+-- Optional per-parameter key `shapeCapability` (text) is a soft reference to
+-- lakehouse_shape_capability.name — the mission reachability gate uses it to
+-- verify the LLM's coverage claim against the parameter's declared shape.
+-- Empty / missing = "shape unknown", gate degrades to LLM-only judgement.
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_order_by_label TEXT;
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_order_by_dir   TEXT;
 ALTER TABLE lakehouse_metric_intent ADD COLUMN IF NOT EXISTS default_limit          INT;
@@ -1316,3 +1321,44 @@ CREATE INDEX IF NOT EXISTS idx_ingest_job_proj
 CREATE INDEX IF NOT EXISTS idx_ingest_job_ds
   ON ingest_job(data_source_id, created_at DESC)
   WHERE data_source_id IS NOT NULL;
+
+-- ==================== lakehouse_shape_capability ====================
+-- Data-driven vocabulary for the mission reachability gate
+-- (services/agent-server/handler/reachability_judge.go). The gate's LLM
+-- decomposes each sub-question into the "shape" it requires (single-month
+-- prefix, year range, exact match, …) and then needs to verify that some
+-- cited Intent parameter actually declares the matching shape. This table
+-- holds the *names* of recognised shapes plus the LLM-facing descriptions
+-- that train it to classify correctly. Operators add / edit / remove rows
+-- here — no Go or TS source ever names a specific shape.
+--
+-- Soft reference: lakehouse_metric_intent.parameters[*].shapeCapability
+-- (text in JSONB) names a row in this table. JSONB cannot enforce the FK
+-- itself; validation is the CRUD path's job (or none, since empty / missing
+-- is the safe degradation).
+--
+-- Empty table = decompose gate falls back to its prior behaviour
+-- (LLM-only judgement, no deterministic shape check) — so an unpopulated
+-- table is safe.
+--
+-- `satisfies` is the subsumption list: a parameter declaring shape X can
+-- ALSO serve a requirement the LLM classified as any name in X.satisfies
+-- (plus X itself). Direction is strictly broader→narrower: a range shape
+-- lists the point shape it subsumes (e.g. multi_period_range satisfies
+-- single_period_prefix, because a true start/end range param can also
+-- answer a single-period question). NEVER list a broader shape — doing so
+-- re-opens the false-acceptance the gate exists to prevent. Empty = the
+-- shape satisfies only itself (exact-match semantics). This lets the LLM
+-- pick a narrower-but-compatible label without the gate falsely refusing.
+--
+-- Seed: docs/schema/seeds/shape_capability.sql.
+CREATE TABLE IF NOT EXISTS lakehouse_shape_capability (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    examples    TEXT[] DEFAULT '{}',
+    satisfies   TEXT[] DEFAULT '{}',
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+-- Forward-migration for existing DBs (CREATE TABLE IF NOT EXISTS is a no-op).
+ALTER TABLE lakehouse_shape_capability ADD COLUMN IF NOT EXISTS satisfies TEXT[] DEFAULT '{}';

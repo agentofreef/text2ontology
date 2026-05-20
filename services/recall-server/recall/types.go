@@ -150,6 +150,14 @@ type MetricIntentParameter struct {
 	// unavailable or too large", rendering and binding both degrade to
 	// string-typed pass-through.
 	AllowedValues []string `json:"allowedValues,omitempty"`
+
+	// ShapeCapability — soft reference to lakehouse_shape_capability.name.
+	// Optional; empty/missing means "shape unknown" and the mission
+	// reachability gate degrades to LLM-only judgement for this parameter
+	// (no deterministic shape check). The string is treated as opaque by
+	// every Go file: no code names a specific shape. See
+	// docs/schema/schema.sql > lakehouse_shape_capability.
+	ShapeCapability string `json:"shapeCapability,omitempty"`
 }
 
 // MetricIntent represents a recalled "query intent shortcut" — a canonical

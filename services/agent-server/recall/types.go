@@ -168,6 +168,13 @@ type MetricIntentParameter struct {
 	// "candidate set unavailable / too large", rendering then degrades to
 	// the type:string form (no candidate hint).
 	AllowedValues []string `json:"allowedValues,omitempty"`
+
+	// ShapeCapability mirrors recall-server's MetricIntentParameter field.
+	// Soft reference to a name in lakehouse_shape_capability. Empty =
+	// shape unknown; the reachability gate degrades silently. Opaque to
+	// every Go file: no code names a specific shape. Source of truth:
+	// docs/schema/schema.sql > lakehouse_shape_capability.
+	ShapeCapability string `json:"shapeCapability,omitempty"`
 }
 
 type MetricIntent struct {
