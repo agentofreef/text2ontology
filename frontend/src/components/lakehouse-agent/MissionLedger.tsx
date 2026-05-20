@@ -224,7 +224,10 @@ function ReachabilityBlock({ v }: { v: ReachabilityVerdict }) {
 }
 
 function MissionCard({ mission }: { mission: Mission }) {
-  const [open, setOpen] = useState(false)
+  // Default-expanded: the headline of every mission is the reachability
+  // verdict + its decomposition; folding it behind a click hides the
+  // primary value of the panel.
+  const [open, setOpen] = useState(true)
   const ms = MISSION_STYLE[mission.status] || MISSION_STYLE.active
   const tasks = mission.tasks || []
 
