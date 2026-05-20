@@ -322,7 +322,9 @@ interface MissionLedgerProps {
 
 export function MissionLedger({ missions, loading }: MissionLedgerProps) {
   const [collapsed, setCollapsed] = useState(false)
-  const [selected, setSelected] = useState<Mission | null>(null)
+  // Track by id, not object, so the modal sees the freshest mission
+  // version each render (the parent refetches as the turn progresses).
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   if (loading) {
     return (
@@ -334,6 +336,7 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
   }
 
   const list = missions || []
+  const selected = selectedId ? (list.find(m => m.mission_id === selectedId) || null) : null
 
   return (
     <>
@@ -351,7 +354,7 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
           ) : (
             <div className="px-3 pb-3 space-y-1.5 overflow-y-auto">
               {list.map(m => (
-                <MissionSummary key={m.mission_id} mission={m} onOpen={() => setSelected(m)} />
+                <MissionSummary key={m.mission_id} mission={m} onOpen={() => setSelectedId(m.mission_id)} />
               ))}
               <div className="text-[10px] text-gray-400 text-center pt-1">点击任一条查看可达性详情</div>
             </div>
@@ -359,7 +362,7 @@ export function MissionLedger({ missions, loading }: MissionLedgerProps) {
         )}
       </div>
 
-      {selected && <MissionModal mission={selected} onClose={() => setSelected(null)} />}
+      {selected && <MissionModal mission={selected} onClose={() => setSelectedId(null)} />}
     </>
   )
 }
