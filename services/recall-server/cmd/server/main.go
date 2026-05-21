@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/lakehouse2ontology/authmw"
+	"github.com/lakehouse2ontology/dsnguard"
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/recall-server/recall"
@@ -78,6 +79,10 @@ func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
+	}
+	// Fail-closed: refuse to start on a malformed or legacy (text2dax) DSN.
+	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
+		log.Fatalf("%v", err)
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

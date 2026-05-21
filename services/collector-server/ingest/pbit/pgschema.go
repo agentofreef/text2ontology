@@ -2,12 +2,15 @@
 package pbit
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/lib/pq"
+
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
 
 // ErrTargetSchemaExists is returned when the final lakehouse schema already
@@ -28,10 +31,10 @@ func StagingName(finalSchema string) string {
 	return finalSchema + "_staging"
 }
 
-// CreateStagingSchema creates the staging schema via autocommit DDL.
+// CreateStagingSchema creates the staging schema via autocommit DDL and emits
+// the per-schema reader grants (best-effort).
 func CreateStagingSchema(db *sql.DB, schema string) error {
-	_, err := db.Exec(fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, pq.QuoteIdentifier(schema)))
-	if err != nil {
+	if err := pgschema.CreateSchemaWithGrants(context.Background(), db, schema); err != nil {
 		return fmt.Errorf("pbitlakehouse: create staging schema %q: %w", schema, err)
 	}
 	return nil

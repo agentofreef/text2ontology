@@ -14,6 +14,7 @@ import (
 	"github.com/lib/pq"
 
 	pbit "github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
 
 // progressReporter is the small surface writeAllSheetsToStaging needs from
@@ -57,10 +58,9 @@ func writeAllSheetsToStaging(
 	}
 
 	// 1. CREATE SCHEMA IF NOT EXISTS (idempotent; outside tx so future
-	//    re-uploads of the same data_source can reuse the schema).
-	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, stagingSchema),
-	); err != nil {
+	//    re-uploads of the same data_source can reuse the schema). Emits the
+	//    per-schema reader grants too (best-effort).
+	if err := pgschema.CreateSchemaWithGrants(ctx, db, stagingSchema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 

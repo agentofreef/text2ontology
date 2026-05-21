@@ -2,6 +2,7 @@ package authmw
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -163,7 +164,11 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 func (m *Middleware) handleInternal(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	expected := os.Getenv("INTERNAL_TOKEN")
 	provided := r.Header.Get("X-Internal-Token")
-	if expected == "" || provided != expected {
+	// Constant-time comparison to avoid leaking the token via timing.
+	// An empty/unset expected token is rejected (fail-closed): we never
+	// authenticate when no internal token is configured. ConstantTimeCompare
+	// returns 0 for differing lengths, so a length mismatch is also a reject.
+	if expected == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		jsonHeader(w)
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"error":"unauthorized"}`)

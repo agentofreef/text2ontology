@@ -42,6 +42,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/lakehouse2ontology/dsnguard"
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/mcp-tools-server/auth"
@@ -77,7 +78,12 @@ func main() {
 	// intentionally has NO access to ontology / lakehouse tables —
 	// ops/db-roles.sql restricts mcp_tools_server_user to SELECT +
 	// UPDATE(last_used_at) on mcp_api_key.
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	dsn := os.Getenv("DATABASE_URL")
+	// Fail-closed: refuse to start on a malformed or legacy (text2dax) DSN.
+	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
+		log.Fatalf("%v", err)
+	}
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
 	}
