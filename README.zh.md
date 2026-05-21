@@ -116,6 +116,68 @@ open http://localhost:18080
 
 ---
 
+## 生产级部署(加固版,单入口)
+
+上面的「快速开始」是**本地试用**用的——方便,但用的是默认密钥,而且(历史上)每个服务都单独开了宿主端口。要跑**生产级**部署,请用专门的加固 compose 文件 **`docker-compose.product-ready.yml`**。它作为一个独立的 stack 运行,**对外只开放一个端口——nginx 网关**。Postgres、6 个 Go 服务、以及整套可观测性栈(otel-collector / Jaeger / Prometheus / Grafana)都**只在 Docker 内网可达**,宿主上没有任何直连数据库或服务的端口。
+
+**和「快速开始」的区别**
+
+- **单入口**:只发布网关端口(默认 `28080`)。其余全部内网化——攻击面就一个端口。
+- **运行时加固**:容器非 root;每服务 CPU / 内存 / PID 限制;HTTP 读/空闲超时 + 数据库连接池上限;优雅退出(SIGTERM 排空在途请求,SSE 不被截断);panic-recover 中间件。
+- **网关加固**:按 IP 的限流 + 连接数限制、非流式路由的 proxy 超时(SSE / 导入流故意豁免)、以及安全响应头(CSP、X-Frame-Options、X-Content-Type-Options、Referrer-Policy、HSTS)。
+- **独立 compose 项目**(`t2o-product-ready`):有自己的容器、网络、卷——可以和 dev stack **并行运行,互不影响**。
+
+### 1. 配置并轮换密钥(必做)
+
+```bash
+cp .env.shared.example .env.shared
+```
+
+对外暴露前,把 `.env.shared` 里**所有**占位符都换掉——默认值(`*_change_me`、`admin`)只用于本地试用:
+
+| 变量 | 用途 |
+|---|---|
+| `POSTGRES_PASSWORD` | Postgres 超级用户密码 |
+| `ADMIN_PASSWORD` | 初始 `admin` 网页登录密码 |
+| `AUTH_TOKEN_SECRET` | 用户会话 token 的 HMAC 密钥(用 ≥ 64 位随机 hex) |
+| `INTERNAL_TOKEN` | 服务间认证 token |
+
+用 `openssl rand -hex 32` 之类生成强随机值。任何还含 `change_me` / `=admin` 的部署都视为**尚未配置完成**。
+
+### 2. 构建并启动单入口 stack
+
+```bash
+# 从源码构建全部 8 个镜像并启动隔离的加固 stack
+docker compose -f docker-compose.product-ready.yml up -d --build
+```
+
+> CI 在每次推到 `main` 时也会把多架构(amd64 + arm64)预构建镜像发布到 `ghcr.io/agentofreef/text2ontology-*:latest`,想 pull 而非 build 也可以。
+
+### 3. 验证(只有网关可达)
+
+```bash
+docker compose -f docker-compose.product-ready.yml ps          # 全部 healthy;只有网关映射宿主端口
+curl -fsS http://localhost:28080/healthz                       # -> ok
+curl -sI  http://localhost:28080/ | grep -i location           # -> 302 Location: /lakehouse/(相对跳转)
+```
+
+浏览器打开 **http://localhost:28080**,用 `admin` + 你设的 `ADMIN_PASSWORD` 登录,然后在 `/settings/llm-config` 添加 chat 模型(同「快速开始」说明)。
+
+### 运维须知
+
+- **改 / 收紧对外端口**——改 `docker-compose.product-ready.yml` 里网关的 `ports:`(如 `8443:8080`)。想让它不暴露到局域网、由你自己的 TLS 代理转发,就绑回环:`127.0.0.1:28080:8080`。
+- **TLS**——网关在它那个端口上走明文 HTTP;请在前面用反向代理终结 TLS(或给 `services/gateway/nginx.conf` 加一个 TLS `server {}`)。HSTS 头会发,但明文 HTTP 下是 no-op。
+- **最小权限数据库角色(推荐)**——默认服务以 Postgres 超级用户连接。要让每个服务跑在各自的 scoped 角色上:把 `ops/db-roles.sql` 应用到数据库,在 `.env` 里设各服务的 `*_DSN` 变量,把每个服务的 `DATABASE_URL` 指向其 scoped 角色,并用 `scripts/check-runtime-grants.sh` 验证。
+- **生命周期**
+  ```bash
+  docker compose -f docker-compose.product-ready.yml logs -f gateway
+  docker compose -f docker-compose.product-ready.yml down        # 停止,保留数据库卷
+  docker compose -f docker-compose.product-ready.yml down -v      # 停止并清空数据库卷
+  ```
+- **更新**——`git pull && docker compose -f docker-compose.product-ready.yml up -d --build`。
+
+---
+
 ## 在开始之前的几句话
 
 "AI Agent + 你的数据库"这条赛道上,主流话术大致是:把数据库连接串和 schema metadata 喂给 Agent,它就能回答一切。我自己**花了很长时间**想让那条路走通 —— 换过不同的形态、不同的 stack —— **看着它每次以同样的方式崩**。所以,在你把周末交给这个项目之前,先说几句实在的。
