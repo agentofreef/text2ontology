@@ -27,6 +27,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -37,6 +39,7 @@ import (
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/lakehouse"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/smartquery"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 // HTTP-level metrics for the /internal/smartquery/execute endpoint. The
@@ -93,6 +96,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	engine := &lakehouse.Engine{DB: db}
@@ -116,13 +120,24 @@ func main() {
 	//     every downstream span nests under the caller's span.
 	//   auth.Wrap                           — token + audit.
 	//   mux                                 — business handlers.
-	handler := observability.TraceContextMiddleware(
-		observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-			auth.Wrap(mux)))
+	// srvkit.RecoverMiddleware is OUTERMOST here (this service has no CORS
+	// layer) so handler panics are recovered (→ 500) before they unwind the
+	// goroutine. Otherwise the existing order is preserved.
+	handler := srvkit.RecoverMiddleware(
+		observability.TraceContextMiddleware(
+			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+				auth.Wrap(mux))))
 
 	addr := ":" + *port
 	log.Printf("▼// lakehouse-sql-server listening on %s (DB OK, tracer=lakehouse-sql-server)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown: srvkit.Run drains HTTP on SIGINT/SIGTERM, then the
+	// deferred db.Close() + obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srvkit.Run(ctx, addr, handler); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // executeRequest is the HTTP request body: a full QuerySpec envelope.

@@ -36,6 +36,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -44,6 +46,7 @@ import (
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/mcp-tools-server/auth"
 	"github.com/lakehouse2ontology/services/mcp-tools-server/tools"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 func main() {
@@ -85,6 +88,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 	authz := auth.New(db)
 
@@ -120,15 +124,25 @@ func main() {
 	// Phase 4C.2: CORSMiddleware wraps outermost so browser-driven
 	// Claude Code-style clients can reach /api/mcp/* + /mcp from a
 	// cross-origin page without running into ACAO blocks.
+	//   srvkit.RecoverMiddleware    — recover handler panics (→ 500) just
+	//     inside CORS so panics are caught while CORS headers are still set.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddlewareForPrefixes([]string{"/api/mcp/", "/mcp"})(
-				authz.Middleware()(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddlewareForPrefixes([]string{"/api/mcp/", "/mcp"})(
+					authz.Middleware()(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// mcp-tools-server listening on %s (tracer=mcp-tools-server)", addr)
 	log.Printf("   recall-server  → %s", os.Getenv("RECALL_SERVER_URL"))
 	log.Printf("   lakehouse-sql  → %s", os.Getenv("LAKEHOUSE_SQL_URL"))
 	log.Printf("   backend-api    → %s", os.Getenv("BACKEND_API_URL"))
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown: srvkit.Run drains HTTP on SIGINT/SIGTERM, then the
+	// deferred db.Close() + obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srvkit.Run(ctx, addr, handler); err != nil {
+		log.Fatal(err)
+	}
 }

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,10 +19,28 @@ var globalLLMSem = make(chan struct{}, 10)
 // activeRuns tracks which run IDs are currently being processed to avoid double-pickup.
 var activeRuns sync.Map
 
-// StartLHTestWorker launches the background worker that processes queued test runs.
-// Called once from main.go at startup.
+// StartLHTestWorker launches the background worker that processes queued test
+// runs with a never-cancelled context. Retained for callers/tests that don't
+// participate in graceful shutdown.
 func StartLHTestWorker(db *sql.DB) {
+	StartLHTestWorkerCtx(context.Background(), db)
+}
+
+// StartLHTestWorkerCtx launches the background worker tied to ctx. When ctx is
+// cancelled (graceful shutdown) the poll loop stops claiming new runs and the
+// goroutine exits, so the worker never issues fresh queries against a
+// soon-to-be-closed DB pool. In-flight run processing already completes its
+// own cases; this only governs the dequeue loop.
+//
+// The returned channel is closed once the poll loop has fully exited, so the
+// caller can block on it during shutdown (before db.Close()) to guarantee the
+// dequeue loop is no longer touching the DB.
+//
+// Called once from main.go at startup with the shutdown ctx.
+func StartLHTestWorkerCtx(ctx context.Context, db *sql.DB) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		// Outer panic guard — if the worker poll loop ever panics, the entire
 		// background queue would silently die without restarting. Catch and
 		// log so the process keeps serving HTTP and the next deploy can fix.
@@ -32,8 +51,9 @@ func StartLHTestWorker(db *sql.DB) {
 		}()
 		recoverInterruptedRuns(db)
 		log.Println("LH-TEST-WORKER: started")
-		lhTestWorkerLoop(db)
+		lhTestWorkerLoop(ctx, db)
 	}()
+	return done
 }
 
 // recoverInterruptedRuns resets runs/cases that were in-flight when the server last stopped.
@@ -67,12 +87,20 @@ func recoverInterruptedRuns(db *sql.DB) {
 	}
 }
 
-// lhTestWorkerLoop polls for queued runs every 2 seconds.
-func lhTestWorkerLoop(db *sql.DB) {
+// lhTestWorkerLoop polls for queued runs every 2 seconds until ctx is
+// cancelled, at which point it stops dequeuing and returns.
+func lhTestWorkerLoop(ctx context.Context, db *sql.DB) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("LH-TEST-WORKER: shutdown requested, stopping poll loop")
+			return
+		case <-ticker.C:
+		}
+
 		rows, err := db.Query(`SELECT r.id, r.suite_id, r.llm_config_id, COALESCE(r.concurrency, 1)
 			FROM ont_test_run r
 			WHERE r.status = 'queued'

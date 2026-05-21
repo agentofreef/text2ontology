@@ -27,7 +27,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -37,6 +39,7 @@ import (
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/backend-api/core"
 	"github.com/lakehouse2ontology/services/backend-api/handler"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 func main() {
@@ -70,6 +73,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	// Fail-closed startup checks for auth. AUTH_TOKEN_SECRET signs every
@@ -232,12 +236,22 @@ func main() {
 	//   auth.Wrap              — INTERNAL_TOKEN on /internal/* +
 	//     user-bearer on /api/* (see pkg/authmw).
 	//   mux                    — business handlers.
+	//   srvkit.RecoverMiddleware — recover handler panics (→ 500) just
+	//     inside CORS, so panics are caught while CORS headers are still set.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// backend-api listening on %s (DB OK, tracer=backend-api)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown: srvkit.Run drains HTTP on SIGINT/SIGTERM, then the
+	// deferred db.Close() + obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srvkit.Run(ctx, addr, handler); err != nil {
+		log.Fatal(err)
+	}
 }

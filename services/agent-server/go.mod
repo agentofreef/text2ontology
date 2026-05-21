@@ -9,6 +9,7 @@ require (
 	github.com/lakehouse2ontology/llmclient v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/mission v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/observability v0.0.0-00010101000000-000000000000
+	github.com/lakehouse2ontology/srvkit v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.10.9
 	github.com/xuri/excelize/v2 v2.10.1
 	go.opentelemetry.io/otel v1.40.0
@@ -56,4 +57,5 @@ replace (
 	github.com/lakehouse2ontology/llmclient => ../../pkg/llmclient
 	github.com/lakehouse2ontology/mission => ../../pkg/mission
 	github.com/lakehouse2ontology/observability => ../../pkg/observability
+	github.com/lakehouse2ontology/srvkit => ../../pkg/srvkit
 )

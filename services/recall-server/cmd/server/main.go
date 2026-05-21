@@ -28,6 +28,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -38,6 +40,7 @@ import (
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/recall-server/recall"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 // HTTP-level metrics. The recall package itself emits the inner
@@ -87,6 +90,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	mux := http.NewServeMux()
@@ -116,14 +120,25 @@ func main() {
 	//   ServerSpanMiddleware                — start server span per req.
 	//   auth.Wrap                           — token + audit.
 	//   mux                                 — business handlers.
+	//   srvkit.RecoverMiddleware                — recover handler panics
+	//     (→ 500) just inside CORS so panics are caught while CORS headers
+	//     are still applied.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// recall-server listening on %s (DB OK, tracer=recall-server)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown: srvkit.Run drains HTTP on SIGINT/SIGTERM, then the
+	// deferred db.Close() + obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srvkit.Run(ctx, addr, handler); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // buildContextRequest is the wire envelope for both cached + uncached

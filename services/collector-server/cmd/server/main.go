@@ -15,7 +15,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +35,7 @@ import (
 	sqliteingest "github.com/lakehouse2ontology/services/collector-server/ingest/sqlite"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/wizard"
 	"github.com/lakehouse2ontology/services/collector-server/job"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 // listSourcesHandler handles GET /api/connector/sources?project_id=<uuid>
@@ -318,6 +321,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	mux := http.NewServeMux()
@@ -371,12 +375,37 @@ func main() {
 	// to anyone who can reach the port.
 	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
 
+	// srvkit.RecoverMiddleware sits just inside CORS so handler panics are
+	// recovered (→ 500) while CORS headers are still applied. Existing order
+	// is otherwise preserved: CORS → recover → trace → span → auth → mux.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// collector-server listening on %s (DB OK, tracer=collector-server)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown ordering:
+	//   1. srvkit.Run drains in-flight HTTP requests on SIGINT/SIGTERM.
+	//   2. OnShutdown cancels jobCtx → the ingest_job worker pool + sweeper
+	//      stop claiming work (FOR UPDATE SKIP LOCKED design tolerates a hard
+	//      stop: any 'running' rows are re-claimed or swept on next boot).
+	//      We give workers a brief grace window to wind down before the
+	//      deferred db.Close() fires, so they don't write to a closed pool.
+	//   3. deferred db.Close() then obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	err = srvkit.Run(ctx, addr, handler,
+		srvkit.WithOnShutdown(func(context.Context) {
+			jobCancel()
+			// Brief grace period for in-flight job goroutines to observe the
+			// cancellation and return before the DB pool closes.
+			time.Sleep(500 * time.Millisecond)
+		}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
