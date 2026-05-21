@@ -28,6 +28,7 @@ import (
 	"github.com/lakehouse2ontology/observability"
 	fileingest "github.com/lakehouse2ontology/services/collector-server/ingest/file"
 	pbit "github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
+	pbixingest "github.com/lakehouse2ontology/services/collector-server/ingest/pbix"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/postgres"
 	sqliteingest "github.com/lakehouse2ontology/services/collector-server/ingest/sqlite"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/wizard"
@@ -346,6 +347,7 @@ func main() {
 	// Heartbeat every 5s; sweeper every 30s marks stale (>2min) jobs failed.
 	jobRunner := job.NewRunner(db, 4)
 	jobRunner.RegisterHandler(job.KindFileUpload, fileingest.HandleFileUploadJob)
+	jobRunner.RegisterHandler(job.KindPbixExtract, pbixingest.HandlePbixExtractJob)
 	go job.SweepStaleJobs(db) // boot scan
 	go job.SweepOldJobs(db)   // boot retention cleanup
 	jobCtx, jobCancel := context.WithCancel(context.Background())
@@ -355,6 +357,8 @@ func main() {
 
 	// Phase 4: File source connector (upload + URL fetch + SSRF defence).
 	fileingest.RegisterRoutes(mux, db)
+	// pbix (.pbix binary) import: async via ingest_job + bounded semaphore.
+	pbixingest.RegisterRoutes(mux, db)
 	// Phase 5: cross-type sources listing endpoint.
 	mux.HandleFunc("/api/connector/sources", listSourcesHandler(db))
 	mux.HandleFunc("/api/connector/sources/", sourceByIDHandler(db))
