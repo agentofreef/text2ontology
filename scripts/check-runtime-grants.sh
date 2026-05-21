@@ -55,10 +55,11 @@ check lakehouse_sql_server_user ont_agent_thread UPDATE f || fail=1
 check agent_server_user         ont_agent_step   INSERT t || fail=1
 check backend_api_user          ont_agent_step   INSERT f || fail=1
 
-# recall-server owns vector writes.
-check recall_server_user        ont_vector_entry INSERT t || fail=1
-check agent_server_user         ont_vector_entry INSERT f || fail=1
-check backend_api_user          ont_vector_entry INSERT f || fail=1   # v2b REV-2: catch future grant drift
+# Vector storage was refactored from a dedicated ont_vector_entry table to
+# pgvector COLUMNS on existing tables (ont_property.prop_vector,
+# ont_metric.metric_vector, lakehouse_keyword.keyword_vector, etc.), written by
+# collector during ontology population; recall-server only READS them. The old
+# ont_vector_entry table no longer exists, so its grant assertions are removed.
 
 # backend-api owns ontology CRUD.
 check backend_api_user          ont_object_type  UPDATE t || fail=1
@@ -68,6 +69,48 @@ check lakehouse_sql_server_user ont_object_type  UPDATE f || fail=1
 # lakehouse-sql-server owns staging writes (sample: lakehouse_keyword stays ontology, so RO here).
 check lakehouse_sql_server_user lakehouse_keyword UPDATE f || fail=1
 check backend_api_user          lakehouse_keyword UPDATE t || fail=1
+
+# === DYNAMIC PER-PROJECT SCHEMA COVERAGE (Finding #4) ===
+# The named-table checks above are blind to the runtime proj_<hex> path: collector
+# creates per-project schemas, and lakehouse-sql-server reads project data there.
+# A throwaway proj_test schema exercises that path: lakehouse_sql_server_user must
+# be able to SELECT a granted table inside a proj_ schema, while STILL being unable
+# to write ontology tables (reader-of-project-data, not ontology-writer).
+#
+# NOTE: the spec's ontology-write negative used ont_version, which does not exist in
+# this -enterprise clone's schema; ont_object_type is the live ontology table that
+# carries the same boundary (already asserted RO for lakehouse_sql_server_user above),
+# so the proj_test block reuses it for the cannot-write-ontology assertion.
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q <<'PROJSQL'
+DROP SCHEMA IF EXISTS proj_test CASCADE;
+CREATE SCHEMA proj_test;
+GRANT USAGE ON SCHEMA proj_test TO lakehouse_sql_server_user;
+CREATE TABLE proj_test.t1(id int);
+GRANT SELECT ON proj_test.t1 TO lakehouse_sql_server_user;
+PROJSQL
+
+proj_read=$(psql "$DATABASE_URL" -tA <<'PROJSQL'
+SELECT has_table_privilege('lakehouse_sql_server_user', 'proj_test.t1', 'SELECT');
+PROJSQL
+)
+proj_read="${proj_read//[[:space:]]/}"
+if [[ "$proj_read" != "t" ]]; then
+  echo "DRIFT: lakehouse_sql_server_user / proj_test.t1 / SELECT: expected=t got=$proj_read"
+  fail=1
+fi
+
+proj_ont_write=$(psql "$DATABASE_URL" -tA <<'PROJSQL'
+SELECT has_table_privilege('lakehouse_sql_server_user', 'ont_object_type', 'INSERT');
+PROJSQL
+)
+proj_ont_write="${proj_ont_write//[[:space:]]/}"
+if [[ "$proj_ont_write" != "f" ]]; then
+  echo "DRIFT: lakehouse_sql_server_user / ont_object_type / INSERT: expected=f got=$proj_ont_write (reader must not write ontology)"
+  fail=1
+fi
+
+# Always tear down the throwaway schema, even if an assertion above failed.
+psql "$DATABASE_URL" -q -c 'DROP SCHEMA IF EXISTS proj_test CASCADE;' >/dev/null
 
 if (( fail )); then
   echo "RUNTIME GRANT CHECK FAILED — see drift above"

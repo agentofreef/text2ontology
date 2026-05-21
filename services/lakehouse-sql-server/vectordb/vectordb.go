@@ -179,15 +179,33 @@ func ProcessBatch(client *http.Client, embURL, embAPIKey, embModel, table, vecCo
 		"input": texts,
 	})
 
-	req, _ := http.NewRequest("POST", embURL, strings.NewReader(string(reqBody)))
-	req.Header.Set("Content-Type", "application/json")
-	if embAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+embAPIKey)
+	// Retry transient failures (network error / 429 / 5xx) up to 3 attempts with
+	// linear backoff. Without this a single flaky embedding response silently
+	// under-vectorizes the batch (returns 0), leaving rows permanently unindexed.
+	// reqBody is rebuilt per attempt because the request body reader is consumed.
+	var resp *http.Response
+	for attempt := 0; attempt < 3; attempt++ {
+		req, _ := http.NewRequest("POST", embURL, strings.NewReader(string(reqBody)))
+		req.Header.Set("Content-Type", "application/json")
+		if embAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+embAPIKey)
+		}
+		var err error
+		resp, err = client.Do(req)
+		if err == nil && resp.StatusCode != 429 && resp.StatusCode < 500 {
+			break // success or non-retryable client error
+		}
+		if resp != nil {
+			resp.Body.Close()
+			resp = nil
+		}
+		if attempt == 2 {
+			log.Printf("Embedding API error after %d attempts: %v", attempt+1, err)
+			return 0
+		}
+		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Embedding API error: %v", err)
+	if resp == nil {
 		return 0
 	}
 	defer resp.Body.Close()
@@ -231,8 +249,7 @@ func ProcessBatch(client *http.Client, embURL, embAPIKey, embModel, table, vecCo
 
 	updateQ := fmt.Sprintf(`UPDATE %s SET %s = v.vec, updated_at = now() FROM (VALUES %s) AS v(id, vec) WHERE %s.id = v.id`,
 		table, vecCol, strings.Join(valParts, ", "), table)
-	_, err = db.Exec(updateQ, args...)
-	if err != nil {
+	if _, err := db.Exec(updateQ, args...); err != nil {
 		log.Printf("Batch vector update error for %s: %v", table, err)
 		return 0
 	}

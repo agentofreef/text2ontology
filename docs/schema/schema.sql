@@ -623,15 +623,10 @@ ALTER TABLE ont_agent_thread ADD COLUMN IF NOT EXISTS thread_state JSONB DEFAULT
 -- source_type on ont_object_type
 ALTER TABLE ont_object_type ADD COLUMN IF NOT EXISTS source_type VARCHAR(30) DEFAULT 'powerbi';
 
--- data_source_id: the data_source instance this object was imported from.
--- NULL = manual/builder-created or legacy (the data-architecture view buckets
--- NULL + file-type sources into a single shared "CSV folder"; pg/sqlite/pbi
--- instances each render as their own node). ON DELETE SET NULL keeps objects
--- when a source is removed. See docs/.../lakehouse-objects data-architecture view.
-ALTER TABLE ont_object_type ADD COLUMN IF NOT EXISTS data_source_id UUID
-  REFERENCES data_source(id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS idx_ont_object_type_data_source
-  ON ont_object_type(data_source_id) WHERE data_source_id IS NOT NULL;
+-- data_source_id (the data_source instance an object was imported from) is added
+-- AFTER the data_source table is created below — search "data_source_id on
+-- ont_object_type". It must not live here: this point runs ~650 lines before
+-- data_source exists, which aborts a fresh schema init under psql ON_ERROR_STOP=1.
 
 -- generated_sql on ont_query_log
 ALTER TABLE ont_query_log ADD COLUMN IF NOT EXISTS generated_sql TEXT;
@@ -1151,6 +1146,17 @@ CREATE TABLE IF NOT EXISTS lakehouse_keyword_alias_vector (
 );
 CREATE INDEX IF NOT EXISTS idx_lhkav_keyword ON lakehouse_keyword_alias_vector(keyword_id);
 
+-- Vector similarity indexes (HNSW, cosine) for the Tier-4 fuzzy keyword recall
+-- path: vector_topn.go / recall_lakehouse.go UNION lakehouse_keyword.keyword_vector
+-- with lakehouse_keyword_alias_vector.alias_vector, then ORDER BY vec <=> $.
+-- HNSW (unlike IVFFlat) builds fine on an empty table and needs no `lists`
+-- tuning, so it is safe to create at schema-init time. Without these, those
+-- ORDER BY <=> queries seq-scan and p99 grows linearly with embedding rows.
+CREATE INDEX IF NOT EXISTS idx_lhk_keyword_vector
+  ON lakehouse_keyword USING hnsw (keyword_vector vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_lhkav_alias_vector
+  ON lakehouse_keyword_alias_vector USING hnsw (alias_vector vector_cosine_ops);
+
 -- One-shot + idempotent backfill: existing rows in lakehouse_keyword.aliases
 -- predate the child table, so seed alias rows with NULL vector. The aliases
 -- PUT handler keeps things synced going forward; the compute-vectors endpoint
@@ -1306,6 +1312,16 @@ CREATE INDEX IF NOT EXISTS idx_data_source_project ON data_source(project_id);
 CREATE INDEX IF NOT EXISTS idx_data_source_status_updated ON data_source(status, updated_at)
   WHERE status IN ('wizard_in_progress', 'syncing');
 
+-- data_source_id on ont_object_type: deferred to here (instead of next to the
+-- other ont_object_type ALTERs ~650 lines above) because the FK references
+-- data_source, which is created just above. Keeping it here is what lets a fresh
+-- schema init run to completion under psql ON_ERROR_STOP=1. NULL = manual/builder
+-- -created or legacy; ON DELETE SET NULL keeps objects when a source is removed.
+ALTER TABLE ont_object_type ADD COLUMN IF NOT EXISTS data_source_id UUID
+  REFERENCES data_source(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_ont_object_type_data_source
+  ON ont_object_type(data_source_id) WHERE data_source_id IS NOT NULL;
+
 -- ==================== ingest_job ====================
 -- Durable background-task queue for collector-server. Workers claim jobs via
 -- FOR UPDATE SKIP LOCKED, write heartbeat_at every 5s; sweeper marks stale
@@ -1392,3 +1408,25 @@ CREATE TABLE IF NOT EXISTS lakehouse_shape_capability (
 );
 -- Forward-migration for existing DBs (CREATE TABLE IF NOT EXISTS is a no-op).
 ALTER TABLE lakehouse_shape_capability ADD COLUMN IF NOT EXISTS satisfies TEXT[] DEFAULT '{}';
+
+-- ==================== ont_audit_log ====================
+-- Durable sink for authmw audit events (who did what on /internal + /api calls).
+-- Replaces the stderr-only writer so the audit trail survives container restarts
+-- and `docker logs` rotation. Identifier columns are TEXT so an unexpected value
+-- can never abort the insert (and silently force the stderr fallback) on a cast.
+-- RETENTION: this table grows unbounded — operators must prune or partition on
+-- `ts` per their policy, e.g. `DELETE FROM ont_audit_log WHERE ts < now() - interval '90 days'`.
+-- Every service's per-service DB role needs INSERT here (see ops/db-roles.sql).
+CREATE TABLE IF NOT EXISTS ont_audit_log (
+    id             BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    request_id     TEXT,
+    caller_service TEXT,
+    on_behalf_of   TEXT,
+    project_id     TEXT,
+    path           TEXT,
+    method         TEXT,
+    status_code    INT
+);
+CREATE INDEX IF NOT EXISTS idx_ont_audit_log_ts ON ont_audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_ont_audit_log_project ON ont_audit_log(project_id) WHERE project_id <> '';

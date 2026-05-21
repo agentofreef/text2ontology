@@ -1,0 +1,59 @@
+# ops/alertmanager.yml — Alertmanager routing for the product-ready stack.
+#
+# Prometheus evaluates the rules in ops/alerts/ and forwards firing alerts here
+# (see the `alerting:` block in ops/prometheus.yml). Alertmanager dedups,
+# groups, and DELIVERS them. Without this, alerts fire into the Prometheus UI
+# and notify no one.
+#
+# ───────────────────────────────────────────────────────────────────────────
+# YOU MUST CONFIGURE A REAL RECEIVER before relying on paging. Out of the box
+# this routes everything to a no-op webhook so the pipeline is wired and valid;
+# replace `default-webhook` (or add slack/pagerduty/email configs) with your
+# real destination. Set ALERTMANAGER_WEBHOOK_URL or edit this file directly.
+# ───────────────────────────────────────────────────────────────────────────
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default-webhook
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Page-severity alerts repeat more aggressively until acknowledged.
+    - matchers:
+        - severity = "page"
+      receiver: default-webhook
+      repeat_interval: 1h
+
+receivers:
+  - name: default-webhook
+    # Placeholder sink: accepts the POST so Alertmanager considers delivery
+    # successful. Replace with a real integration, e.g.:
+    #
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    #     channel: '#alerts'
+    #     send_resolved: true
+    #
+    # pagerduty_configs:
+    #   - routing_key: <integration-key>
+    #
+    # email_configs:
+    #   - to: oncall@example.com
+    #     from: alertmanager@example.com
+    #     smarthost: smtp.example.com:587
+    #     auth_username: ...
+    #     auth_password: ...
+    webhook_configs:
+      - url: http://127.0.0.1:9093/-/healthy
+        send_resolved: true
+
+inhibit_rules:
+  # A firing page suppresses the matching warning for the same alertname/service
+  # so on-call isn't double-notified for one incident.
+  - source_matchers: [severity = "page"]
+    target_matchers: [severity = "warning"]
+    equal: ['alertname']

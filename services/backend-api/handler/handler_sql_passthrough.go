@@ -292,6 +292,11 @@ func handleSQLPassthroughHistory(db *sql.DB) http.HandlerFunc {
 		if r.Method == http.MethodDelete {
 			id := r.URL.Query().Get("id")
 			if id != "" {
+				// Cross-project IDOR guard: confirm the caller can access the
+				// log row's project before deleting it by id.
+				if !authmw.EnforceEntityProject(w, r, db, "ont_sql_passthrough_log", "id", id) {
+					return
+				}
 				db.Exec(`DELETE FROM ont_sql_passthrough_log WHERE id = $1`, id)
 			}
 			JsonResp(w, M{"success": true})
@@ -376,6 +381,10 @@ func handleSQLPassthroughSnippets(db *sql.DB) http.HandlerFunc {
 			if projID == "" || name == "" || sqlText == "" {
 				w.WriteHeader(400)
 				JsonResp(w, M{"error": "projectId, name, sql required"})
+				return
+			}
+			// Body projectId bypasses the middleware query gate; verify access.
+			if !authmw.EnforceProjectAccess(w, r, db, projID) {
 				return
 			}
 			var id string

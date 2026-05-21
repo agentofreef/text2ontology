@@ -315,6 +315,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("collector-server"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -330,13 +334,9 @@ func main() {
 	observability.SetDB(db)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"service": "collector-server",
-			"db":      "ok",
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "collector-server")
 	mux.Handle("/metrics", observability.MetricsHandler())
 
 	// Phase 2: PBI ingest routes at /api/connector/pbit/*.
@@ -378,7 +378,7 @@ func main() {
 	// now requires a valid bearer token. Without this, the entire ingest
 	// surface (uploads, DB-credential storage, schema drops) is exposed
 	// to anyone who can reach the port.
-	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
+	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
 
 	// srvkit.RecoverMiddleware sits just inside CORS so handler panics are
 	// recovered (→ 500) while CORS headers are still applied. Existing order
@@ -403,6 +403,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	err = srvkit.Run(ctx, addr, handler,
+		// Ingest endpoints (ingest/{sqlite,postgres,pbit}) stream progress as
+		// text/event-stream and legitimately run far past any fixed write
+		// window (SQLite sync allows 30 min). The default 60s WriteTimeout
+		// would sever those streams mid-import, leaving status='syncing' and a
+		// half-written staging schema — disable it like agent-server's SSE.
+		srvkit.WithWriteTimeout(0),
 		srvkit.WithOnShutdown(func(context.Context) {
 			jobCancel()
 			// Brief grace period for in-flight job goroutines to observe the

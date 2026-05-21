@@ -301,7 +301,7 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(resolveSampler()),
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -325,6 +325,21 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 
 // BatchSizeBucket maps a numeric batch size to the coarse string label used
 // for RecallEmbedDuration. Keeps label cardinality low.
+// resolveSampler returns the trace sampler, driven by OTEL_TRACES_SAMPLER_ARG
+// (a 0.0–1.0 ratio). Default 1.0 preserves the previous always-sample behavior;
+// set e.g. 0.2 in production to bound otel-collector memory and trace storage
+// under load. ParentBased ensures a child of a sampled parent is always
+// sampled, so one agent turn + its downstream hops remain a single trace.
+func resolveSampler() sdktrace.Sampler {
+	ratio := 1.0
+	if v := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			ratio = f
+		}
+	}
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+}
+
 func BatchSizeBucket(n int) string {
 	switch {
 	case n <= 1:

@@ -3,7 +3,8 @@
 # ALONGSIDE the dev stack untouched. ONLY the gateway port is published
 # (28080->8080); all other services network-internal. Own images
 # (:product-ready) for the 8 built services; third-party obs images unchanged.
-# Superuser DSN (fresh isolated DB); scoped-role cutover is a validated follow-on.
+# Each service connects as its own least-privilege Postgres role (ops/db-roles.sql,
+# applied at initdb); roles share POSTGRES_PASSWORD on this isolated internal DB.
 
 name: t2o-product-ready
 services:
@@ -81,16 +82,16 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://backend_api_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: backend-api
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8090/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8090/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -115,8 +116,10 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://agent_server_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: agent-server
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
       RECALL_SERVER_URL: http://recall-server:8093
@@ -130,10 +133,8 @@ services:
         condition: service_healthy
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8092/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8092/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -153,15 +154,15 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://recall_server_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: recall-server
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8093/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8093/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -184,15 +185,15 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://lakehouse_sql_server_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: lakehouse-sql-server
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8094/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8094/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -215,8 +216,10 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://mcp_tools_server_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: mcp-tools-server
       RECALL_SERVER_URL: http://recall-server:8093
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
@@ -232,10 +235,8 @@ services:
         condition: service_healthy
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8095/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8095/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -255,8 +256,10 @@ services:
     env_file:
     - .env.shared
     environment:
-      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      DATABASE_URL: postgres://collector_server_user:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      REQUIRE_STRONG_SECRETS: 'true'
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
       OTEL_SERVICE_NAME: collector-server
       PBIT_STAGING_ROOT: /data/pbit-staging
       PBIX_SCRIPTS_DIR: /app/scripts
@@ -266,10 +269,8 @@ services:
     - collector-uploads:/data/uploads
     healthcheck:
       test:
-      - CMD
-      - wget
-      - -qO-
-      - http://localhost:8096/healthz
+      - CMD-SHELL
+      - 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8096/healthz?check=db"'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -298,6 +299,8 @@ services:
     pids_limit: 256
     environment:
       COLLECTOR_OTLP_ENABLED: 'true'
+    ports:
+    - 127.0.0.1:16686:16686
     restart: unless-stopped
   prometheus:
     image: prom/prometheus:latest
@@ -309,6 +312,20 @@ services:
     volumes:
     - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     - ./ops/alerts:/etc/prometheus/alerts:ro
+    ports:
+    - 127.0.0.1:9090:9090
+    restart: unless-stopped
+  alertmanager:
+    image: prom/alertmanager:latest
+    mem_limit: 128m
+    cpus: '0.25'
+    pids_limit: 128
+    command:
+    - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+    - ./ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+    - 127.0.0.1:9093:9093
     restart: unless-stopped
   grafana:
     image: grafana/grafana:latest
@@ -316,10 +333,16 @@ services:
     cpus: '0.5'
     pids_limit: 256
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      # Land on the SLO dashboard right after login instead of an empty home.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/dashboards/lakehouse.json
+    ports:
+    - 127.0.0.1:3000:3000
     volumes:
     - grafana-data:/var/lib/grafana
+    - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+    - ./ops/grafana/dashboards-provisioned:/etc/dashboards:ro
     depends_on:
       prometheus:
         condition: service_started
@@ -329,13 +352,26 @@ services:
     mem_limit: 1g
     cpus: '1.0'
     pids_limit: 512
+    # max_connections raised from the default 100 to cover the 6-service pool
+    # budget (6 × srvkit MaxOpen 20 = 120) plus headroom for psql/maintenance.
+    command:
+    - postgres
+    - -c
+    - max_connections=200
+    - -c
+    - shared_buffers=256MB
     environment:
       POSTGRES_DB: lakehouse2ontology-enterprise
       POSTGRES_USER: lakehouse2ontology-enterprise
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Fail compose up if unset — never bootstrap the superuser with a blank password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
     - postgres-data:/var/lib/postgresql/data
+    # initdb runs these in order on a FRESH volume only: schema → per-service
+    # least-privilege roles+grants → set role passwords from POSTGRES_PASSWORD.
     - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    - ./ops/db-roles.sql:/docker-entrypoint-initdb.d/02-db-roles.sql:ro
+    - ./ops/initdb/03-role-passwords.sh:/docker-entrypoint-initdb.d/03-role-passwords.sh:ro
     healthcheck:
       test:
       - CMD-SHELL

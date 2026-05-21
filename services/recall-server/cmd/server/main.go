@@ -84,6 +84,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("recall-server"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -99,13 +103,9 @@ func main() {
 	observability.SetDB(db)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"service": "recall-server",
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "recall-server")
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/internal/recall/build-context", buildContextHandler(db))
 	// Debug surface — wraps the existing handler factory, which itself
@@ -117,7 +117,7 @@ func main() {
 	// browser-direct access (was monolith-gatewayed via recall_debug_proxy).
 	mux.Handle("/api/ontology/lakehouse-token-recall-debug", recall.HandleLakehouseDebug(db))
 
-	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
+	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
 	// Middleware order matters:
 	//   CORSMiddleware (OUTERMOST)          — OPTIONS preflight + ACAO.
 	//   TraceContextMiddleware              — extract W3C traceparent so
