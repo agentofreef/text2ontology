@@ -149,6 +149,55 @@ func TestPassValidateSpec_ErrorContainsLLMHint(t *testing.T) {
 	}
 }
 
+func TestPassValidateSpec_MetricFilterRejectsInjection(t *testing.T) {
+	// MetricFilter.Op / .Value are interpolated unescaped into HAVING, so the
+	// validator must reject SQL-injection payloads in either field.
+	cases := []struct {
+		name string
+		mf   *MetricFilter
+	}{
+		{"op stacked SQL", &MetricFilter{Op: "> 0; DROP TABLE", Value: "1"}},
+		{"op boolean OR", &MetricFilter{Op: "OR 1=1", Value: "1"}},
+		{"value stacked SQL", &MetricFilter{Op: ">", Value: "1; DELETE"}},
+		{"value non-numeric", &MetricFilter{Op: ">", Value: "abc"}},
+		{"op empty", &MetricFilter{Op: "", Value: "1"}},
+		{"value empty", &MetricFilter{Op: ">", Value: ""}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := PassValidateSpec(&QuerySpec{MetricFilter: c.mf})
+			if err == nil {
+				t.Fatalf("expected metricFilter %+v rejected", c.mf)
+			}
+			var re *ResolveError
+			if !errors.As(err, &re) || re.Code != "SPEC_VALIDATION_FAILED" {
+				t.Errorf("expected SPEC_VALIDATION_FAILED, got %v", err)
+			}
+		})
+	}
+}
+
+func TestPassValidateSpec_MetricFilterAcceptsNumeric(t *testing.T) {
+	cases := []*MetricFilter{
+		{Op: ">=", Value: "42"},
+		{Op: "<>", Value: "-3.14"},
+		{Op: "=", Value: "0"},
+		{Op: "<", Value: "100.5"},
+	}
+	for _, mf := range cases {
+		if err := PassValidateSpec(&QuerySpec{MetricFilter: mf}); err != nil {
+			t.Errorf("metricFilter %+v must pass, got %v", mf, err)
+		}
+	}
+}
+
+func TestPassValidateSpec_NilMetricFilterOK(t *testing.T) {
+	// nil MetricFilter must not trip validation.
+	if err := PassValidateSpec(&QuerySpec{Metric: "sum(x)"}); err != nil {
+		t.Errorf("nil metricFilter must pass, got %v", err)
+	}
+}
+
 func TestDefaultPipeline_IncludesValidate(t *testing.T) {
 	// Regression: ensure DefaultPipeline now has PassValidateSpec.
 	// A spec that passes the gate but has bad orderBy must be rejected.

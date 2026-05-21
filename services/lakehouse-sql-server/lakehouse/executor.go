@@ -10,8 +10,45 @@ import (
 	"github.com/lib/pq"
 )
 
+// execSetLocaler is the minimal subset of *sql.Tx that applyReadOnlyGuards
+// needs. Extracted as an interface so the guard idiom can be unit-tested
+// without a live database.
+type execSetLocaler interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// readOnlyStatementTimeoutMs bounds how long a single LLM/user SQL statement
+// may run inside the read-only transaction. A runaway scan on a large
+// lakehouse must not pin a connection indefinitely.
+const readOnlyStatementTimeoutMs = 30000
+
+// applyReadOnlyGuards issues the SET LOCAL statements that turn the current
+// transaction into a sandbox for untrusted (LLM/user) SQL:
+//
+//   - transaction_read_only = on  → Postgres rejects any INSERT/UPDATE/DELETE/
+//     DDL with a "cannot execute … in a read-only transaction" error.
+//   - statement_timeout            → caps wall-clock time per statement.
+//
+// Both are SET LOCAL, so they are scoped to this transaction and reverted on
+// rollback. Returns the first error so the caller can abort before running the
+// untrusted query.
+func applyReadOnlyGuards(tx execSetLocaler, timeoutMs int) error {
+	if _, err := tx.Exec(`SET LOCAL transaction_read_only = on`); err != nil {
+		return fmt.Errorf("set read-only: %w", err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`SET LOCAL statement_timeout = %d`, timeoutMs)); err != nil {
+		return fmt.Errorf("set statement_timeout: %w", err)
+	}
+	return nil
+}
+
 // ExecuteSQL runs a SQL query against the project's lakehouse schema using
 // SET LOCAL search_path for isolation. Pattern from ingest/pbitlakehouse/routes.go:2745.
+//
+// The query runs inside a read-only transaction (transaction_read_only = on +
+// statement_timeout) so LLM/user-supplied SQL can SELECT but never mutate the
+// lakehouse, and never run unbounded. The tx is always rolled back — no commit
+// is needed for a read-only workload.
 func ExecuteSQL(db *sql.DB, projectID, sqlQuery string) (ok bool, resultJSON string, errMsg string, durationMs int64) {
 	start := time.Now()
 
@@ -33,6 +70,13 @@ func ExecuteSQL(db *sql.DB, projectID, sqlQuery string) (ok bool, resultJSON str
 
 	if _, err := tx.Exec(fmt.Sprintf(`SET LOCAL search_path TO %s, public`, pq.QuoteIdentifier(schema))); err != nil {
 		return false, "", fmt.Sprintf("search_path 设置失败: %v", err), time.Since(start).Milliseconds()
+	}
+
+	// 3. Lock the transaction down to read-only with a statement timeout
+	// BEFORE running the untrusted query, so any write/DDL is rejected by
+	// Postgres.
+	if err := applyReadOnlyGuards(tx, readOnlyStatementTimeoutMs); err != nil {
+		return false, "", fmt.Sprintf("只读事务设置失败: %v", err), time.Since(start).Milliseconds()
 	}
 
 	rows, err := tx.Query(sqlQuery)

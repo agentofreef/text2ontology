@@ -2,7 +2,6 @@ package llmclient
 
 import (
 	"bytes"
-	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -51,7 +50,7 @@ func ClassifyMachineCode(db *sql.DB, columns []PbitColumnInfo, onProgress ...fun
 	var machineCount int32
 	var doneCount int32
 	total := len(columns)
-	client := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil, MaxIdleConnsPerHost: concurrency, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	client := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil, MaxIdleConnsPerHost: concurrency, TLSClientConfig: TLSClientConfig()}}
 
 	var wg sync.WaitGroup
 	for _, col := range columns {

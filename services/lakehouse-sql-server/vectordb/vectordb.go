@@ -1,7 +1,6 @@
 package vectordb
 
 import (
-	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -116,7 +115,7 @@ func ComputeVectorsWithProgress(db *sql.DB, table, textCol, vecCol, projectId st
 
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 8, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 8, TLSClientConfig: llmclient.TLSClientConfig()},
 	}
 
 	// Split into batches

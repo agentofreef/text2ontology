@@ -2,7 +2,6 @@ package llmclient
 
 import (
 	"bytes"
-	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -78,7 +77,7 @@ func makeClient(timeout time.Duration, proxyURL string) *http.Client {
 		return v.(*http.Client)
 	}
 	transport := &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     TLSClientConfig(),
 		DialContext:         (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout: 15 * time.Second,
 		// Bound TTFT separately from the overall Client.Timeout so a provider
@@ -108,7 +107,7 @@ func makeStreamClient(proxyURL string) *http.Client {
 		return v.(*http.Client)
 	}
 	transport := &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:       TLSClientConfig(),
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: llmHeaderTimeout,

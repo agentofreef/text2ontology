@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -129,7 +128,7 @@ func handleLLMConfigModels(db *sql.DB) http.HandlerFunc {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+		client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: llmclient.TLSClientConfig()}}
 		resp, err := client.Do(req)
 		if err != nil {
 			w.WriteHeader(http.StatusBadGateway)
