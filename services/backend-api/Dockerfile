@@ -29,8 +29,13 @@ RUN go build -o /service ./cmd/server
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates wget
 
+# Run as a non-root user. The static binary needs no write access to the image,
+# so a plain unprivileged account is sufficient.
+RUN addgroup -S app && adduser -S -G app -u 10001 app
+
 COPY --from=builder /service /service
 
 EXPOSE 8090
 
+USER app
 ENTRYPOINT ["/service"]

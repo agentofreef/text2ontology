@@ -40,6 +40,16 @@ ENV PBIX_SCRIPTS_DIR=/app/scripts
 
 COPY --from=builder /service /service
 
+# Drop to a non-root user for runtime. Python deps were pip-installed above as
+# root (system site-packages stay root-owned, read-only is fine). The two
+# upload/staging dirs must be writable by the runtime user: create + chown them
+# so the named-volume mounts (collector-staging / collector-uploads) inherit
+# this ownership when Docker first initializes the empty volumes.
+RUN groupadd -r app && useradd -r -g app -u 10001 app \
+    && mkdir -p /data/uploads /data/pbit-staging \
+    && chown -R app:app /data /app/scripts
+
 EXPOSE 8096
 
+USER app
 ENTRYPOINT ["/service"]

@@ -26,9 +26,14 @@ services:
       context: .
       dockerfile: services/gateway/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-gateway:latest
+    # Resource limits (P1-14): bound blast radius of a runaway service. Compose
+    # v2 supports these top-level per-service keys. Dev-sane defaults.
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 256
     ports:
-      - "18080:80"
-      - "10020:80"
+      - "18080:8080"
+      - "10020:8080"
     depends_on:
       frontend:
         condition: service_healthy
@@ -41,7 +46,7 @@ services:
       mcp-tools-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -57,6 +62,10 @@ services:
       context: .
       dockerfile: services/frontend/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-frontend:latest
+    # Resource limits (P1-14): static nginx is light; keep it modest.
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 256
     depends_on:
       backend-api:
         condition: service_healthy
@@ -65,7 +74,7 @@ services:
       recall-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -87,6 +96,10 @@ services:
       context: .
       dockerfile: services/backend-api/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-backend-api:latest
+    # Resource limits (P1-14): dev-sane caps for an app service.
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8090"]
     env_file:
       - .env.shared
@@ -119,6 +132,11 @@ services:
       context: .
       dockerfile: services/agent-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-agent-server:latest
+    # Resource limits (P1-14): the LLM worker pool fans out concurrent calls,
+    # so give it the full app-service allotment.
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8092"]
     env_file:
       - .env.shared
@@ -153,6 +171,10 @@ services:
       context: .
       dockerfile: services/recall-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-recall-server:latest
+    # Resource limits (P1-14): dev-sane caps for an app service.
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8093"]
     env_file:
       - .env.shared
@@ -179,6 +201,10 @@ services:
       context: .
       dockerfile: services/lakehouse-sql-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:latest
+    # Resource limits (P1-14): dev-sane caps for an app service.
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8094"]
     env_file:
       - .env.shared
@@ -209,6 +235,10 @@ services:
       context: .
       dockerfile: services/mcp-tools-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:latest
+    # Resource limits (P1-14): dev-sane caps for an app service.
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8095"]
     env_file:
       - .env.shared
@@ -245,6 +275,11 @@ services:
       context: .
       dockerfile: services/collector-server/Dockerfile
     image: ghcr.io/agentofreef/text2ontology-collector-server:latest
+    # Resource limits (P1-14): PBIX parse (pandas/pbixray) is the heaviest app
+    # workload, so allow a bit more memory than the other services.
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 512
     command: ["-port", "8096"]
     env_file:
       - .env.shared
@@ -281,6 +316,10 @@ services:
   # bind to 127.0.0.1 only (gateway remains the sole public ingress).
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
+    # Resource limits (P1-14): modest caps for the observability sidecars.
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 256
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./ops/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
@@ -291,6 +330,10 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:latest
+    # Resource limits (P1-14): modest caps for the observability sidecars.
+    mem_limit: 512m
+    cpus: "0.5"
+    pids_limit: 256
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
@@ -299,16 +342,25 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
+    # Resource limits (P1-14): modest caps for the observability sidecars.
+    mem_limit: 512m
+    cpus: "0.5"
+    pids_limit: 256
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
     volumes:
       - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/alerts:/etc/prometheus/alerts:ro
     ports:
       - "127.0.0.1:9090:9090"
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
+    # Resource limits (P1-14): modest caps for the observability sidecars.
+    mem_limit: 512m
+    cpus: "0.5"
+    pids_limit: 256
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
@@ -326,6 +378,11 @@ services:
   # /docker-entrypoint-initdb.d. No manual psql step required.
   postgres:
     image: pgvector/pgvector:pg16
+    # Resource limits (P1-14): Postgres gets the largest memory budget since it
+    # backs every service; pids a touch higher for connection-heavy workloads.
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 512
     environment:
       POSTGRES_DB: lakehouse2ontology-enterprise
       POSTGRES_USER: lakehouse2ontology-enterprise

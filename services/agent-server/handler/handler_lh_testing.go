@@ -679,7 +679,7 @@ func handleLHTestCaseRetry(db *sql.DB, caseID, suiteID string, w http.ResponseWr
 	// Resolve LLM config — single "agent" role (was: 3-tier fallback).
 	baseURL, apiKey, modelName, _, isToolCall, vendor := llmclient.GetConfigForRole(db, "agent")
 
-	result := runLakehouseTestCase(db, projectID, suiteID, caseID, question, code, sortOrder,
+	result := runLakehouseTestCase(r.Context(), db, projectID, suiteID, caseID, question, code, sortOrder,
 		baseURL, apiKey, modelName, isToolCall, vendor)
 
 	fcJSON, _ := json.Marshal(result.FunctionCalls)
@@ -747,7 +747,7 @@ type lhCaseResult struct {
 
 // ======================== Core: run single lakehouse test case ========================
 
-func runLakehouseTestCase(db *sql.DB, projectID, suiteID, caseID, question, code string, index int,
+func runLakehouseTestCase(ctx context.Context, db *sql.DB, projectID, suiteID, caseID, question, code string, index int,
 	llmBaseURL, llmAPIKey, llmModelName string, llmIsToolCall bool, llmVendor string) lhCaseResult {
 	start := time.Now()
 	result := lhCaseResult{
@@ -781,10 +781,10 @@ func runLakehouseTestCase(db *sql.DB, projectID, suiteID, caseID, question, code
 	// the first transaction committed, surfacing as PK conflicts in logs.
 	// saveAnnotation logs internal errors itself; no return value to check.
 	saveAnnotation(db, projectID, "", question, tokens, nil)
-	// runLakehouseTestCase is invoked both from an HTTP handler and from a
-	// background worker pool (lh_test_worker.go) without a request context;
-	// Background is used to keep the call site helper-local.
-	recallResult := recall.BuildLakehouseContext(context.Background(), db, projectID, tokens, question)
+	// runLakehouseTestCase is invoked both from an HTTP handler (with r.Context())
+	// and from the background worker pool (with the worker ctx); the caller's ctx
+	// is threaded here so cancellation/shutdown propagates to recall + LLM calls.
+	recallResult := recall.BuildLakehouseContext(ctx, db, projectID, tokens, question)
 	enrichedQuestion := recallResult.ContextMD + "\n\n---\n\n" + question
 
 	// Build system prompt (simplified for testing — no thread history)
@@ -885,12 +885,11 @@ func runLakehouseTestCase(db *sql.DB, projectID, suiteID, caseID, question, code
 	dispatchTool := func(name string, args map[string]interface{}) M {
 		switch name {
 		case "lookup":
-			// Offline batch test runner — no live turn ctx; pass Background
-			// explicitly to make the absence of cross-service trace stitching
-			// visible at the call site.
-			return lakehouseToolLookup(context.Background(), db, projectID, args)
+			// Thread the caller's ctx (request ctx on the HTTP path, worker ctx
+			// on the background path) so tool DB/LLM work is cancellable.
+			return lakehouseToolLookup(ctx, db, projectID, args)
 		case "smartquery":
-			return lakehouseToolSmartQuery(context.Background(), db, projectID, question, args)
+			return lakehouseToolSmartQuery(ctx, db, projectID, question, args)
 		default:
 			return M{"error": "未知工具: " + name}
 		}
@@ -1678,7 +1677,7 @@ func handleLHTestRunCaseRetry(db *sql.DB, rcID, suiteID, runID string, w http.Re
 		execution_result = '', execution_error = '', final_answer = '', function_calls = NULL,
 		duration_ms = 0, updated_at = now() WHERE id = $1`, rcID)
 
-	result := runLakehouseTestCase(db, projectID, suiteID, rcID, question, code, sortOrder,
+	result := runLakehouseTestCase(r.Context(), db, projectID, suiteID, rcID, question, code, sortOrder,
 		llBaseURL, llAPIKey, llModelName, llIsToolCall, llVendor)
 
 	fcJSON, _ := json.Marshal(result.FunctionCalls)

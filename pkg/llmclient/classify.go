@@ -2,6 +2,7 @@ package llmclient
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -116,7 +117,9 @@ func ClassifySingleColumn(col PbitColumnInfo, baseURL, apiKey, modelName string,
 	chatBody := M{"model": modelName, "messages": messages, "max_tokens": 512, "temperature": 0, "_vendor": vendor}
 
 	if IsAnthropic(vendor) {
-		content, _, err := doAnthropicChat(baseURL, apiKey, chatBody, "")
+		// ClassifySingleColumn is a public, no-ctx helper invoked from a goroutine
+		// pool; no request context is in scope, so use a background context.
+		content, _, err := doAnthropicChat(context.Background(), baseURL, apiKey, chatBody, "")
 		if err != nil {
 			log.Printf("PBIT: LLM call failed for %s.%s: %v", col.TableName, col.ColumnName, err)
 			return ClassifyResult{MC: false, Reason: "LLM error"}
@@ -128,7 +131,14 @@ func ClassifySingleColumn(col PbitColumnInfo, baseURL, apiKey, modelName string,
 	delete(chatBody, "_vendor")
 	reqBytes, _ := json.Marshal(chatBody)
 	url := BuildURL(baseURL, "/chat/completions")
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(reqBytes))
+	// No request ctx is in scope here (public no-ctx helper run from a goroutine
+	// pool); use a background context but still go through NewRequestWithContext
+	// for consistency with the rest of the package.
+	req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewReader(reqBytes))
+	if err != nil {
+		log.Printf("PBIT: build request failed for %s.%s: %v", col.TableName, col.ColumnName, err)
+		return ClassifyResult{}
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
