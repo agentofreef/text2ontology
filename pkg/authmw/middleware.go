@@ -112,9 +112,15 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Pass OPTIONS and non-API paths through unconditionally.
+		// Self-registration endpoints are public by design: registration-status
+		// is read by the login page before any token exists, and register
+		// bootstraps a brand-new account (the toggle gate + validation live in
+		// the handler itself, not here).
 		if r.Method == http.MethodOptions ||
 			!strings.HasPrefix(r.URL.Path, "/api/") ||
 			r.URL.Path == "/api/auth/login" ||
+			r.URL.Path == "/api/auth/register" ||
+			r.URL.Path == "/api/auth/registration-status" ||
 			r.URL.Path == "/api/health" {
 			next.ServeHTTP(w, r)
 			return

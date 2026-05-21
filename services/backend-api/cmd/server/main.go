@@ -206,6 +206,7 @@ func main() {
 	// /api/llm-role-binding — the public-bearer-auth side only, since
 	// /internal/* equivalents would be meaningless for browser-level auth.
 	core.RegisterAuthRoutes(mux, db)
+	core.RegisterAdminRoutes(mux, db)
 	core.RegisterProjectRoutes(mux, db)
 	core.RegisterPromptConfigRoutes(mux, db)
 	core.RegisterLLMConfigRoutes(mux, db)

@@ -18,6 +18,19 @@ func RegisterAuthRoutes(mux *http.ServeMux, db *sql.DB) {
 	mux.HandleFunc("/api/auth/login", handleLogin(db))
 	mux.HandleFunc("/api/auth/me", handleMe(db))
 	mux.HandleFunc("/api/auth/change-password", handleChangePassword(db))
+	mux.HandleFunc("/api/auth/register", handleRegister(db))
+	mux.HandleFunc("/api/auth/registration-status", handleRegistrationStatus(db))
+}
+
+// registrationAllowed reads the global app_setting toggle. Any error (missing
+// row, missing table on an un-migrated DB) is treated as "not allowed" —
+// fail-closed, matching the schema's default seed.
+func registrationAllowed(db *sql.DB) bool {
+	var v string
+	if err := db.QueryRow(`SELECT value FROM app_setting WHERE key = 'allow_registration'`).Scan(&v); err != nil {
+		return false
+	}
+	return v == "true"
 }
 
 func handleLogin(db *sql.DB) http.HandlerFunc {
@@ -186,6 +199,107 @@ func handleChangePassword(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		JsonResp(w, M{"success": true})
+	}
+}
+
+// handleRegistrationStatus — GET /api/auth/registration-status.
+//
+// Public (exempt from authmw): the login page calls this before any token
+// exists to decide whether to show the sign-up entry. Returns {"allowed": bool}.
+func handleRegistrationStatus(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			HandleOptions(w)
+			return
+		}
+		CorsHeaders(w)
+		JsonResp(w, M{"allowed": registrationAllowed(db)})
+	}
+}
+
+// handleRegister — POST /api/auth/register.
+//
+// Body: {"username": "...", "password": "...", "displayName": "..."}.
+// Public (exempt from authmw) but gated server-side by the allow_registration
+// toggle — never trust the UI to have hidden the form. On success the new
+// account is active with role 'user' and we auto-login by returning a token in
+// the same shape as handleLogin, so the client lands signed-in.
+func handleRegister(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			HandleOptions(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		CorsHeaders(w)
+
+		if !registrationAllowed(db) {
+			w.WriteHeader(http.StatusForbidden)
+			JsonResp(w, M{"success": false, "error": "注册已关闭"})
+			return
+		}
+
+		body := ReadBody(r)
+		username := strings.TrimSpace(StrVal(body, "username"))
+		password := StrVal(body, "password")
+		displayName := strings.TrimSpace(StrVal(body, "displayName"))
+		if username == "" || password == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			JsonResp(w, M{"success": false, "error": "用户名和密码不能为空"})
+			return
+		}
+		if len(password) < 6 {
+			w.WriteHeader(http.StatusBadRequest)
+			JsonResp(w, M{"success": false, "error": "密码至少 6 个字符"})
+			return
+		}
+		if displayName == "" {
+			displayName = username
+		}
+
+		hash, err := authmw.HashPassword(password)
+		if err != nil {
+			log.Printf("[auth] register HashPassword failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			JsonResp(w, M{"success": false, "error": "服务器错误"})
+			return
+		}
+
+		// ON CONFLICT DO NOTHING + RETURNING: an empty result means the
+		// username is already taken (no row was inserted).
+		var id string
+		err = db.QueryRow(
+			`INSERT INTO "user" (username, password_hash, display_name, role, is_active)
+			 VALUES ($1, $2, $3, 'user', true)
+			 ON CONFLICT (username) DO NOTHING
+			 RETURNING id`, username, hash, displayName).Scan(&id)
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusConflict)
+			JsonResp(w, M{"success": false, "error": "用户名已存在"})
+			return
+		}
+		if err != nil {
+			log.Printf("[auth] register insert failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			JsonResp(w, M{"success": false, "error": "注册失败"})
+			return
+		}
+
+		token, err := authmw.SignToken(id)
+		if err != nil {
+			log.Printf("[auth] register SignToken failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			JsonResp(w, M{"success": false, "error": "服务器配置错误"})
+			return
+		}
+		JsonResp(w, M{
+			"success": true,
+			"token":   token,
+			"user":    M{"username": username, "displayName": displayName, "role": "user"},
+		})
 	}
 }
 

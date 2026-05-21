@@ -20,6 +20,19 @@ CREATE TABLE IF NOT EXISTS "user" (
     updated_at      TIMESTAMPTZ DEFAULT now()
 );
 
+-- ==================== 1b. app_setting (global key-value) ====================
+-- Process-wide settings not scoped to a project or user. Currently holds the
+-- self-registration toggle. Read by /api/auth/registration-status (public) and
+-- the /api/auth/register gate; written from the admin user-management page.
+CREATE TABLE IF NOT EXISTS app_setting (
+    key         VARCHAR(64) PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+-- Registration is fail-closed by default; an admin enables it from /settings/users.
+INSERT INTO app_setting (key, value) VALUES ('allow_registration', 'false')
+ON CONFLICT (key) DO NOTHING;
+
 -- ==================== 2. project ====================
 CREATE TABLE IF NOT EXISTS project (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

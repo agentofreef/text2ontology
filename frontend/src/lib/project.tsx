@@ -46,6 +46,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       if (list.length > 0) {
         const saved = list.find((p) => p.id === savedProjectId)
         setCurrentProject(saved || list[0])
+      } else {
+        // The membership-filtered list is empty for this user — clear any
+        // selection (and the stale id another user may have left in storage)
+        // so the switcher doesn't keep showing a project they can't access.
+        setCurrentProject(null)
+        localStorage.removeItem('lakehouse2ontology_project_id')
       }
     } catch {
       // Fallback: no projects

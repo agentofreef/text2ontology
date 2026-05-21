@@ -1,11 +1,12 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import {
   type Node,
   type NodeTypes,
   useNodesState,
 } from '@xyflow/react'
+import { useTranslations } from 'next-intl'
 import { ErCanvas, layoutGraph } from '@/components/er-canvas/ErCanvas'
 import { useProject } from '@/lib/project'
 import { api, getApiBase } from '@/lib/api'
@@ -13,7 +14,7 @@ import { useStyleMode } from '@/lib/style-mode'
 import { useMessage } from '@/lib/message'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
-import { Upload, FileText, X, RefreshCw } from 'lucide-react'
+import { Upload, FileText, X, RefreshCw, Database } from 'lucide-react'
 import type { OntObjectType } from '@/types/api'
 import { SourceNode, type SourceGroupData } from './SourceNode'
 
@@ -45,7 +46,8 @@ function formatBytes(bytes: number): string {
 // DataArchitectureView is the default lakehouse-objects view: one node per
 // non-file data source plus collapsing folders (CSV/PowerBI), rendered on the
 // shared ER canvas with no edges. Clicking a node drills into its ER diagram.
-export function DataArchitectureView({ onOpenSource }: { onOpenSource: (group: SourceGroupData) => void }) {
+export function DataArchitectureView({ onOpenSource, headerSlot }: { onOpenSource: (group: SourceGroupData) => void; headerSlot?: ReactNode }) {
+  const t = useTranslations('lakehouse')
   const industrial = useStyleMode().mode === 'industrial'
   const { currentProject } = useProject()
   const msg = useMessage()
@@ -255,16 +257,23 @@ export function DataArchitectureView({ onOpenSource }: { onOpenSource: (group: S
 
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar — aligned right inside the architecture body (page header sits above) */}
-      <div className={`flex h-12 flex-shrink-0 items-center justify-between gap-3 bg-white px-6 ${
-        industrial ? 'border-b border-ink/30' : 'border-b border-border-light'
+      {/* Single page header (standard h-14, matches sibling pages) — title left,
+          view toggle + actions right. */}
+      <div className={`flex h-14 flex-shrink-0 items-center justify-between gap-3 bg-white px-6 ${
+        industrial ? 'border-b-2 border-ink' : 'border-b border-border shadow-sm'
       }`}>
-        <span className={industrial
-          ? 'font-mono text-[10px] uppercase tracking-[0.18em] text-ink-ghost'
-          : 'text-xs text-ink-ghost'}>
-          {industrial ? '// DATA ARCHITECTURE' : '数据架构'}
-        </span>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-3">
+          {industrial ? (
+            <span className="font-mono text-[11px] tracking-[0.22em] text-ink-ghost">// LAKEHOUSE</span>
+          ) : (
+            <>
+              <Database size={18} className="text-ink" aria-hidden="true" />
+              <h1 className="text-base font-semibold tracking-tight text-ink whitespace-nowrap">{t('title')}</h1>
+            </>
+          )}
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {headerSlot}
           <button
             onClick={fetchArchitecture}
             disabled={loading}
