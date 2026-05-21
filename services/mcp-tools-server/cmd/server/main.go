@@ -31,7 +31,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -83,6 +82,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("mcp-tools-server"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -99,14 +102,9 @@ func main() {
 	authz := auth.New(db)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"service": "mcp-tools-server",
-			"tools":   []string{"lookup_od", "execute_smartquery", "recall_tokens"},
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "mcp-tools-server")
 	mux.Handle("/metrics", observability.MetricsHandler())
 
 	// REST dispatcher covers the plain /api/mcp/v1/tools/<name> shape.

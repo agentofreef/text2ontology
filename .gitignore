@@ -21,6 +21,7 @@ mcp-server/.venv/
 # Environment
 .env
 .env.shared
+.env.shared.bak*
 .env.local
 .env.production
 .env.*.local

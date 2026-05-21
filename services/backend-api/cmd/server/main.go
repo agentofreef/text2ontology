@@ -67,6 +67,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("backend-api"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -87,18 +91,18 @@ func main() {
 	// BOOTSTRAP_REQUIRED sentinel, ADMIN_PASSWORD must be set so we can
 	// install a real password hash before serving any request.
 	core.AssertAuthEnv()
+	// Fail-closed on a weak admin password when REQUIRE_STRONG_SECRETS is set.
+	if err := dsnguard.AssertStrongAdminPassword(); err != nil {
+		log.Fatal(err)
+	}
 	if err := core.BootstrapAdminIfNeeded(db); err != nil {
 		log.Fatalf("[auth] admin bootstrap failed: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"service": "backend-api",
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "backend-api")
 	mux.Handle("/metrics", observability.MetricsHandler())
 
 	// /internal/backend-api/ping is an authenticated placeholder endpoint.
@@ -228,7 +232,7 @@ func main() {
 	// proxy becomes optional.
 	registerPublicAPI(mux, db)
 
-	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
+	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
 	// Middleware order (outer → inner):
 	//   CORSMiddleware         — OPTIONS preflight + Access-Control-*
 	//     headers for browser-direct fetches. Reads CORS_ALLOW_ORIGINS

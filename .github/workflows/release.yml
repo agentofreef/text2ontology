@@ -3,9 +3,13 @@ name: Release images
 # Build all 7 service images and push to GitHub Container Registry.
 #
 # Triggers:
-#   - push to main      → ghcr.io/agentofreef/text2ontology-<svc>:latest + :main-<sha>
-#   - tag push v*       → :latest + :main-<sha> + :<tag>
-#   - workflow_dispatch → on-demand rebuild
+#   - push to main           → ghcr.io/agentofreef/text2ontology-<svc>:latest + :main-<sha> + :sha-<sha>
+#   - push to product-ready  → :product-ready + :sha-<sha>  (what docker-compose.product-ready.yml pulls)
+#   - tag push v*            → :<tag> + :sha-<sha>
+#   - workflow_dispatch      → on-demand rebuild
+#
+# :product-ready is a MUTABLE tag (moves with the branch); for rollback pin an
+# immutable :sha-<sha> in the compose file instead.
 #
 # Each service builds independently inside the matrix so a slow image
 # (frontend, ~7 min) doesn't gate the rest. First-time setup: after the
@@ -15,7 +19,7 @@ name: Release images
 
 on:
   push:
-    branches: [main]
+    branches: [main, product-ready]
     tags: ['v*']
   workflow_dispatch:
 
@@ -74,6 +78,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
+            type=sha,prefix=sha-
             type=sha,prefix=main-,enable={{is_default_branch}}
             type=raw,value=latest,enable={{is_default_branch}}
 

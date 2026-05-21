@@ -204,6 +204,11 @@ func handleLakehouseSQLHistory(db *sql.DB) http.HandlerFunc {
 		if r.Method == http.MethodDelete {
 			id := r.URL.Query().Get("id")
 			if id != "" {
+				// Cross-project IDOR guard: confirm the caller can access the
+				// log row's project before deleting it by id.
+				if !authmw.EnforceEntityProject(w, r, db, "ont_lakehouse_sql_log", "id", id) {
+					return
+				}
 				db.Exec(`DELETE FROM ont_lakehouse_sql_log WHERE id = $1`, id)
 			}
 			JsonResp(w, M{"success": true})
@@ -286,6 +291,10 @@ func handleLakehouseSQLSnippets(db *sql.DB) http.HandlerFunc {
 			if projID == "" || name == "" || sqlText == "" {
 				w.WriteHeader(400)
 				JsonResp(w, M{"error": "projectId, name, sql required"})
+				return
+			}
+			// Body projectId bypasses the middleware query gate; verify access.
+			if !authmw.EnforceProjectAccess(w, r, db, projID) {
 				return
 			}
 			var id string
@@ -464,7 +473,13 @@ func sanitizeSQLExecError(err error) string {
 		return ""
 	}
 	if pqErr, ok := err.(*pq.Error); ok {
-		switch string(pqErr.Code)[:2] {
+		// SQLSTATE is normally 5 chars, but some driver/connection errors leave
+		// it empty; guard the slice so classification never panics on a short code.
+		code := string(pqErr.Code)
+		if len(code) < 2 {
+			return "数据库执行错误：请检查 SQL 语句后重试。"
+		}
+		switch code[:2] {
 		case "42": // syntax error or access rule violation (incl. undefined table/column)
 			return "SQL 语法或对象引用错误：请检查语句语法以及引用的表/列名是否存在且拼写正确。"
 		case "22": // data exception (type mismatch, invalid value, division by zero)

@@ -23,7 +23,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -66,6 +65,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("agent-server"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -94,13 +97,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"service": "agent-server",
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "agent-server")
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/internal/agent/stream", handler.HandleAgentStream(db))
 	mux.HandleFunc("/internal/agent/threads", handler.HandleAgentThreads(db))
@@ -153,7 +152,7 @@ func main() {
 	// closes once its poll loop has fully exited.
 	lhWorkerDone := handler.StartLHTestWorkerCtx(ctx, db)
 
-	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
+	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
 	// Middleware order (outermost first): CORS → traceparent → server-span
 	// → auth → handler. Same pattern lakehouse-sql-server + recall-server
 	// follow. Phase 4C.2 added CORSMiddleware so the browser can fetch

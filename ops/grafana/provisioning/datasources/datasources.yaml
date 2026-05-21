@@ -1,0 +1,21 @@
+apiVersion: 1
+
+# Auto-provisioned datasources for the lakehouse2ontology stack.
+# Reachable over the compose network (service DNS), not host ports.
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "15s"
+
+  - name: Jaeger
+    type: jaeger
+    uid: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: true

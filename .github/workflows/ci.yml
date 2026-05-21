@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, product-ready]
   pull_request:
-    branches: [main]
+    branches: [main, product-ready]
 
 jobs:
   go-tests:
@@ -46,8 +46,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check service deps
+      - name: Check service deps (no cross-service imports)
         run: bash scripts/check-service-deps.sh
+      - name: Check layer deps (4-layer import direction)
+        run: bash scripts/check-layer-deps.sh
+
+  govulncheck:
+    name: Go vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan each module
+        run: |
+          for mod in pkg/authmw pkg/contracts pkg/dsnguard pkg/httputil pkg/llmclient \
+                     pkg/mission pkg/observability pkg/ontology pkg/srvkit \
+                     services/backend-api services/agent-server services/recall-server \
+                     services/lakehouse-sql-server services/mcp-tools-server services/collector-server; do
+            echo "=== govulncheck $mod ==="
+            (cd "$mod" && govulncheck ./...) || exit 1
+          done
 
   frontend-build:
     name: Frontend build

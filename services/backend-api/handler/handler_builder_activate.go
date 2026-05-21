@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
 	"github.com/lib/pq"
 )
@@ -107,6 +108,13 @@ func handleBuilderActivateOd(db *sql.DB) http.HandlerFunc {
 		}
 		if !IsValidUUID(req.ObjectId) || !IsValidUUID(req.ProjectId) {
 			activateRespondError(w, http.StatusBadRequest, "objectId and projectId must be valid UUIDs")
+			return
+		}
+		// Authorization: the body-supplied projectId bypasses the middleware's
+		// query-string project gate, so verify the bearer caller can access it
+		// before any read/write. Without this, any authenticated user could
+		// activate/mutate another project's pending builder OD by id (IDOR).
+		if !authmw.EnforceProjectAccess(w, r, db, req.ProjectId) {
 			return
 		}
 
@@ -509,6 +517,12 @@ func handleBuilderActivateIntent(db *sql.DB) http.HandlerFunc {
 			activateRespondError(w, http.StatusBadRequest, "intentId and projectId must be valid UUIDs")
 			return
 		}
+		// Authorization: body projectId bypasses the middleware query-string
+		// gate; verify the bearer caller can access it before any read/write
+		// (cross-project IDOR otherwise).
+		if !authmw.EnforceProjectAccess(w, r, db, req.ProjectId) {
+			return
+		}
 
 		// Orphan guard — activating an intent without trigger keywords would
 		// create a fresh orphan (the very bug we're trying to eliminate). The
@@ -700,6 +714,12 @@ func handleBuilderActivateLink(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(req.LinkId) || !IsValidUUID(req.ProjectId) ||
 			!IsValidUUID(req.FromPropertyId) || !IsValidUUID(req.ToPropertyId) {
 			activateRespondError(w, http.StatusBadRequest, "linkId/projectId/fromPropertyId/toPropertyId must be valid UUIDs")
+			return
+		}
+		// Authorization: body projectId bypasses the middleware query-string
+		// gate; verify the bearer caller can access it before any read/write
+		// (cross-project IDOR otherwise).
+		if !authmw.EnforceProjectAccess(w, r, db, req.ProjectId) {
 			return
 		}
 

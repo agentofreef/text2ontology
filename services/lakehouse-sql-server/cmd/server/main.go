@@ -37,6 +37,7 @@ import (
 
 	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/dsnguard"
+	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/lakehouse"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/smartquery"
@@ -88,6 +89,10 @@ func main() {
 	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+	// Fail-closed on weak secrets when REQUIRE_STRONG_SECRETS is set (no-op otherwise).
+	if err := dsnguard.AssertStrongSecrets("lakehouse-sql-server"); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -107,19 +112,15 @@ func main() {
 	engine := &lakehouse.Engine{DB: db}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"service": "lakehouse-sql-server",
-		})
-	})
+	// Shared healthz: liveness + token-gated ?check=db DB ping (single source
+	// of truth across all services; replaces the inline JSON handler).
+	httputil.InstallHealthzDB(mux, dsn, db, "lakehouse-sql-server")
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/internal/smartquery/execute", executeHandler(engine))
 	mux.HandleFunc("/internal/smartquery/execute-plan", executePlanHandler(engine))
 	mux.HandleFunc("/internal/smartquery/validate-intent", validateIntentHandler())
 
-	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
+	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
 	// Middleware order matters:
 	//   TraceContextMiddleware (OUTERMOST) — extract W3C traceparent so
 	//     every downstream span nests under the caller's span.
