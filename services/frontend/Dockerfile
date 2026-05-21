@@ -41,9 +41,10 @@ COPY services/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 # Point the pid file at /tmp and make the cache/runtime dirs writable so the
 # master process doesn't need root. Listening on 8080 (see nginx.conf) keeps
 # us off privileged ports.
-RUN sed -i 's|pid        /var/run/nginx.pid;|pid        /tmp/nginx.pid;|' /etc/nginx/nginx.conf \
-    && chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html \
-    && chmod -R g+w /var/cache/nginx
+RUN sed -i -E 's#^[[:space:]]*pid[[:space:]].*#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \
+    && chown -R nginx:nginx /var/cache/nginx /usr/share/nginx/html /etc/nginx/conf.d \
+    && chmod -R g+w /var/cache/nginx \
+    && chmod 0644 /etc/nginx/conf.d/default.conf
 
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \

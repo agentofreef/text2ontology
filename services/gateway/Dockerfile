@@ -28,7 +28,8 @@ RUN apk add --no-cache wget curl
 # under /var/cache/nginx must be writable by that user. Listening on 8080 (see
 # nginx.conf) keeps the gateway off privileged ports.
 RUN chown -R nginx:nginx /var/cache/nginx \
-    && chmod -R g+w /var/cache/nginx
+    && chmod -R g+w /var/cache/nginx \
+    && chmod 0644 /etc/nginx/nginx.conf
 
 EXPOSE 8080
 
