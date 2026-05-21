@@ -104,7 +104,7 @@ services:
     env_file:
       - .env.shared
     environment:
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${BACKEND_API_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "backend-api"
       # P7.4 dry-run validation on POST/PUT /api/ontology/metric-intents.
@@ -141,7 +141,7 @@ services:
     env_file:
       - .env.shared
     environment:
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${AGENT_SERVER_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "agent-server"
       LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
@@ -179,7 +179,7 @@ services:
     env_file:
       - .env.shared
     environment:
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${RECALL_SERVER_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "recall-server"
 
@@ -209,7 +209,7 @@ services:
     env_file:
       - .env.shared
     environment:
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${LAKEHOUSE_SQL_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "lakehouse-sql-server"
 
@@ -245,7 +245,7 @@ services:
     environment:
       # DB is for the mcp_api_key auth store only. Container must
       # reach WSL-private Postgres through host-gateway.
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${MCP_TOOLS_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "mcp-tools-server"
       RECALL_SERVER_URL: "http://recall-server:8093"
@@ -284,7 +284,7 @@ services:
     env_file:
       - .env.shared
     environment:
-      DATABASE_URL: "${DATABASE_URL_CONTAINER}"
+      DATABASE_URL: "${COLLECTOR_SERVER_DSN}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_SERVICE_NAME: "collector-server"
       PBIT_STAGING_ROOT: "/data/pbit-staging"
