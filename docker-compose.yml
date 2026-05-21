@@ -273,6 +273,54 @@ services:
   # NOTE: No `frontend` service — backend-api serves the static Next.js export
   # via the -static flag (per plan OQ-1). Run: backend-api -static ./frontend/out
 
+  # ── Observability stack (P1-15) ─────────────────────────────────────────────
+  # otel-collector receives OTLP from all 6 services (they already point
+  # OTEL_EXPORTER_OTLP_ENDPOINT at otel-collector:4317), fans traces to Jaeger,
+  # and exposes a Prometheus scrape on :8889. Brought up ahead of the DB-role
+  # cutover (Wave 4) so that high-blast-radius wave is observable. Operator UIs
+  # bind to 127.0.0.1 only (gateway remains the sole public ingress).
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./ops/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
   # ── Local Postgres (pgvector) ───────────────────────────────────────────────
   # Self-contained: schema.sql is auto-applied on first start via
   # /docker-entrypoint-initdb.d. No manual psql step required.
@@ -300,3 +348,4 @@ volumes:
   collector-staging:
   collector-uploads:
   postgres-data:
+  grafana-data:
