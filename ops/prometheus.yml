@@ -51,3 +51,10 @@ scrape_configs:
     static_configs:
       - targets: ['otel-collector:8889']
     metrics_path: /metrics
+
+  # NOTE: the `gateway` (nginx) service is intentionally NOT scraped. Stock
+  # nginx exposes no Prometheus /metrics endpoint — it only serves a /healthz
+  # liveness location (see services/gateway/nginx.conf). To collect gateway
+  # metrics, add an nginx stub_status location + an nginx-prometheus-exporter
+  # sidecar, then add a `gateway` job here pointing at the exporter. Deferred
+  # until that exporter is wired.

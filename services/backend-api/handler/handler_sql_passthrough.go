@@ -459,6 +459,11 @@ func buildCTEPrefix(odMap map[string]odInfo, usedLower []string) string {
 	return "WITH " + strings.Join(parts, ",\n") + "\n"
 }
 
+// dollarQuoteRe matches a PostgreSQL dollar-quote opener: $$ or $tag$ where the
+// optional tag is an identifier. Presence of any opener is treated as hostile in
+// the read-only passthrough path (see rejectDDL).
+var dollarQuoteRe = regexp.MustCompile(`\$[A-Za-z_0-9]*\$`)
+
 // rejectDDL blocks any DDL / dangerous keyword AND escape attempts that
 // would let a passthrough query read outside its project's lakehouse
 // schema (the `SET LOCAL search_path` set just before execution).
@@ -473,6 +478,15 @@ func buildCTEPrefix(odMap map[string]odInfo, usedLower []string) string {
 //   - multi-statement input via top-level ';'
 //   - SET / RESET / SHOW (would let an attacker swap search_path mid-query)
 func rejectDDL(sqlText string) error {
+	// PG dollar-quoting ($$...$$ or $tag$...$tag$) lets a payload hide content
+	// from the comment-strip + keyword scan below (the quoted body is opaque to
+	// our --/ /* */ stripping and to the ';' multi-statement check). A read-only
+	// single-statement passthrough SELECT never legitimately needs dollar-quotes,
+	// so reject any dollar-quote opener outright rather than try to parse them.
+	if dollarQuoteRe.MatchString(sqlText) {
+		return fmt.Errorf("禁止美元引用（$$ / $tag$）语法")
+	}
+
 	cleaned := regexp.MustCompile(`--[^\n]*`).ReplaceAllString(sqlText, " ")
 	cleaned = regexp.MustCompile(`/\*[\s\S]*?\*/`).ReplaceAllString(cleaned, " ")
 	lower := strings.ToLower(cleaned)

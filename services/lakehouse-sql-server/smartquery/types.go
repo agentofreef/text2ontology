@@ -1,7 +1,76 @@
 package smartquery
 
+import "github.com/lakehouse2ontology/contracts"
+
+// The QuerySpec family of DTOs is owned by the shared pkg/contracts module
+// (the single source of truth). The leaf types below are exposed under their
+// historical smartquery.* names via type aliases so the hundreds of existing
+// call sites compile unchanged while being structurally identical to the
+// agent-server copy — they cannot drift because they ARE the same type.
+//
+// Two types stay concrete in this package because they carry package-local
+// methods that Go does not permit on a cross-package alias:
+//   - QuerySpec     (AppendGroupBy / HasGroupBy in engine.go)
+//   - ResolveError  (Error in this file)
+// Their structural consistency with contracts is enforced by the compile-time
+// assertions at the bottom of this file.
+
+// FilterItem is a raw filter as supplied by the LLM.
+type FilterItem = contracts.FilterItem
+
+// OrderByItem is a raw order-by as supplied by the LLM.
+type OrderByItem = contracts.OrderByItem
+
+// DerivedMetricDef defines an ad-hoc computed measure for the metric layer.
+type DerivedMetricDef = contracts.DerivedMetricDef
+
+// MetricFilter is a post-aggregation HAVING condition.
+type MetricFilter = contracts.MetricFilter
+
+// PropertyInfo is the bridge from ontology name to physical column.
+type PropertyInfo = contracts.PropertyInfo
+
+// ResolvedFilter is a FilterItem after the property has been bound to a real column
+// and the value has optionally been corrected by the keyword hook.
+type ResolvedFilter = contracts.ResolvedFilter
+
+// ResolvedGroupBy carries the physical property, an optional date-format granularity
+// string, and the OutputLabel used by the SELECT and ORDER BY clauses.
+type ResolvedGroupBy = contracts.ResolvedGroupBy
+
+// AggregateKind classifies how the SQL builder should emit a given aggregate.
+// Lakehouse extends this enum with AggCustomSQL = 10 (lakehouse/types.go).
+type AggregateKind = contracts.AggregateKind
+
+const (
+	AggStandard   = contracts.AggStandard   // emit: SUM/AVG/MAX/MIN/COUNT/DISTINCTCOUNT against a property
+	AggCountRows  = contracts.AggCountRows  // emit: COUNT(*) over the source table
+	AggDerivedRef = contracts.AggDerivedRef // emit: reference to a DEFINE-style derived measure
+)
+
+// ResolvedAggregate is a single aggregate column in the output.
+type ResolvedAggregate = contracts.ResolvedAggregate
+
+// OrderByKind distinguishes the three legal ORDER BY targets.
+type OrderByKind = contracts.OrderByKind
+
+const (
+	OrderByProp        = contracts.OrderByProp        // ordinary column reference
+	OrderByAggregate   = contracts.OrderByAggregate   // reference to a ResolvedAggregate by index
+	OrderByCustomLabel = contracts.OrderByCustomLabel // arbitrary pre-computed label
+)
+
+// ResolvedOrderBy is a classified ORDER BY target.
+type ResolvedOrderBy = contracts.ResolvedOrderBy
+
+// KeywordCorrection records a filter value correction.
+type KeywordCorrection = contracts.KeywordCorrection
+
 // QuerySpec is the LLM-facing input (what v2ToolSmartQuery receives in args).
-// All identifiers are string names — they have NOT yet been mapped to physical columns.
+// All identifiers are string names — they have NOT yet been mapped to physical
+// columns. Kept concrete (not a contracts alias) because AppendGroupBy /
+// HasGroupBy are declared on it; the compile-time assertion below guarantees it
+// stays structurally identical to contracts.QuerySpec.
 type QuerySpec struct {
 	ProjectID    string             `json:"projectId"`
 	Objects      []string           `json:"objects"`
@@ -35,110 +104,9 @@ type QuerySpec struct {
 	IntentHint *IntentHint `json:"intentHint,omitempty"`
 }
 
-// FilterItem is a raw filter as supplied by the LLM.
-type FilterItem struct {
-	Prop       string `json:"prop"`
-	Op         string `json:"op"`
-	Value      string `json:"value"`
-	FuzzyMatch bool   `json:"fuzzyMatch,omitempty"`
-}
-
-// OrderByItem is a raw order-by as supplied by the LLM.
-type OrderByItem struct {
-	Prop string `json:"prop"`
-	Dir  string `json:"dir"` // "ASC" | "DESC"
-}
-
-// DerivedMetricDef defines an ad-hoc computed measure for the metric layer.
-type DerivedMetricDef struct {
-	Name       string `json:"name"`
-	Expression string `json:"expression"`
-	BaseTable  string `json:"baseTable"`
-}
-
-// MetricFilter is a post-aggregation HAVING condition.
-type MetricFilter struct {
-	Op    string `json:"op"`
-	Value string `json:"value"`
-}
-
-// PropertyInfo is the bridge from ontology name to physical column.
-type PropertyInfo struct {
-	Name       string `json:"name"`
-	DataType   string `json:"dataType"`
-	TableName  string `json:"tableName"`
-	ColumnName string `json:"columnName"`
-	ObjectName string `json:"objectName"`
-	ObjectID   string `json:"objectId"`
-}
-
-// ResolvedFilter is a FilterItem after the property has been bound to a real column
-// and the value has optionally been corrected by the keyword hook.
-type ResolvedFilter struct {
-	Prop          PropertyInfo `json:"prop"`
-	Op            string       `json:"op"`
-	Value         string       `json:"value"`
-	OriginalValue string       `json:"originalValue"`
-	FuzzyMatch    bool         `json:"fuzzyMatch,omitempty"`
-}
-
-// ResolvedGroupBy carries the physical property, an optional date-format granularity
-// string, and the OutputLabel used by the SELECT and ORDER BY clauses.
-type ResolvedGroupBy struct {
-	Prop          PropertyInfo `json:"prop"`
-	Granularity   string       `json:"granularity"`   // "" | "YYYY-MM" | "YYYY" | "YYYY-MM-DD" | "YYYY-Q" | "YYYY-WW" | "YYYY-MM-DD HH"
-	OutputLabel   string       `json:"outputLabel"`   // stable alias used for FORMAT() + ORDER BY
-	OriginalToken string       `json:"originalToken"` // e.g. "Order_Receiving_Date(月)"
-}
-
-// AggregateKind classifies how the SQL builder should emit a given aggregate.
-// Lakehouse extends this enum with AggCustomSQL = 10 (lakehouse/types.go).
-type AggregateKind int
-
-const (
-	AggStandard   AggregateKind = iota // emit: SUM/AVG/MAX/MIN/COUNT/DISTINCTCOUNT against a property
-	_                                  // reserved (was AggCustomDAX, removed when DAX path was deleted)
-	AggCountRows                       // emit: COUNT(*) over the source table
-	AggDerivedRef                      // emit: reference to a DEFINE-style derived measure
-)
-
-// ResolvedAggregate is a single aggregate column in the output.
-type ResolvedAggregate struct {
-	Kind  AggregateKind `json:"kind"`
-	Prop  *PropertyInfo `json:"prop,omitempty"`
-	Func  string        `json:"func"`  // "SUM" | "AVG" | "MAX" | "MIN" | "COUNT" | "DISTINCTCOUNT"
-	Label string        `json:"label"` // human-visible output column name
-	Expr  string        `json:"expr"`  // expression string: SQL for AggCustomSQL (lakehouse), measure ref for AggDerivedRef
-	Table string        `json:"table"` // for AggCountRows: the source table to count
-}
-
-// OrderByKind distinguishes the three legal ORDER BY targets.
-type OrderByKind int
-
-const (
-	OrderByProp        OrderByKind = iota // ordinary column reference
-	OrderByAggregate                      // reference to a ResolvedAggregate by index
-	OrderByCustomLabel                    // arbitrary pre-computed label
-)
-
-// ResolvedOrderBy is a classified ORDER BY target.
-type ResolvedOrderBy struct {
-	Kind     OrderByKind   `json:"kind"`
-	Prop     *PropertyInfo `json:"prop,omitempty"`
-	AggIndex int           `json:"aggIndex,omitempty"`
-	Label    string        `json:"label,omitempty"`
-	Dir      string        `json:"dir"` // "ASC" | "DESC"
-}
-
-// KeywordCorrection records a filter value correction.
-type KeywordCorrection struct {
-	Prop      string `json:"prop"`
-	UserValue string `json:"userValue"`
-	DBValue   string `json:"dbValue"`
-	Status    string `json:"status"` // "matched" | "machineCode_fuzzy" | "no-match" | "noop"
-}
-
-// ResolveError is a typed engine error so callers can distinguish "user fault" from "engine bug".
+// ResolveError is a typed engine error so callers can distinguish "user fault"
+// from "engine bug". Kept concrete (not a contracts alias) because Error() is
+// declared on it; the compile-time assertion below guards structural drift.
 type ResolveError struct {
 	Code    string         `json:"code"` // "PROPERTY_NOT_FOUND" | "RELATIONSHIP_UNREACHABLE" | "OBJECT_NOT_FOUND" | "AMBIGUOUS_PROPERTY" | "MALFORMED_FILTER_VALUE" | "METRIC_AS_GROUPBY" | …
 	Message string         `json:"message"`
@@ -146,3 +114,12 @@ type ResolveError struct {
 }
 
 func (e *ResolveError) Error() string { return e.Message }
+
+// Compile-time consistency assertions: these struct conversions only compile
+// when the local concrete types stay field-for-field identical to the shared
+// contracts source of truth, so the two service copies can never silently drift.
+var (
+	_ = func(s QuerySpec) contracts.QuerySpec { return contracts.QuerySpec(s) }
+	_ = func(s contracts.QuerySpec) QuerySpec { return QuerySpec(s) }
+	_ = func(e ResolveError) contracts.ResolveError { return contracts.ResolveError(e) }
+)

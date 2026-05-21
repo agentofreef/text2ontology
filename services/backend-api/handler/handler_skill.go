@@ -15,7 +15,7 @@ func builtinSkills() []M {
 	return []M{
 		{
 			"id": "builtin-ontology-query", "skillName": "ontology_query",
-			"displayName": "Ontology Query", "description": "Query the ontology knowledge graph to answer data questions using DAX.",
+			"displayName": "Ontology Query", "description": "Query the ontology knowledge graph to answer data questions using SQL.",
 			"skillBody": "", "tools": []string{"ontology_query"},
 			"isEnabled": true, "isBuiltin": true, "sortOrder": 0,
 		},

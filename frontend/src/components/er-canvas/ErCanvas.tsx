@@ -87,6 +87,10 @@ export function ErCanvas({
       fitViewOptions={{ padding: 0.2 }}
       minZoom={0.1}
       maxZoom={2}
+      // Only mount nodes/edges intersecting the viewport. On large ER graphs
+      // (hundreds of tables/columns) this keeps the DOM bounded and avoids the
+      // render blowup that froze the canvas when every node mounted at once.
+      onlyRenderVisibleElements
     >
       <Background gap={16} color="#F3F4F6" />
       <Controls />

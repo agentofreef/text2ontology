@@ -1179,10 +1179,6 @@ func builderToolQueryData(ctx context.Context, db *sql.DB, projectID string, arg
 	textCols.Close()
 
 	pattern := "%" + likeEscape(keyword) + "%"
-	type sampleVal struct {
-		Value string
-		Count int64
-	}
 	matches := []M{}
 	totalCols := 0
 	const sampleValuesPerCol = 10

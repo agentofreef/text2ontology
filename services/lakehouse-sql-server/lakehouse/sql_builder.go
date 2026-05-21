@@ -16,11 +16,10 @@ import (
 // The retained helpers are:
 //   - groupFilters / buildFilterGroupExpr / buildFilterCondition (dense)
 //   - buildHavingClause (dense)
-//   - aggExpr / aggExprMulti / aggExprRaw / sqlAggFunc (dense)
+//   - aggExprRaw / sqlAggFunc (dense)
 //   - wrapDivisionSafety / quoteExprLabel(s) (derived metric outer wrap)
 //   - dateGranularityExpr (dense)
-//   - colRefSingle / colRefMulti (dense)
-//   - quoteIdent / quoteColRef / sanitizeAlias / escapeSQLString (dense)
+//   - quoteIdent / quoteColRef / escapeSQLString (dense)
 //   - orderByRefDerived (derived metric outer wrap)
 // A future cleanup can rewrite dense_sql.go on top of goqu native, at
 // which point most of these helpers can finally retire.
@@ -98,19 +97,24 @@ func buildFilterGroupExpr(colRef string, filters []smartquery.ResolvedFilter) st
 
 func buildFilterCondition(colRef string, f smartquery.ResolvedFilter) string {
 	val := escapeSQLString(f.Value)
+	// likeVal additionally neutralizes LIKE/ILIKE wildcards (% _ \) in the
+	// user value, for the cases where the *system* supplies the wildcards or
+	// uses ILIKE for case-insensitive equality. The explicit "like"/"not like"
+	// ops keep using val so the user-supplied pattern is honored.
+	likeVal := escapeLikeValue(f.Value)
 	switch f.Op {
 	case "=":
 		if f.FuzzyMatch {
-			return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s%%'", colRef, val)
+			return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s%%'", colRef, likeVal)
 		}
 		// Case-insensitive equals for text columns; strict = for numeric.
 		if !isNumericType(f.Prop.DataType) {
-			return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s'", colRef, val)
+			return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s'", colRef, likeVal)
 		}
 		return fmt.Sprintf("%s = '%s'", colRef, val)
 	case "<>", "!=":
 		if !isNumericType(f.Prop.DataType) {
-			return fmt.Sprintf("CAST(%s AS TEXT) NOT ILIKE '%s'", colRef, val)
+			return fmt.Sprintf("CAST(%s AS TEXT) NOT ILIKE '%s'", colRef, likeVal)
 		}
 		return fmt.Sprintf("%s <> '%s'", colRef, val)
 	case ">", ">=", "<", "<=":
@@ -119,13 +123,13 @@ func buildFilterCondition(colRef string, f smartquery.ResolvedFilter) string {
 		}
 		return fmt.Sprintf("%s %s '%s'", colRef, f.Op, val)
 	case "contains":
-		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s%%'", colRef, val)
+		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s%%'", colRef, likeVal)
 	case "not contains":
-		return fmt.Sprintf("CAST(%s AS TEXT) NOT ILIKE '%%%s%%'", colRef, val)
+		return fmt.Sprintf("CAST(%s AS TEXT) NOT ILIKE '%%%s%%'", colRef, likeVal)
 	case "starts with":
-		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s%%'", colRef, val)
+		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%s%%'", colRef, likeVal)
 	case "ends with":
-		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s'", colRef, val)
+		return fmt.Sprintf("CAST(%s AS TEXT) ILIKE '%%%s'", colRef, likeVal)
 	case "like":
 		// Caller supplies the wildcards (e.g. "%-12-%"); use the pattern
 		// as-is. CAST AS TEXT so it works on date/numeric columns too.
@@ -208,51 +212,6 @@ func orderByRefDerived(ob smartquery.ResolvedOrderBy, rq *ResolvedLakehouseQuery
 }
 
 // ── Aggregate expression helpers ──
-
-// aggExpr generates a single-Od aggregate expression with alias.
-func aggExpr(agg smartquery.ResolvedAggregate, alias string) string {
-	switch agg.Kind {
-	case smartquery.AggCountRows:
-		return fmt.Sprintf("COUNT(*) AS %s", quoteIdent(agg.Label))
-	case AggCustomSQL:
-		return fmt.Sprintf("(%s) AS %s", agg.Expr, quoteIdent(agg.Label))
-	case smartquery.AggStandard:
-		if agg.Prop == nil {
-			return fmt.Sprintf("COUNT(*) AS %s", quoteIdent("Count"))
-		}
-		col := colRefSingle(*agg.Prop, alias)
-		fn := strings.ToUpper(agg.Func)
-		// Bug #3 fix: DISTINCTCOUNT → COUNT(DISTINCT col)
-		if fn == "DISTINCTCOUNT" {
-			return fmt.Sprintf("COUNT(DISTINCT %s) AS %s", col, quoteIdent(agg.Label))
-		}
-		return fmt.Sprintf("%s(%s) AS %s", sqlAggFunc(fn), col, quoteIdent(agg.Label))
-	default:
-		return fmt.Sprintf("COUNT(*) AS %s", quoteIdent("Count"))
-	}
-}
-
-// aggExprMulti generates a multi-Od aggregate expression.
-func aggExprMulti(agg smartquery.ResolvedAggregate) string {
-	switch agg.Kind {
-	case smartquery.AggCountRows:
-		return fmt.Sprintf("COUNT(*) AS %s", quoteIdent(agg.Label))
-	case AggCustomSQL:
-		return fmt.Sprintf("(%s) AS %s", agg.Expr, quoteIdent(agg.Label))
-	case smartquery.AggStandard:
-		if agg.Prop == nil {
-			return fmt.Sprintf("COUNT(*) AS %s", quoteIdent("Count"))
-		}
-		col := colRefMulti(*agg.Prop)
-		fn := strings.ToUpper(agg.Func)
-		if fn == "DISTINCTCOUNT" {
-			return fmt.Sprintf("COUNT(DISTINCT %s) AS %s", col, quoteIdent(agg.Label))
-		}
-		return fmt.Sprintf("%s(%s) AS %s", sqlAggFunc(fn), col, quoteIdent(agg.Label))
-	default:
-		return fmt.Sprintf("COUNT(*) AS %s", quoteIdent("Count"))
-	}
-}
 
 // aggExprRaw returns the aggregate expression without alias (for HAVING).
 func aggExprRaw(agg smartquery.ResolvedAggregate, alias string) string {
@@ -374,20 +333,6 @@ func dateGranularityExpr(colRef, granularity string) string {
 
 // ── Column reference helpers (Bug #7: use ColumnName for SQL, Name for labels) ──
 
-// colRefSingle returns a qualified column reference for single-Od queries.
-// Uses prop.ColumnName (physical column) for SQL generation.
-func colRefSingle(prop smartquery.PropertyInfo, alias string) string {
-	// Use quoteIdent for alias (table name) to preserve Od name casing
-	// Use quoteColRef for column name to avoid case-sensitivity issues
-	return quoteIdent(alias) + "." + quoteColRef(prop.ColumnName)
-}
-
-// colRefMulti returns a qualified column reference for multi-Od queries.
-func colRefMulti(prop smartquery.PropertyInfo) string {
-	a := sanitizeAlias(prop.ObjectName)
-	return quoteIdent(a) + "." + quoteColRef(prop.ColumnName)
-}
-
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
@@ -401,10 +346,23 @@ func quoteColRef(s string) string {
 	return quoteIdent(s)
 }
 
-func sanitizeAlias(name string) string {
-	return name
-}
-
 func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+// escapeLikeValue escapes a user-supplied value that is interpolated into an
+// ILIKE pattern where the *system* (not the user) supplies the wildcards
+// (contains / starts with / ends with / fuzzy equals). Without this, a value
+// like "50%" or "a_b" would be treated as wildcards and silently widen the
+// match — and a trailing "\" could escape the closing quote logic of the
+// pattern. Postgres LIKE/ILIKE uses backslash as the default escape char, so we
+// backslash-escape `\`, `%`, and `_` (backslash first to avoid double-escaping)
+// before the surrounding SQL-string single-quote escaping is applied by the
+// caller. NOT used for the explicit "like"/"not like" ops, where the user
+// intentionally provides the wildcard pattern.
+func escapeLikeValue(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return escapeSQLString(s)
 }

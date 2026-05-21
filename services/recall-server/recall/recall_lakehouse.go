@@ -351,30 +351,35 @@ func searchLakehouseKeywordFull(ctx context.Context, db *sql.DB, projectID, toke
 		  AND COALESCE(o.mark, true) = true
 		LIMIT 10`, projectID, token)
 	if err == nil {
-		for rows.Next() {
-			var kwID, keyword string
-			var isMC, isColName bool
-			var propID, propName, srcCol, dtype, pdesc, odID, odName string
-			rows.Scan(&kwID, &keyword, &isMC, &isColName,
-				&propID, &propName, &srcCol, &dtype, &pdesc, &odID, &odName)
-			h := KeywordHit{
-				KeywordID:    kwID,
-				Keyword:      keyword,
-				MappedTable:  odName,
-				MappedField:  propName,
-				Tier:         "EXACT",
-				Score:        1.0,
-				MatchedToken: token,
-				IsColumnRef:  isColName,
+		// Scoped so rows.Close() runs deterministically (incl. on panic) at the
+		// end of this tier, before the FUZZY tier reuses the rows variable. A
+		// plain `defer rows.Close()` here would stack across all three tiers.
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var kwID, keyword string
+				var isMC, isColName bool
+				var propID, propName, srcCol, dtype, pdesc, odID, odName string
+				rows.Scan(&kwID, &keyword, &isMC, &isColName,
+					&propID, &propName, &srcCol, &dtype, &pdesc, &odID, &odName)
+				h := KeywordHit{
+					KeywordID:    kwID,
+					Keyword:      keyword,
+					MappedTable:  odName,
+					MappedField:  propName,
+					Tier:         "EXACT",
+					Score:        1.0,
+					MatchedToken: token,
+					IsColumnRef:  isColName,
+				}
+				hits = append(hits, h)
+				lhHits = append(lhHits, lakehouseHit{
+					KeywordHit: h, PropertyID: propID, PropName: propName,
+					SourceColumn: srcCol, DataType: dtype, PropDesc: pdesc,
+					OdID: odID, OdName: odName, IsMachineCode: isMC,
+				})
 			}
-			hits = append(hits, h)
-			lhHits = append(lhHits, lakehouseHit{
-				KeywordHit: h, PropertyID: propID, PropName: propName,
-				SourceColumn: srcCol, DataType: dtype, PropDesc: pdesc,
-				OdID: odID, OdName: odName, IsMachineCode: isMC,
-			})
-		}
-		rows.Close()
+		}()
 	}
 
 	if len(hits) > 0 {
@@ -413,33 +418,37 @@ func searchLakehouseKeywordFull(ctx context.Context, db *sql.DB, projectID, toke
 		  AND COALESCE(o.mark, true) = true
 		LIMIT 10`, projectID, token)
 	if err == nil {
-		for rows.Next() {
-			var kwID, keyword string
-			var isMC, isColName bool
-			var propID, propName, srcCol, dtype, pdesc, odID, odName string
-			rows.Scan(&kwID, &keyword, &isMC, &isColName,
-				&propID, &propName, &srcCol, &dtype, &pdesc, &odID, &odName)
-			if len([]rune(keyword)) > maxKeywordLen {
-				continue
+		// Scoped so rows.Close() runs deterministically (incl. on panic) at the
+		// end of this tier, before the VEC tier; avoids defer accumulation.
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var kwID, keyword string
+				var isMC, isColName bool
+				var propID, propName, srcCol, dtype, pdesc, odID, odName string
+				rows.Scan(&kwID, &keyword, &isMC, &isColName,
+					&propID, &propName, &srcCol, &dtype, &pdesc, &odID, &odName)
+				if len([]rune(keyword)) > maxKeywordLen {
+					continue
+				}
+				h := KeywordHit{
+					KeywordID:    kwID,
+					Keyword:      keyword,
+					MappedTable:  odName,
+					MappedField:  propName,
+					Tier:         "FUZZY",
+					Score:        0.75,
+					MatchedToken: token,
+					IsColumnRef:  isColName,
+				}
+				hits = append(hits, h)
+				lhHits = append(lhHits, lakehouseHit{
+					KeywordHit: h, PropertyID: propID, PropName: propName,
+					SourceColumn: srcCol, DataType: dtype, PropDesc: pdesc,
+					OdID: odID, OdName: odName, IsMachineCode: isMC,
+				})
 			}
-			h := KeywordHit{
-				KeywordID:    kwID,
-				Keyword:      keyword,
-				MappedTable:  odName,
-				MappedField:  propName,
-				Tier:         "FUZZY",
-				Score:        0.75,
-				MatchedToken: token,
-				IsColumnRef:  isColName,
-			}
-			hits = append(hits, h)
-			lhHits = append(lhHits, lakehouseHit{
-				KeywordHit: h, PropertyID: propID, PropName: propName,
-				SourceColumn: srcCol, DataType: dtype, PropDesc: pdesc,
-				OdID: odID, OdName: odName, IsMachineCode: isMC,
-			})
-		}
-		rows.Close()
+		}()
 	}
 
 	// ── FUZZY collapse: per-property, > 4 value hits → 1 ILIKE hint ──
@@ -663,21 +672,25 @@ func searchLakehouseOdAlias(ctx context.Context, db *sql.DB, projectID, token st
 		      )
 		LIMIT 10`, projectID, token)
 	if err == nil {
-		for rows.Next() {
-			var kwID, keyword, odID, odName string
-			rows.Scan(&kwID, &keyword, &odID, &odName)
-			h := KeywordHit{
-				KeywordID: kwID, Keyword: keyword,
-				MappedTable: odName, MappedField: "",
-				Tier: "EXACT", Score: 1.0, MatchedToken: token,
+		// Scoped so rows.Close() runs deterministically (incl. on panic) at the
+		// end of this tier, before the FUZZY tier reuses rows; no defer stacking.
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var kwID, keyword, odID, odName string
+				rows.Scan(&kwID, &keyword, &odID, &odName)
+				h := KeywordHit{
+					KeywordID: kwID, Keyword: keyword,
+					MappedTable: odName, MappedField: "",
+					Tier: "EXACT", Score: 1.0, MatchedToken: token,
+				}
+				hits = append(hits, h)
+				lhHits = append(lhHits, lakehouseHit{
+					KeywordHit: h, PropertyID: "", PropName: "",
+					OdID: odID, OdName: odName,
+				})
 			}
-			hits = append(hits, h)
-			lhHits = append(lhHits, lakehouseHit{
-				KeywordHit: h, PropertyID: "", PropName: "",
-				OdID: odID, OdName: odName,
-			})
-		}
-		rows.Close()
+		}()
 	}
 
 	if len(hits) > 0 {
@@ -713,27 +726,31 @@ func searchLakehouseOdAlias(ctx context.Context, db *sql.DB, projectID, token st
 		        WHERE LOWER(a) = LOWER($2))
 		LIMIT 10`, projectID, token)
 	if err == nil {
-		for rows.Next() {
-			var kwID, keyword, odID, odName string
-			rows.Scan(&kwID, &keyword, &odID, &odName)
-			if len([]rune(keyword)) > maxKeywordLen {
-				continue
+		// Scoped so rows.Close() runs deterministically (incl. on panic) at the
+		// end of this tier, before the VEC tier; avoids defer accumulation.
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var kwID, keyword, odID, odName string
+				rows.Scan(&kwID, &keyword, &odID, &odName)
+				if len([]rune(keyword)) > maxKeywordLen {
+					continue
+				}
+				h := KeywordHit{
+					KeywordID: kwID, Keyword: keyword,
+					MappedTable: odName, MappedField: "",
+					Tier: "FUZZY", Score: 0.75, MatchedToken: token,
+				}
+				hits = append(hits, h)
+				lhHits = append(lhHits, lakehouseHit{
+					KeywordHit: h, PropertyID: "", PropName: "",
+					OdID: odID, OdName: odName,
+				})
+				if len(hits) >= 5 {
+					break
+				}
 			}
-			h := KeywordHit{
-				KeywordID: kwID, Keyword: keyword,
-				MappedTable: odName, MappedField: "",
-				Tier: "FUZZY", Score: 0.75, MatchedToken: token,
-			}
-			hits = append(hits, h)
-			lhHits = append(lhHits, lakehouseHit{
-				KeywordHit: h, PropertyID: "", PropName: "",
-				OdID: odID, OdName: odName,
-			})
-			if len(hits) >= 5 {
-				break
-			}
-		}
-		rows.Close()
+		}()
 	}
 
 	if len(hits) > 0 {

@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/doug-martin/goqu/v9 v9.19.0
 	github.com/lakehouse2ontology/authmw v0.0.0-00010101000000-000000000000
+	github.com/lakehouse2ontology/contracts v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/dsnguard v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/httputil v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/llmclient v0.0.0-00010101000000-000000000000
@@ -48,6 +49,7 @@ require (
 
 replace (
 	github.com/lakehouse2ontology/authmw => ../../pkg/authmw
+	github.com/lakehouse2ontology/contracts => ../../pkg/contracts
 	github.com/lakehouse2ontology/dsnguard => ../../pkg/dsnguard
 	github.com/lakehouse2ontology/httputil => ../../pkg/httputil
 	github.com/lakehouse2ontology/llmclient => ../../pkg/llmclient
