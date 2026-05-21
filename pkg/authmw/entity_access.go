@@ -122,6 +122,30 @@ func EnforceEntityOwner(w http.ResponseWriter, r *http.Request, db *sql.DB, tabl
 	return false
 }
 
+// RequireAdmin gates an admin-only /api/* handler. It verifies the bearer token
+// and confirms the caller has the global admin role and an active account.
+// Returns the caller's userID and true on success; on any failure it writes the
+// response (401 for a bad/absent token, 403 for a non-admin) and returns false,
+// so the caller must `return` immediately. Unlike the project chokepoints above,
+// these endpoints don't expose per-project entities, so a plain 403 is fine —
+// there is nothing to leak by confirming the route exists.
+func RequireAdmin(w http.ResponseWriter, r *http.Request, db *sql.DB) (string, bool) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	userID, err := VerifyToken(token)
+	if err != nil {
+		writeUnauthorized(w)
+		return "", false
+	}
+	var role string
+	err = db.QueryRowContext(r.Context(),
+		`SELECT role FROM "user" WHERE id = $1 AND is_active = true`, userID).Scan(&role)
+	if err != nil || role != "admin" {
+		writeForbidden(w)
+		return "", false
+	}
+	return userID, true
+}
+
 func writeNotFound(w http.ResponseWriter) {
 	jsonHeader(w)
 	w.WriteHeader(http.StatusNotFound)

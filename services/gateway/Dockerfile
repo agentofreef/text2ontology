@@ -23,7 +23,17 @@ COPY services/gateway/nginx.conf /etc/nginx/nginx.conf
 # Lightweight tools for the healthcheck and quick in-container diagnostics.
 RUN apk add --no-cache wget curl
 
-EXPOSE 80
+# Run as the non-root `nginx` user (uid 101, ships with the image). nginx.conf
+# already points the pid file at /tmp and logs at stdout/stderr; the temp dirs
+# under /var/cache/nginx must be writable by that user. Listening on 8080 (see
+# nginx.conf) keeps the gateway off privileged ports.
+RUN chown -R nginx:nginx /var/cache/nginx \
+    && chmod -R g+w /var/cache/nginx \
+    && chmod 0644 /etc/nginx/nginx.conf
+
+EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=5s \
-  CMD wget --spider -q http://127.0.0.1/healthz || exit 1
+  CMD wget --spider -q http://127.0.0.1:8080/healthz || exit 1
+
+USER nginx

@@ -2,6 +2,7 @@ package authmw
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -112,9 +113,15 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Pass OPTIONS and non-API paths through unconditionally.
+		// Self-registration endpoints are public by design: registration-status
+		// is read by the login page before any token exists, and register
+		// bootstraps a brand-new account (the toggle gate + validation live in
+		// the handler itself, not here).
 		if r.Method == http.MethodOptions ||
 			!strings.HasPrefix(r.URL.Path, "/api/") ||
 			r.URL.Path == "/api/auth/login" ||
+			r.URL.Path == "/api/auth/register" ||
+			r.URL.Path == "/api/auth/registration-status" ||
 			r.URL.Path == "/api/health" {
 			next.ServeHTTP(w, r)
 			return
@@ -157,7 +164,11 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 func (m *Middleware) handleInternal(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	expected := os.Getenv("INTERNAL_TOKEN")
 	provided := r.Header.Get("X-Internal-Token")
-	if expected == "" || provided != expected {
+	// Constant-time comparison to avoid leaking the token via timing.
+	// An empty/unset expected token is rejected (fail-closed): we never
+	// authenticate when no internal token is configured. ConstantTimeCompare
+	// returns 0 for differing lengths, so a length mismatch is also a reject.
+	if expected == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		jsonHeader(w)
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"error":"unauthorized"}`)

@@ -111,6 +111,27 @@ type GraphLink = {
   tooltip?: any
 }
 
+// MAX_GRAPH_NODES caps how many nodes the force layout renders. The ECharts
+// force-graph cost grows super-linearly with node count; past a few thousand
+// nodes the layout pins the main thread and the page locks up. OD nodes are
+// appended first (then properties, then Ol facts), so the cap preserves the
+// structurally most-important nodes and drops the long tail. Links whose
+// endpoints were dropped are filtered out so no edge dangles.
+const MAX_GRAPH_NODES = 1500
+
+// capGraph trims nodes to MAX_GRAPH_NODES and removes any link that references a
+// dropped node. Returns the (possibly) trimmed graph plus whether a cap applied.
+function capGraph(
+  nodes: GraphNode[],
+  links: GraphLink[],
+): { nodes: GraphNode[]; links: GraphLink[]; capped: boolean } {
+  if (nodes.length <= MAX_GRAPH_NODES) return { nodes, links, capped: false }
+  const kept = nodes.slice(0, MAX_GRAPH_NODES)
+  const keptIds = new Set(kept.map(n => n.id))
+  const keptLinks = links.filter(l => keptIds.has(l.source) && keptIds.has(l.target))
+  return { nodes: kept, links: keptLinks, capped: true }
+}
+
 // ─── Component ──────────────────────────────────────────────────
 
 export function OntologyGraph({
@@ -465,7 +486,14 @@ export function OntologyGraph({
       })
     }
 
-    return { nodes, links }
+    // Cap the node count so a very large ontology can't freeze the force layout.
+    const capped = capGraph(nodes, links)
+    if (capped.capped && typeof console !== 'undefined') {
+      console.warn(
+        `OntologyGraph: ${nodes.length} nodes exceeds the ${MAX_GRAPH_NODES} render cap; showing the first ${MAX_GRAPH_NODES}.`,
+      )
+    }
+    return { nodes: capped.nodes, links: capped.links }
   }
 
   // Style overlay: applies highlight (from props) + click-selection (ref) on

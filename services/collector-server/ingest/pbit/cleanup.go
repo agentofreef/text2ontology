@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
 
 // MergeStagingIntoFinal moves all tables from stagingSchema into finalSchema,
@@ -28,11 +30,8 @@ import (
 // Must be called within an open transaction — atomicity with PopulateOntology
 // is the caller's responsibility.
 func MergeStagingIntoFinal(tx *sql.Tx, stagingSchema, finalSchema string) error {
-	// 1. Ensure final schema exists.
-	if _, err := tx.Exec(fmt.Sprintf(
-		`CREATE SCHEMA IF NOT EXISTS %s`,
-		pq.QuoteIdentifier(finalSchema),
-	)); err != nil {
+	// 1. Ensure final schema exists (plus best-effort reader grants).
+	if err := pgschema.CreateSchemaWithGrants(context.Background(), tx, finalSchema); err != nil {
 		return fmt.Errorf("MergeStagingIntoFinal: ensure final schema %q: %w", finalSchema, err)
 	}
 

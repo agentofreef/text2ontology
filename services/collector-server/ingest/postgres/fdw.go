@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/lib/pq"
+
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
 
 // SetupForeignSchema wires an external PostgreSQL into the ontology database
@@ -70,9 +72,7 @@ func SetupForeignSchema(ctx context.Context, db *sql.DB, dsID, finalSchema strin
 		return fmt.Errorf("create user mapping: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, fmt.Sprintf(
-		`CREATE SCHEMA IF NOT EXISTS %s`, pq.QuoteIdentifier(finalSchema),
-	)); err != nil {
+	if err := pgschema.CreateSchemaWithGrants(ctx, db, finalSchema); err != nil {
 		return fmt.Errorf("create final schema %q: %w", finalSchema, err)
 	}
 

@@ -14,6 +14,7 @@ package httputil
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -76,7 +77,11 @@ func InstallHealthzDB(mux *http.ServeMux, dsn string, db *sql.DB, serviceName st
 		// and pool exhaustion by unauthenticated callers.
 		expected := os.Getenv("INTERNAL_TOKEN")
 		provided := r.Header.Get("X-Internal-Token")
-		if expected == "" || provided != expected {
+		// Constant-time comparison to avoid leaking the token via timing.
+		// An empty/unset expected token is rejected (fail-closed): callers
+		// without a configured INTERNAL_TOKEN never receive DB info. A length
+		// mismatch is a reject too — ConstantTimeCompare returns 0 for it.
+		if expected == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 			// Return plain liveness — do not reveal db_target_hash or ping errors.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)

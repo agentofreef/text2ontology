@@ -27,16 +27,20 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
 
 	"github.com/lakehouse2ontology/authmw"
+	"github.com/lakehouse2ontology/dsnguard"
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/backend-api/core"
 	"github.com/lakehouse2ontology/services/backend-api/handler"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 func main() {
@@ -59,6 +63,10 @@ func main() {
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
+	// Fail-closed: refuse to start on a malformed or legacy (text2dax) DSN.
+	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
+		log.Fatalf("%v", err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -70,6 +78,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	// Fail-closed startup checks for auth. AUTH_TOKEN_SECRET signs every
@@ -206,6 +215,7 @@ func main() {
 	// /api/llm-role-binding — the public-bearer-auth side only, since
 	// /internal/* equivalents would be meaningless for browser-level auth.
 	core.RegisterAuthRoutes(mux, db)
+	core.RegisterAdminRoutes(mux, db)
 	core.RegisterProjectRoutes(mux, db)
 	core.RegisterPromptConfigRoutes(mux, db)
 	core.RegisterLLMConfigRoutes(mux, db)
@@ -231,12 +241,22 @@ func main() {
 	//   auth.Wrap              — INTERNAL_TOKEN on /internal/* +
 	//     user-bearer on /api/* (see pkg/authmw).
 	//   mux                    — business handlers.
+	//   srvkit.RecoverMiddleware — recover handler panics (→ 500) just
+	//     inside CORS, so panics are caught while CORS headers are still set.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// backend-api listening on %s (DB OK, tracer=backend-api)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown: srvkit.Run drains HTTP on SIGINT/SIGTERM, then the
+	// deferred db.Close() + obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srvkit.Run(ctx, addr, handler); err != nil {
+		log.Fatal(err)
+	}
 }

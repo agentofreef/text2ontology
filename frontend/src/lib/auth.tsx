@@ -14,6 +14,7 @@ interface AuthContextType {
   token: string | null
   isLoading: boolean
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>
+  register: (username: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string }>
   logout: () => void
 }
 
@@ -92,15 +93,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const register = async (username: string, password: string, displayName: string) => {
+    try {
+      const { getApiBase } = await import('./api')
+      const res = await fetch(`${getApiBase()}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, displayName }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setToken(data.token)
+        setUser(data.user)
+        localStorage.setItem('lakehouse2ontology_token', data.token)
+        localStorage.setItem('lakehouse2ontology_user', JSON.stringify(data.user))
+        return { success: true }
+      }
+      return { success: false, error: data.error || tStatic('auth.login_failed') }
+    } catch {
+      return { success: false, error: tStatic('auth.network_error') }
+    }
+  }
+
   const logout = () => {
     setUser(null)
     setToken(null)
     localStorage.removeItem('lakehouse2ontology_token')
     localStorage.removeItem('lakehouse2ontology_user')
+    // Clear the selected project too — otherwise the next user to log in on
+    // this browser inherits the previous user's project selection, which they
+    // may not even have access to.
+    localStorage.removeItem('lakehouse2ontology_project_id')
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   )

@@ -3,6 +3,7 @@ package handler
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -100,7 +101,12 @@ func handleLakehouseSQLExecute(db *sql.DB) http.HandlerFunc {
 			"totalCount": total,
 		}
 		if execErr != nil {
-			resp["error"] = execErr.Error()
+			// Raw Postgres errors leak schema details (table/column names,
+			// constraint identifiers, internal positions). Log the full error
+			// server-side (also persisted via logLakehouseSQL above) and return
+			// a generic, classified message to the client.
+			log.Printf("lakehouse-sql: exec error (project=%s): %v", projectID, execErr)
+			resp["error"] = sanitizeSQLExecError(execErr)
 		} else {
 			resp["columns"] = cols
 			resp["rows"] = rows
@@ -443,6 +449,45 @@ func firstSQLWord(s string) string {
 		return ""
 	}
 	return strings.ToLower(fields[0])
+}
+
+// sanitizeSQLExecError maps a raw Postgres execution error to a safe,
+// generic, classified message. The raw error (which can expose table/column
+// names, constraint identifiers, byte positions, and internal hints) is logged
+// server-side by the caller and never returned to the client.
+//
+// Classification uses the SQLSTATE class when the driver exposes it (*pq.Error),
+// falling back to a coarse keyword scan otherwise. The goal is "useful enough to
+// fix your own SQL" without leaking schema internals.
+func sanitizeSQLExecError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if pqErr, ok := err.(*pq.Error); ok {
+		switch string(pqErr.Code)[:2] {
+		case "42": // syntax error or access rule violation (incl. undefined table/column)
+			return "SQL 语法或对象引用错误：请检查语句语法以及引用的表/列名是否存在且拼写正确。"
+		case "22": // data exception (type mismatch, invalid value, division by zero)
+			return "数据值错误：类型不匹配或值非法（如类型转换失败、除零等），请检查筛选值与列类型。"
+		case "23": // integrity constraint violation
+			return "约束冲突：操作违反了数据完整性约束。"
+		case "53": // insufficient resources
+			return "查询资源不足：结果集或计算过大，请缩小查询范围或加上 LIMIT。"
+		case "57": // operator intervention (query canceled, timeout)
+			return "查询被取消或超时：请简化查询或缩小数据范围后重试。"
+		}
+		return "查询执行失败：请检查 SQL 语句是否正确。"
+	}
+	low := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(low, "syntax"), strings.Contains(low, "does not exist"),
+		strings.Contains(low, "column"), strings.Contains(low, "relation"):
+		return "SQL 语法或对象引用错误：请检查语句语法以及引用的表/列名是否存在且拼写正确。"
+	case strings.Contains(low, "timeout"), strings.Contains(low, "canceled"):
+		return "查询被取消或超时：请简化查询或缩小数据范围后重试。"
+	default:
+		return "查询执行失败：请检查 SQL 语句是否正确。"
+	}
 }
 
 // Guard against unused re-import of regexp

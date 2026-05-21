@@ -1,9 +1,10 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useTranslations } from 'next-intl'
 import { useRouter } from '@/i18n/navigation'
 import { useAuth } from '@/lib/auth'
+import { getApiBase } from '@/lib/api'
 import { MotionFade } from '@/lib/motion'
 import { LocaleSwitcher } from '@/components/LocaleSwitcher'
 
@@ -12,27 +13,57 @@ import { LocaleSwitcher } from '@/components/LocaleSwitcher'
 // as docs/cover.svg.
 export default function LoginPageMinimal() {
   const t = useTranslations('login')
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const { login } = useAuth()
+  const [registrationAllowed, setRegistrationAllowed] = useState(false)
+  const { login, register } = useAuth()
   const router = useRouter()
+
+  // Whether the sign-up entry shows is server-controlled (admin toggle). The
+  // backend re-checks on every register call, so this is purely a UI hint.
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${getApiBase()}/auth/registration-status`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setRegistrationAllowed(!!d.allowed) })
+      .catch(() => { /* keep sign-up hidden on failure */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const switchMode = (next: 'signin' | 'signup') => {
+    setMode(next)
+    setError('')
+    setPassword('')
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
-    setLoading(true)
 
-    const result = await login(username, password)
+    if (mode === 'signup' && password.length < 6) {
+      setError(t('password_too_short'))
+      return
+    }
+
+    setLoading(true)
+    // Registration is intentionally minimal: username + password only. The
+    // display name defaults to the username server-side.
+    const result = mode === 'signin'
+      ? await login(username, password)
+      : await register(username, password, '')
     setLoading(false)
 
     if (result.success) {
       router.push('/ontology/lakehouse-agent')
     } else {
-      setError(result.error || t('failed_default'))
+      setError(result.error || (mode === 'signin' ? t('failed_default') : t('register_failed')))
     }
   }
+
+  const submitDisabled = loading || !username || !password
 
   return (
     <div className="grid min-h-screen grid-cols-1 bg-canvas lg:grid-cols-[1.1fr_1fr]">
@@ -118,11 +149,15 @@ export default function LoginPageMinimal() {
           {/* Header */}
           <div className="mb-8">
             <div className="mb-3 font-mono text-[11px] tracking-[0.22em] text-ink-ghost">
-              // SIGN IN
+              {mode === 'signin' ? '// SIGN IN' : '// SIGN UP'}
             </div>
-            <h2 className="text-2xl font-semibold text-ink">{t('page_title')}</h2>
+            <h2 className="text-2xl font-semibold text-ink">
+              {mode === 'signin' ? t('page_title') : t('register_title')}
+            </h2>
             <div className="mt-3 h-[2px] w-8 bg-ink" />
-            <p className="mt-3 text-sm text-ink-muted">{t('subtitle')}</p>
+            <p className="mt-3 text-sm text-ink-muted">
+              {mode === 'signin' ? t('subtitle') : t('register_subtitle')}
+            </p>
           </div>
 
           {/* Form */}
@@ -162,32 +197,52 @@ export default function LoginPageMinimal() {
 
             <button
               type="submit"
-              disabled={loading || !username || !password}
+              disabled={submitDisabled}
               className="group flex w-full items-center justify-between bg-ink px-4 py-3 text-sm font-medium tracking-wide text-white transition-opacity duration-150 hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-30"
             >
-              <span>{loading ? t('submitting') : t('submit')}</span>
+              <span>
+                {loading
+                  ? (mode === 'signin' ? t('submitting') : t('registering'))
+                  : (mode === 'signin' ? t('submit') : t('register_submit'))}
+              </span>
               <span className="font-mono text-[13px] transition-transform duration-150 group-hover:translate-x-0.5">
                 →
               </span>
             </button>
           </form>
 
-          {/* Demo credentials trace */}
-          <div className="mt-10 border-t border-border pt-5">
-            <div className="mb-2 font-mono text-[10px] tracking-[0.18em] text-ink-ghost">
-              // {t('demo_credentials_title')}
+          {/* Sign-in / sign-up toggle. The sign-up entry only appears when the
+              admin has enabled registration server-side. */}
+          {(registrationAllowed || mode === 'signup') && (
+            <div className="mt-6">
+              <button
+                type="button"
+                onClick={() => switchMode(mode === 'signin' ? 'signup' : 'signin')}
+                className="font-mono text-[11px] tracking-[0.06em] text-ink-muted underline-offset-4 transition-colors duration-150 hover:text-ink hover:underline"
+              >
+                {mode === 'signin' ? t('no_account') : t('have_account')}
+              </button>
             </div>
-            <div className="flex gap-6 font-mono text-xs text-ink">
-              <span>
-                {t('demo_username_label')}&nbsp;
-                <span className="font-bold">admin</span>
-              </span>
-              <span>
-                {t('demo_password_label')}&nbsp;
-                <span className="font-bold">admin</span>
-              </span>
+          )}
+
+          {/* Demo credentials trace — sign-in only */}
+          {mode === 'signin' && (
+            <div className="mt-10 border-t border-border pt-5">
+              <div className="mb-2 font-mono text-[10px] tracking-[0.18em] text-ink-ghost">
+                // {t('demo_credentials_title')}
+              </div>
+              <div className="flex gap-6 font-mono text-xs text-ink">
+                <span>
+                  {t('demo_username_label')}&nbsp;
+                  <span className="font-bold">admin</span>
+                </span>
+                <span>
+                  {t('demo_password_label')}&nbsp;
+                  <span className="font-bold">admin</span>
+                </span>
+              </div>
             </div>
-          </div>
+          )}
         </MotionFade>
       </main>
     </div>

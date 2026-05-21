@@ -15,7 +15,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,14 +26,17 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/lakehouse2ontology/authmw"
+	"github.com/lakehouse2ontology/dsnguard"
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	fileingest "github.com/lakehouse2ontology/services/collector-server/ingest/file"
 	pbit "github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
+	pbixingest "github.com/lakehouse2ontology/services/collector-server/ingest/pbix"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/postgres"
 	sqliteingest "github.com/lakehouse2ontology/services/collector-server/ingest/sqlite"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/wizard"
 	"github.com/lakehouse2ontology/services/collector-server/job"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 // listSourcesHandler handles GET /api/connector/sources?project_id=<uuid>
@@ -306,6 +311,10 @@ func main() {
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
+	// Fail-closed: refuse to start on a malformed or legacy (text2dax) DSN.
+	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
+		log.Fatalf("%v", err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -317,6 +326,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	mux := http.NewServeMux()
@@ -346,6 +356,7 @@ func main() {
 	// Heartbeat every 5s; sweeper every 30s marks stale (>2min) jobs failed.
 	jobRunner := job.NewRunner(db, 4)
 	jobRunner.RegisterHandler(job.KindFileUpload, fileingest.HandleFileUploadJob)
+	jobRunner.RegisterHandler(job.KindPbixExtract, pbixingest.HandlePbixExtractJob)
 	go job.SweepStaleJobs(db) // boot scan
 	go job.SweepOldJobs(db)   // boot retention cleanup
 	jobCtx, jobCancel := context.WithCancel(context.Background())
@@ -355,6 +366,8 @@ func main() {
 
 	// Phase 4: File source connector (upload + URL fetch + SSRF defence).
 	fileingest.RegisterRoutes(mux, db)
+	// pbix (.pbix binary) import: async via ingest_job + bounded semaphore.
+	pbixingest.RegisterRoutes(mux, db)
 	// Phase 5: cross-type sources listing endpoint.
 	mux.HandleFunc("/api/connector/sources", listSourcesHandler(db))
 	mux.HandleFunc("/api/connector/sources/", sourceByIDHandler(db))
@@ -367,12 +380,37 @@ func main() {
 	// to anyone who can reach the port.
 	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
 
+	// srvkit.RecoverMiddleware sits just inside CORS so handler panics are
+	// recovered (→ 500) while CORS headers are still applied. Existing order
+	// is otherwise preserved: CORS → recover → trace → span → auth → mux.
 	handler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// collector-server listening on %s (DB OK, tracer=collector-server)", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+
+	// Graceful shutdown ordering:
+	//   1. srvkit.Run drains in-flight HTTP requests on SIGINT/SIGTERM.
+	//   2. OnShutdown cancels jobCtx → the ingest_job worker pool + sweeper
+	//      stop claiming work (FOR UPDATE SKIP LOCKED design tolerates a hard
+	//      stop: any 'running' rows are re-claimed or swept on next boot).
+	//      We give workers a brief grace window to wind down before the
+	//      deferred db.Close() fires, so they don't write to a closed pool.
+	//   3. deferred db.Close() then obsShutdown() run (traces flush last).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	err = srvkit.Run(ctx, addr, handler,
+		srvkit.WithOnShutdown(func(context.Context) {
+			jobCancel()
+			// Brief grace period for in-flight job goroutines to observe the
+			// cancellation and return before the DB pool closes.
+			time.Sleep(500 * time.Millisecond)
+		}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 }

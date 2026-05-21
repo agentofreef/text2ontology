@@ -1,5 +1,7 @@
 go 1.25.0
 
+toolchain go1.26.3
+
 use (
 	./pkg/authmw
 	./pkg/contracts
@@ -9,6 +11,7 @@ use (
 	./pkg/mission
 	./pkg/observability
 	./pkg/ontology
+	./pkg/srvkit
 	./services/agent-server
 	./services/backend-api
 	./services/collector-server

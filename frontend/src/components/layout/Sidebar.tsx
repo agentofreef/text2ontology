@@ -7,7 +7,7 @@ import {
   Tag, Search, MessageSquare, History,
   ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Cpu, Plus, Database,
   Box, BarChart3, Tags, Trash2, Filter,
-  Network, Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog,
+  Network, Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useProject } from '@/lib/project'
@@ -97,21 +97,24 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
   ]
 }
 
-function useSystemGroup(t: ReturnType<typeof useTranslations<'nav'>>): NavGroup {
-  return {
-    label: t('system'),
-    items: [
-      { href: '/settings/data-sources',   label: t('data_sources'),      icon: Database  },
-      // Prompt Engineering: page lives at /settings/prompt-config but is
-      // hidden from the sidebar — current prompts are driven from llm-config
-      // role bindings and DB-stored templates, so this page has no active
-      // UX role yet. Keep the file in case it comes back for advanced users.
-      // { href: '/settings/prompt-config',  label: t('prompt_engineering'), icon: Settings },
-      { href: '/settings/llm-config',     label: t('llm_config'),         icon: Cpu      },
-      { href: '/settings/mcp-keys',       label: t('mcp_keys'),           icon: KeyRound },
-      { href: '/settings/preferences',    label: t('preferences'),        icon: UserCog  },
-    ],
+function useSystemGroup(t: ReturnType<typeof useTranslations<'nav'>>, isAdmin: boolean): NavGroup {
+  const items: NavLeaf[] = [
+    { href: '/settings/data-sources',   label: t('data_sources'),      icon: Database  },
+    // Prompt Engineering: page lives at /settings/prompt-config but is
+    // hidden from the sidebar — current prompts are driven from llm-config
+    // role bindings and DB-stored templates, so this page has no active
+    // UX role yet. Keep the file in case it comes back for advanced users.
+    // { href: '/settings/prompt-config',  label: t('prompt_engineering'), icon: Settings },
+    { href: '/settings/llm-config',     label: t('llm_config'),         icon: Cpu      },
+    { href: '/settings/mcp-keys',       label: t('mcp_keys'),           icon: KeyRound },
+    { href: '/settings/preferences',    label: t('preferences'),        icon: UserCog  },
+  ]
+  // User management is admin-only; the backend also gates every /api/admin/*
+  // call, so hiding the nav is convenience, not the security boundary.
+  if (isAdmin) {
+    items.push({ href: '/settings/users', label: t('user_management'), icon: Users })
   }
+  return { label: t('system'), items }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -275,7 +278,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   // whenever a project is selected; only hide it when the user hasn't picked
   // a project yet (in which case only the system group makes sense).
   const lakehouseGroups = useLakehouseGroups(t)
-  const systemGroup = useSystemGroup(t)
+  const systemGroup = useSystemGroup(t, user?.role === 'admin')
   const groups: NavGroup[] = currentProject
     ? [...lakehouseGroups, systemGroup]
     : [systemGroup]

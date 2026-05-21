@@ -321,7 +321,7 @@ type AnnotationContext struct {
 // 3. Each token → keyword_explanation lookup (3-tier)
 // 4. Build context injection markdown
 // 5. Save annotation to DB (async, non-blocking)
-func ProcessQueryAnnotation(db *sql.DB, projectID, threadID, question string) AnnotationContext {
+func ProcessQueryAnnotation(ctx context.Context, db *sql.DB, projectID, threadID, question string) AnnotationContext {
 	var result AnnotationContext
 
 	// Step 1: Embed question + load few-shot examples from ont_agent_annotation (status=true, vector top-5 → overlap top-2)
@@ -332,10 +332,10 @@ func ProcessQueryAnnotation(db *sql.DB, projectID, threadID, question string) An
 	tokens := tokenizeWithAnnotationFewShots(db, projectID, question, fewShot)
 	result.Tokens = tokens
 
-	// Step 3: Token recall via keyword_explanation → Od mapping
-	// ProcessQueryAnnotation is a helper with no ctx parameter; use Background
-	// here (Phase 2 will thread ctx through its callers if tracing demands it).
-	recallResult := recall.BuildLakehouseContext(context.Background(), db, projectID, tokens, question)
+	// Step 3: Token recall via keyword_explanation → Od mapping.
+	// ctx is threaded from the caller (request ctx on the HTTP path) so recall +
+	// downstream LLM work is cancellable rather than pinned to a background ctx.
+	recallResult := recall.BuildLakehouseContext(ctx, db, projectID, tokens, question)
 	var mappings []M
 	var contextLines []string
 

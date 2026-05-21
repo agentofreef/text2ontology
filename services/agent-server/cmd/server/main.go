@@ -28,14 +28,18 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
 
 	"github.com/lakehouse2ontology/authmw"
+	"github.com/lakehouse2ontology/dsnguard"
 	"github.com/lakehouse2ontology/httputil"
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/agent-server/handler"
+	"github.com/lakehouse2ontology/srvkit"
 )
 
 func main() {
@@ -58,6 +62,10 @@ func main() {
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
+	// Fail-closed: refuse to start on a malformed or legacy (text2dax) DSN.
+	if err := dsnguard.AssertSafeDSN(dsn); err != nil {
+		log.Fatalf("%v", err)
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
@@ -69,6 +77,7 @@ func main() {
 		log.Fatalf("db.Ping: %v", err)
 	}
 	cancel()
+	srvkit.TunePool(db)
 	observability.SetDB(db)
 
 	// The agent turn path calls two downstream services — surface missing
@@ -131,10 +140,18 @@ func main() {
 	mux.HandleFunc("/api/ontology/agent-annotations-recompute", handler.HandleAnnotationsRecompute(db))
 	mux.HandleFunc("/api/ontology/lakehouse-token-recall-tokenize", handler.HandleLakehouseTokenRecallWithTokenize(db))
 
+	// Signal-driven shutdown context. The LH-test background worker and
+	// srvkit.Run both observe this ctx so a SIGINT/SIGTERM stops the dequeue
+	// loop and drains HTTP before the deferred db.Close()/obsShutdown() run.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Background worker: dequeues ont_test_run rows with status='queued'
 	// and executes each suite's cases with lakehouseToolLookup/SmartQuery
 	// in-process. Moved from monolith main.go's ontology.StartLHTestWorker.
-	handler.StartLHTestWorker(db)
+	// Tied to ctx so it stops claiming new runs on shutdown; lhWorkerDone
+	// closes once its poll loop has fully exited.
+	lhWorkerDone := handler.StartLHTestWorkerCtx(ctx, db)
 
 	auth := authmw.New(db, authmw.NewStdoutAuditWriter())
 	// Middleware order (outermost first): CORS → traceparent → server-span
@@ -142,14 +159,37 @@ func main() {
 	// follow. Phase 4C.2 added CORSMiddleware so the browser can fetch
 	// /api/ontology/lakehouse-agent-stream (SSE) directly, bypassing the
 	// monolith gateway.
+	// srvkit.RecoverMiddleware sits just inside CORS so a handler panic is
+	// caught (→ 500) while CORS response headers are still applied. Otherwise
+	// the existing order is preserved: CORS → recover → traceparent →
+	// server-span → auth → handler.
 	httpHandler := httputil.CORSMiddleware(os.Getenv("CORS_ALLOW_ORIGINS"))(
-		observability.TraceContextMiddleware(
-			observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
-				auth.Wrap(mux))))
+		srvkit.RecoverMiddleware(
+			observability.TraceContextMiddleware(
+				observability.ServerSpanMiddleware([]string{"/healthz", "/metrics"})(
+					auth.Wrap(mux)))))
 
 	addr := ":" + *port
 	log.Printf("▼// agent-server listening on %s (DB OK, tracer=agent-server)", addr)
 	log.Printf("   → lakehouse-sql: %s", os.Getenv("LAKEHOUSE_SQL_URL"))
 	log.Printf("   → recall:        %s", os.Getenv("RECALL_SERVER_URL"))
-	log.Fatal(http.ListenAndServe(addr, httpHandler))
+
+	// WriteTimeout=0 because /internal/agent/stream + /api/ontology/
+	// lakehouse-agent-stream are text/event-stream (SSE); a fixed write
+	// window would sever long-lived streams. Shutdown order: srvkit.Run
+	// drains HTTP → OnShutdown waits for the LH worker poll loop to exit →
+	// deferred db.Close() → deferred obsShutdown() (traces flush last).
+	err = srvkit.Run(ctx, addr, httpHandler,
+		srvkit.WithWriteTimeout(0),
+		srvkit.WithOnShutdown(func(context.Context) {
+			select {
+			case <-lhWorkerDone:
+			case <-time.After(5 * time.Second):
+				log.Println("agent-server: LH-test worker drain timed out")
+			}
+		}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 }

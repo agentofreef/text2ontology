@@ -2,6 +2,7 @@ package llmclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +23,7 @@ func IsAnthropic(vendor string) bool {
 
 // doAnthropicChatRaw makes a non-streaming call to the Anthropic Messages API
 // and returns the raw response map for tool_use extraction.
-func doAnthropicChatRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M, *TokenUsage, error) {
+func doAnthropicChatRaw(ctx context.Context, baseURL, apiKey string, chatBody M, proxyURL string) (M, *TokenUsage, error) {
 	anthropicBody := convertToAnthropicBody(chatBody)
 	reqBytes, _ := json.Marshal(anthropicBody)
 	logLen := len(reqBytes)
@@ -34,8 +35,11 @@ func doAnthropicChatRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M,
 	client := makeClient(120*time.Second, proxyURL)
 	url := BuildURL(baseURL, "/messages")
 
-	req, _ := NewAnthropicHTTPRequest(url, apiKey, reqBytes)
-	resp, err := client.Do(req)
+	req, err := newAnthropicHTTPRequestCtx(ctx, url, apiKey, reqBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Anthropic request build failed: %w", err)
+	}
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Anthropic request failed: %w", err)
 	}
@@ -60,8 +64,8 @@ func doAnthropicChatRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M,
 }
 
 // doAnthropicChat is the simple text-only wrapper (no tool support).
-func doAnthropicChat(baseURL, apiKey string, chatBody M, proxyURL string) (string, *TokenUsage, error) {
-	raw, usage, err := doAnthropicChatRaw(baseURL, apiKey, chatBody, proxyURL)
+func doAnthropicChat(ctx context.Context, baseURL, apiKey string, chatBody M, proxyURL string) (string, *TokenUsage, error) {
+	raw, usage, err := doAnthropicChatRaw(ctx, baseURL, apiKey, chatBody, proxyURL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -234,9 +238,16 @@ func convertToolsToAnthropic(tools interface{}) []M {
 	return result
 }
 
-// NewAnthropicHTTPRequest creates an HTTP POST request with Anthropic-specific headers.
+// NewAnthropicHTTPRequest creates an HTTP POST request with Anthropic-specific
+// headers. Retained for external callers; uses a background context.
 func NewAnthropicHTTPRequest(url, apiKey string, body []byte) (*http.Request, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	return newAnthropicHTTPRequestCtx(context.Background(), url, apiKey, body)
+}
+
+// newAnthropicHTTPRequestCtx is the context-aware builder. The ctx bounds the
+// request lifetime so cancellation aborts the in-flight Anthropic call.
+func newAnthropicHTTPRequestCtx(ctx context.Context, url, apiKey string, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -354,20 +365,27 @@ func ParseAnthropicStreamEvent(eventType, data string) (content string, done boo
 }
 
 // PrepareStreamRequest constructs an HTTP request for streaming, handling both
-// OpenAI and Anthropic protocols based on vendor.
+// OpenAI and Anthropic protocols based on vendor. Retained for external callers;
+// uses a background context.
 func PrepareStreamRequest(baseURL, apiKey, vendor string, chatBody M) (*http.Request, error) {
+	return prepareStreamRequestCtx(context.Background(), baseURL, apiKey, vendor, chatBody)
+}
+
+// prepareStreamRequestCtx is the context-aware builder. The ctx bounds the
+// streaming request so cancellation tears down the in-flight SSE call.
+func prepareStreamRequestCtx(ctx context.Context, baseURL, apiKey, vendor string, chatBody M) (*http.Request, error) {
 	if IsAnthropic(vendor) {
 		anthropicBody := convertToAnthropicBody(chatBody)
 		anthropicBody["stream"] = true
 		reqBytes, _ := json.Marshal(anthropicBody)
-		return NewAnthropicHTTPRequest(BuildURL(baseURL, "/messages"), apiKey, reqBytes)
+		return newAnthropicHTTPRequestCtx(ctx, BuildURL(baseURL, "/messages"), apiKey, reqBytes)
 	}
 
 	// OpenAI-compatible
 	NormalizeMaxTokens(chatBody)
 	reqBytes, _ := json.Marshal(chatBody)
 	url := BuildURL(baseURL, "/chat/completions")
-	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
 	if err != nil {
 		return nil, err
 	}

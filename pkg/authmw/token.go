@@ -11,13 +11,14 @@
 //     combinations and a long history of header-confusion bugs. This is
 //     one alg, three fields, constant-time verified.
 //
-//   - Passwords are stored as "sha256i$<iter>$<saltb64>$<hashb64>"
-//     (PBKDF2-lite using iterated SHA-256 in the standard library).
-//     bcrypt would be ideal but requires vendoring x/crypto, which the
-//     community repo deliberately avoids for footprint reasons.
-//     Iterated SHA-256 at 200k rounds gives ~50ms verify on modern HW
-//     and resists rainbow tables via per-user salt. Constant-time
-//     comparison is enforced.
+//   - Passwords are hashed with argon2id (golang.org/x/crypto/argon2), the
+//     current best-practice memory-hard KDF. Stored as a self-describing
+//     PHC-style string:
+//       "argon2id$v=19$m=<mem>,t=<time>,p=<par>$<saltb64>$<hashb64>"
+//     VerifyPassword prefix-dispatches: legacy "sha256i$..." digests (the
+//     previous iterated-SHA-256 scheme) still verify, so existing users are
+//     not locked out; new hashes are always argon2id. Constant-time
+//     comparison is enforced for both schemes.
 //
 //   - AUTH_TOKEN_SECRET is required (fail-closed). No silent fallback
 //     to a random per-process secret, no default value. Missing env =
@@ -37,6 +38,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // Token errors. Callers should treat any non-nil error as "unauthorized"
@@ -113,9 +116,16 @@ func VerifyToken(token string) (string, error) {
 
 // ---- Password hashing -----------------------------------------------------
 
-// passwordIter is the SHA-256 iteration count. 200k ≈ 50ms on a 2024
-// laptop; raise it once we move off pure stdlib.
-const passwordIter = 200_000
+// argon2id parameters (RFC 9106 second-recommended profile, tuned for an
+// interactive login). 64 MiB memory, 1 pass, 4 lanes ≈ tens of ms on a
+// modern server while being memory-hard against GPU/ASIC cracking.
+const (
+	argonTime    uint32 = 1
+	argonMemory  uint32 = 64 * 1024 // KiB → 64 MiB
+	argonThreads uint8  = 4
+	argonKeyLen  uint32 = 32
+	argonSaltLen        = 16
+)
 
 // BootstrapSentinel is the placeholder password_hash value the seed
 // admin row carries. The backend-api startup loop detects this value
@@ -123,32 +133,78 @@ const passwordIter = 200_000
 // service accepts logins.
 const BootstrapSentinel = "BOOTSTRAP_REQUIRED"
 
-// HashPassword returns a self-describing password digest:
+// HashPassword returns a self-describing argon2id digest in PHC-ish form:
 //
-//	sha256i$<iter>$<saltb64>$<hashb64>
+//	argon2id$v=19$m=<mem>,t=<time>,p=<par>$<saltb64>$<hashb64>
 //
-// The format is intentionally explicit so future migrations to bcrypt
-// or argon2id can coexist (prefix-dispatch in VerifyPassword).
+// The scheme prefix lets VerifyPassword prefix-dispatch, so legacy
+// "sha256i$" digests continue to verify during/after migration.
 func HashPassword(password string) (string, error) {
-	salt := make([]byte, 16)
+	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	digest := iterSHA256([]byte(password), salt, passwordIter)
-	return fmt.Sprintf("sha256i$%d$%s$%s",
-		passwordIter,
+	digest := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	return fmt.Sprintf("argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		argonMemory, argonTime, argonThreads,
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(digest),
 	), nil
 }
 
 // VerifyPassword compares a plaintext attempt against a stored digest.
-// Returns nil on match, an error on any failure (wrong password,
-// bad format, sentinel). Use ConstantTimeCompare internally.
+// Returns nil on match, an error on any failure (wrong password, bad
+// format, sentinel). Prefix-dispatches on the scheme tag so both the new
+// argon2id format and legacy sha256i digests verify. Constant-time
+// comparison is used for both.
 func VerifyPassword(password, stored string) error {
 	if stored == "" || stored == BootstrapSentinel {
 		return errors.New("password not set — operator must bootstrap admin via ADMIN_PASSWORD env")
 	}
+	switch {
+	case strings.HasPrefix(stored, "argon2id$"):
+		return verifyArgon2id(password, stored)
+	case strings.HasPrefix(stored, "sha256i$"):
+		return verifySHA256i(password, stored)
+	default:
+		return errors.New("unsupported password hash format")
+	}
+}
+
+// verifyArgon2id validates an "argon2id$v=..$m=..,t=..,p=..$salt$hash" digest.
+func verifyArgon2id(password, stored string) error {
+	parts := strings.Split(stored, "$")
+	// ["argon2id", "v=19", "m=..,t=..,p=..", saltb64, hashb64]
+	if len(parts) != 5 || parts[0] != "argon2id" {
+		return errors.New("invalid argon2id hash format")
+	}
+	var version int
+	if _, err := fmt.Sscanf(parts[1], "v=%d", &version); err != nil {
+		return errors.New("invalid argon2id version")
+	}
+	var mem, t uint32
+	var par uint8
+	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &mem, &t, &par); err != nil {
+		return errors.New("invalid argon2id parameters")
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return errors.New("invalid salt encoding")
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return errors.New("invalid hash encoding")
+	}
+	got := argon2.IDKey([]byte(password), salt, t, mem, par, uint32(len(want)))
+	if subtle.ConstantTimeCompare(got, want) != 1 {
+		return errors.New("password mismatch")
+	}
+	return nil
+}
+
+// verifySHA256i validates a legacy "sha256i$<iter>$<salt>$<hash>" digest.
+func verifySHA256i(password, stored string) error {
 	parts := strings.Split(stored, "$")
 	if len(parts) != 4 || parts[0] != "sha256i" {
 		return errors.New("unsupported password hash format")

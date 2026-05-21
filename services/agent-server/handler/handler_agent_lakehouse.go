@@ -1383,10 +1383,6 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 			// remember 工具已撤销 — 查询模式只暴露 lookup + smartquery。
 			// 知识沉淀（anchor / causality / fact）暂无 LLM 入口，需要时通过
 			// builder mode 或独立 API 操作。
-			// case "clarify_and_branch": // temporarily disabled
-			// 	return v2ToolClarifyAndBranch(db, projectID, threadID, args)
-			// case "return_to_parent": // temporarily disabled
-			// 	return v2ToolReturnToParent(db, projectID, threadID, args)
 			default:
 				return M{"error": "未知工具: " + name}
 			}

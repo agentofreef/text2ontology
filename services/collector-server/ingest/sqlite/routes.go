@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lakehouse2ontology/contracts"
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
 
 // RegisterRoutes mounts SQLite connector routes on mux.
@@ -130,9 +130,7 @@ func (s *Service) handleSync(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	stagingSchema := "collector_" + strings.ReplaceAll(id, "-", "_")
-	if _, err := s.DB.ExecContext(r.Context(),
-		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, stagingSchema),
-	); err != nil {
+	if err := pgschema.CreateSchemaWithGrants(r.Context(), s.DB, stagingSchema); err != nil {
 		writeError(w, http.StatusInternalServerError, "SCHEMA_CREATE", err.Error())
 		return
 	}

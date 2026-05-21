@@ -87,6 +87,14 @@ export function getApiBase(): string {
   return getApiBaseFor('')
 }
 
+// authToken reads the stored session bearer token (SSR-safe). The agent SSE
+// stream and the upload SSE endpoint are auth-gated server-side (authmw bearer),
+// so streaming requests must carry the same Authorization header that api() does.
+function authToken(): string | null {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem('lakehouse2ontology_token')
+}
+
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown
 }
@@ -167,26 +175,70 @@ export async function apiStream(
   onChunk: (text: string) => void,
   onDone?: () => void
 ): Promise<void> {
-  const res = await fetch(`${getApiBaseFor(path)}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  const token = authToken()
 
-  if (!res.ok || !res.body) {
-    throw new Error(`Stream Error: ${res.status}`)
+  // Bounded connect-retry: a transient network failure (proxy hiccup, brief
+  // offline) while OPENING the stream is retried with backoff. We only retry
+  // before the first chunk reaches the caller — once data has been delivered,
+  // a blind re-POST could duplicate side effects, so we surface the error
+  // instead. (The endpoint is non-idempotent; true mid-stream resume would
+  // need server-side Last-Event-ID support.)
+  const maxAttempts = 3
+  let lastErr: unknown
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let res: Response
+    try {
+      res = await fetch(`${getApiBaseFor(path)}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // The agent stream endpoint is auth-gated (authmw bearer); send the
+          // session token so direct browser→agent-server streaming authenticates.
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+    } catch (e) {
+      // Network-level failure opening the connection → retry with backoff.
+      lastErr = e
+      if (attempt < maxAttempts - 1) {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
+        continue
+      }
+      throw e
+    }
+
+    if (!res.ok || !res.body) {
+      throw new Error(`Stream Error: ${res.status}`)
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let receivedAny = false
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        receivedAny = true
+        onChunk(decoder.decode(value, { stream: true }))
+      }
+    } catch (e) {
+      // Mid-stream drop after data was delivered: cannot safely re-POST a
+      // non-idempotent request, so propagate. A drop with nothing delivered
+      // yet is retryable via the outer loop.
+      if (receivedAny) throw e
+      lastErr = e
+      if (attempt < maxAttempts - 1) {
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
+        continue
+      }
+      throw e
+    }
+
+    onDone?.()
+    return
   }
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    onChunk(decoder.decode(value, { stream: true }))
-  }
-
-  onDone?.()
+  throw lastErr instanceof Error ? lastErr : new Error('Stream Error')
 }
 
 export interface SSEEvent {
@@ -208,8 +260,14 @@ export async function apiSSE(
   formData: FormData,
   onEvent: (event: SSEEvent) => void,
 ): Promise<void> {
+  const token = authToken()
   const res = await fetch(`${getApiBaseFor(path)}${path}`, {
     method: 'POST',
+    // Do NOT set Content-Type — the browser sets the multipart boundary for
+    // FormData automatically. Only attach the auth bearer (the upload endpoint
+    // is auth-gated). This is a one-shot, non-idempotent file upload, so it is
+    // intentionally NOT auto-reconnected: replaying it would re-upload the file.
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     body: formData,
   })
 

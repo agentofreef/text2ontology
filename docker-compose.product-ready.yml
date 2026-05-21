@@ -1,0 +1,352 @@
+# docker-compose.product-ready.yml — ISOLATED single-ingress deployment of the
+# product-ready build. Separate compose project (name: t2o-product-ready), runs
+# ALONGSIDE the dev stack untouched. ONLY the gateway port is published
+# (28080->8080); all other services network-internal. Own images
+# (:product-ready) for the 8 built services; third-party obs images unchanged.
+# Superuser DSN (fresh isolated DB); scoped-role cutover is a validated follow-on.
+
+name: t2o-product-ready
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-gateway:product-ready
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 256
+    ports:
+    - 28080:8080
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+      agent-server:
+        condition: service_healthy
+      collector-server:
+        condition: service_healthy
+      mcp-tools-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - --spider
+      - -q
+      - http://127.0.0.1:8080/healthz
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+  frontend:
+    build:
+      context: .
+      dockerfile: services/frontend/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-frontend:product-ready
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 256
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      agent-server:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - --spider
+      - -q
+      - http://127.0.0.1:8080/healthz
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+  backend-api:
+    build:
+      context: .
+      dockerfile: services/backend-api/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-backend-api:product-ready
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8090'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: backend-api
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8090/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+    restart: unless-stopped
+  agent-server:
+    build:
+      context: .
+      dockerfile: services/agent-server/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-agent-server:product-ready
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8092'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: agent-server
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
+      RECALL_SERVER_URL: http://recall-server:8093
+      USE_MISSION_ACT: 'true'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8092/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+  recall-server:
+    build:
+      context: .
+      dockerfile: services/recall-server/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-recall-server:product-ready
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8093'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: recall-server
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8093/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  lakehouse-sql-server:
+    build:
+      context: .
+      dockerfile: services/lakehouse-sql-server/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:product-ready
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8094'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: lakehouse-sql-server
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8094/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  mcp-tools-server:
+    build:
+      context: .
+      dockerfile: services/mcp-tools-server/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:product-ready
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8095'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: mcp-tools-server
+      RECALL_SERVER_URL: http://recall-server:8093
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
+      BACKEND_API_URL: http://backend-api:8090
+    depends_on:
+      postgres:
+        condition: service_healthy
+      recall-server:
+        condition: service_healthy
+      lakehouse-sql-server:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8095/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+  collector-server:
+    build:
+      context: .
+      dockerfile: services/collector-server/Dockerfile
+    image: ghcr.io/agentofreef/text2ontology-collector-server:product-ready
+    mem_limit: 1g
+    cpus: '1.0'
+    pids_limit: 512
+    command:
+    - -port
+    - '8096'
+    env_file:
+    - .env.shared
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONTAINER}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: collector-server
+      PBIT_STAGING_ROOT: /data/pbit-staging
+      PBIX_SCRIPTS_DIR: /app/scripts
+      FILE_UPLOAD_ROOT: /data/uploads
+    volumes:
+    - collector-staging:/data/pbit-staging
+    - collector-uploads:/data/uploads
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8096/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 256
+    command:
+    - --config=/etc/otel-collector-config.yaml
+    volumes:
+    - ./ops/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    mem_limit: 512m
+    cpus: '0.5'
+    pids_limit: 256
+    environment:
+      COLLECTOR_OTLP_ENABLED: 'true'
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:latest
+    mem_limit: 512m
+    cpus: '0.5'
+    pids_limit: 256
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+    - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - ./ops/alerts:/etc/prometheus/alerts:ro
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:latest
+    mem_limit: 512m
+    cpus: '0.5'
+    pids_limit: 256
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+    volumes:
+    - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+  postgres:
+    image: pgvector/pgvector:pg16
+    mem_limit: 1g
+    cpus: '1.0'
+    pids_limit: 512
+    environment:
+      POSTGRES_DB: lakehouse2ontology-enterprise
+      POSTGRES_USER: lakehouse2ontology-enterprise
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+    - postgres-data:/var/lib/postgresql/data
+    - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U lakehouse2ontology-enterprise
+      interval: 5s
+      retries: 10
+      timeout: 3s
+      start_period: 10s
+    restart: unless-stopped
+volumes:
+  collector-staging: null
+  collector-uploads: null
+  postgres-data: null
+  grafana-data: null

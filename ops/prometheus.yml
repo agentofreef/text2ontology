@@ -1,11 +1,20 @@
 # ops/prometheus.yml
 # Prometheus scrape configuration for lakehouse2ontology services.
-# Phase 0: stubs expose no real /metrics endpoint; Prometheus will show
-# scrape errors until Phase 1 wires up go-prometheus instrumentation.
+# Services expose a real /metrics endpoint via pkg/observability
+# (promhttp.Handler + the postgres_pool_* collector and the duration/error
+# histograms in §4.2).
 
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
+
+# Alerting rules live in ops/alerts/ and are mounted into the prometheus
+# container at /etc/prometheus/alerts (read-only). Add this compose mount:
+#   ./ops/alerts:/etc/prometheus/alerts:ro
+# The path may be empty until that mount lands; prometheus simply loads no
+# rules until then, then picks them up on reload (SIGHUP / POST /-/reload).
+rule_files:
+  - /etc/prometheus/alerts/*.yml
 
 scrape_configs:
   - job_name: backend-api
@@ -33,7 +42,19 @@ scrape_configs:
       - targets: ['mcp-tools-server:8095']
     metrics_path: /metrics
 
+  - job_name: collector-server
+    static_configs:
+      - targets: ['collector-server:8096']
+    metrics_path: /metrics
+
   - job_name: otel-collector
     static_configs:
       - targets: ['otel-collector:8889']
     metrics_path: /metrics
+
+  # NOTE: the `gateway` (nginx) service is intentionally NOT scraped. Stock
+  # nginx exposes no Prometheus /metrics endpoint — it only serves a /healthz
+  # liveness location (see services/gateway/nginx.conf). To collect gateway
+  # metrics, add an nginx stub_status location + an nginx-prometheus-exporter
+  # sidecar, then add a `gateway` job here pointing at the exporter. Deferred
+  # until that exporter is wired.

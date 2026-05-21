@@ -31,6 +31,62 @@ type QuerySpec struct {
 	AddShareColumn bool `json:"addShareColumn,omitempty"`
 	// ShareLabel names the share column (default "占比").
 	ShareLabel string `json:"shareLabel,omitempty"`
+
+	// IntentHint carries Metric-Intent metadata resolved upstream by the agent
+	// (priority + keyword gate against lakehouse_metric_intent). It is
+	// serialized over HTTP to lakehouse-sql-server, which applies it via its
+	// PassApplyIntentHint pipeline pass. nil = no intent fired.
+	IntentHint *IntentHint `json:"intentHint,omitempty"`
+}
+
+// IntentHint carries the spec-level fields of a Metric Intent the agent has
+// selected for the current question. It is purely additive input — the
+// lakehouse-sql-server consumes it via applyIntentHint to mutate the spec
+// deterministically, without querying lakehouse_metric_intent itself. The JSON
+// field names are stable so the agent-server and lakehouse-sql-server marshal
+// the identical shape over the wire.
+type IntentHint struct {
+	IntentID            string       `json:"intentId,omitempty"`
+	Name                string       `json:"name,omitempty"`
+	CanonicalMetric     string       `json:"canonicalMetric,omitempty"`
+	CanonicalFilters    []FilterItem `json:"canonicalFilters,omitempty"`
+	AutoGroupBy         []string     `json:"autoGroupBy,omitempty"`
+	ReplaceGroupBy      bool         `json:"replaceGroupBy,omitempty"`
+	AddShareColumnSafe  bool         `json:"addShareColumnSafe,omitempty"`
+	DefaultOrderByLabel string       `json:"defaultOrderByLabel,omitempty"`
+	DefaultOrderByDir   string       `json:"defaultOrderByDir,omitempty"`
+	DefaultLimit        int          `json:"defaultLimit,omitempty"`
+}
+
+// IntentParameter mirrors one entry of lakehouse_metric_intent.parameters JSONB.
+// It declares a typed, user-level knob the LLM fills when calling smartquery in
+// strict-mode dispatch — the contract the binder (BindIntentParams) consumes.
+//
+// Type semantics (v1):
+//
+//	"int":             numeric value; binder writes to spec.Limit
+//	"string":          if Property set, treats as filter value on Property using Op
+//	                   (default "="); reserved for future custom routing otherwise
+//	"property_filter": LLM provides a value; binder appends spec.Filters with
+//	                   {Prop=Property, Op=Op (default "="), Value, FuzzyMatch}
+//
+// Default applies when the LLM omits the param. Required (Optional=false) +
+// nil Default → PARAM_REQUIRED at bind time.
+type IntentParameter struct {
+	Name        string      `json:"name"`
+	Type        string      `json:"type"`
+	Property    string      `json:"property,omitempty"`
+	Op          string      `json:"op,omitempty"`
+	Default     interface{} `json:"default,omitempty"`
+	Optional    bool        `json:"optional,omitempty"`
+	Description string      `json:"description,omitempty"`
+	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
+
+	// AllowedValues is a runtime-only view (not persisted in JSON). For
+	// Type=="enum_ref" the caller (handler) populates this slice from the
+	// project's lakehouse_keyword table. json:"-" so it doesn't accidentally
+	// serialize back into Intent records.
+	AllowedValues []string `json:"-"`
 }
 
 // FilterItem is a raw filter as supplied by the LLM.

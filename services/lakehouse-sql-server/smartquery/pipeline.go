@@ -2,6 +2,7 @@ package smartquery
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -80,6 +81,26 @@ var validOpSet = map[string]bool{
 	"regex":         true,
 }
 
+// metricFilterOpSet is the comparison-operator whitelist for MetricFilter.
+// MetricFilter.Op and MetricFilter.Value are interpolated UNESCAPED into the
+// generated HAVING clause (see sql_builder.go havingExpr /
+// sql_builder_v2.go havingExprV2), so this is the sole injection guard on the
+// LLM-supplied post-aggregation predicate. Only canonical comparison ops are
+// allowed — no aliases, no whitespace, no SQL keywords.
+var metricFilterOpSet = map[string]bool{
+	">":  true,
+	">=": true,
+	"<":  true,
+	"<=": true,
+	"=":  true,
+	"<>": true,
+}
+
+// metricFilterValueRe constrains MetricFilter.Value to a strict numeric
+// literal (optional leading '-', integer, optional decimal part). Anchored so
+// no trailing SQL (e.g. "1; DELETE") can sneak past.
+var metricFilterValueRe = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
+
 // PassValidateSpec is the runtime safety net guaranteeing "no malformed SQL"
 // — the third defense line of strict-mode dispatch.
 //
@@ -145,6 +166,20 @@ func PassValidateSpec(spec *QuerySpec) error {
 		}
 		if !validOpSet[op] {
 			problems = append(problems, fmt.Sprintf("filters[%d] (prop=%q) op=%q 非法（合法 op 见 NormalizeQuerySpec.normalizeOperator）", i, f.Prop, f.Op))
+		}
+	}
+
+	// METRIC FILTER — Op and Value are interpolated unescaped into the HAVING
+	// clause downstream, so both must be tightly constrained: Op in the
+	// comparison whitelist, Value a strict numeric literal. Anything else is a
+	// SQL-injection vector (e.g. Op:"> 0; DROP TABLE", Value:"1; DELETE").
+	if spec.MetricFilter != nil {
+		mfOp := strings.TrimSpace(spec.MetricFilter.Op)
+		if !metricFilterOpSet[mfOp] {
+			problems = append(problems, fmt.Sprintf("metricFilter op=%q 非法（仅接受 > >= < <= = <>）", spec.MetricFilter.Op))
+		}
+		if !metricFilterValueRe.MatchString(strings.TrimSpace(spec.MetricFilter.Value)) {
+			problems = append(problems, fmt.Sprintf("metricFilter value=%q 非法（必须为数字字面量，如 42 或 -3.14）", spec.MetricFilter.Value))
 		}
 	}
 

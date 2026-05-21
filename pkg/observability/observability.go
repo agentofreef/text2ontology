@@ -20,6 +20,7 @@ package observability
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -120,18 +121,14 @@ var (
 		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000},
 	}, []string{"from_service", "to_service", "endpoint"})
 
-	// postgresPoolGauge reads db.Stats().InUse on each Prometheus scrape.
-	postgresPoolGauge = promauto.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "postgres_pool_in_use",
-		Help: "sql.DB.Stats().InUse — active connections currently checked out of the pool.",
-	}, func() float64 {
-		dbRefMu.RLock()
-		defer dbRefMu.RUnlock()
-		if dbRef == nil {
-			return 0
-		}
-		return float64(dbRef.Stats().InUse)
-	})
+	// postgresPoolGauge collects sql.DB.Stats() on each Prometheus scrape and
+	// emits the four pool gauges (postgres_pool_{in_use,idle,open,max_open}).
+	// It is a custom prometheus.Collector rather than a GaugeFunc so all four
+	// stats are read in a single Stats() call (consistent snapshot) and the
+	// 120-connection ceiling alert in ops/sli-slo.md has a real series to fire
+	// on. Registered into the default registry below and referenced by
+	// MetricsHandler so the gauge is emitted on /metrics.
+	postgresPoolGauge = newPoolStatsCollector()
 
 	// MCPToolCallDuration — reserved for Phase 1+ (MCP tools server). Zero
 	// observations pre-split; declared so the metric name is stable across
@@ -166,17 +163,85 @@ func Tracer() trace.Tracer {
 
 // MetricsHandler exposes the Prometheus scrape endpoint. Register at
 // GET /metrics in the monolith mux.
+//
+// It registers the DB connection-pool collector (postgresPoolGauge) into the
+// default registry on first call so the postgres_pool_* gauges appear on
+// /metrics. Registration is idempotent: a duplicate (already-registered)
+// error from a second call is ignored so multiple mounts of /metrics are safe.
 func MetricsHandler() http.Handler {
+	if err := prometheus.Register(postgresPoolGauge); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			log.Printf("   Observability: postgres pool collector registration failed: %v", err)
+		}
+	}
 	return promhttp.Handler()
 }
 
-// SetDB stores the *sql.DB pointer used by the PostgresPoolInUse gauge.
+// SetDB stores the *sql.DB pointer read by the postgres pool collector.
 // Main.go calls this once after opening the pool. Safe to call before or
 // after Init.
 func SetDB(db *sql.DB) {
 	dbRefMu.Lock()
 	defer dbRefMu.Unlock()
 	dbRef = db
+}
+
+// poolStatsCollector is a prometheus.Collector that reports sql.DB.Stats()
+// for the registered DB on every scrape. It snapshots all four pool gauges
+// from a single Stats() call so the values are mutually consistent. When no
+// DB has been registered yet (SetDB not called) it emits no series rather
+// than misleading zeros.
+type poolStatsCollector struct {
+	inUse   *prometheus.Desc
+	idle    *prometheus.Desc
+	open    *prometheus.Desc
+	maxOpen *prometheus.Desc
+}
+
+func newPoolStatsCollector() *poolStatsCollector {
+	return &poolStatsCollector{
+		inUse: prometheus.NewDesc(
+			"postgres_pool_in_use",
+			"sql.DB.Stats().InUse — connections currently checked out of the pool.",
+			nil, nil),
+		idle: prometheus.NewDesc(
+			"postgres_pool_idle",
+			"sql.DB.Stats().Idle — idle connections in the pool.",
+			nil, nil),
+		open: prometheus.NewDesc(
+			"postgres_pool_open_connections",
+			"sql.DB.Stats().OpenConnections — total established connections (in use + idle).",
+			nil, nil),
+		maxOpen: prometheus.NewDesc(
+			"postgres_pool_max_open_connections",
+			"sql.DB.Stats().MaxOpenConnections — configured upper bound on open connections (0 = unlimited).",
+			nil, nil),
+	}
+}
+
+// Describe implements prometheus.Collector.
+func (c *poolStatsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.inUse
+	ch <- c.idle
+	ch <- c.open
+	ch <- c.maxOpen
+}
+
+// Collect implements prometheus.Collector. Reads dbRef under the RWMutex and
+// emits one gauge sample per pool stat. No-ops (emits nothing) if no DB is set.
+func (c *poolStatsCollector) Collect(ch chan<- prometheus.Metric) {
+	dbRefMu.RLock()
+	db := dbRef
+	dbRefMu.RUnlock()
+	if db == nil {
+		return
+	}
+	s := db.Stats()
+	ch <- prometheus.MustNewConstMetric(c.inUse, prometheus.GaugeValue, float64(s.InUse))
+	ch <- prometheus.MustNewConstMetric(c.idle, prometheus.GaugeValue, float64(s.Idle))
+	ch <- prometheus.MustNewConstMetric(c.open, prometheus.GaugeValue, float64(s.OpenConnections))
+	ch <- prometheus.MustNewConstMetric(c.maxOpen, prometheus.GaugeValue, float64(s.MaxOpenConnections))
 }
 
 // Init constructs an OTel TracerProvider with an OTLP gRPC exporter pointing

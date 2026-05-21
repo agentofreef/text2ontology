@@ -20,6 +20,19 @@ CREATE TABLE IF NOT EXISTS "user" (
     updated_at      TIMESTAMPTZ DEFAULT now()
 );
 
+-- ==================== 1b. app_setting (global key-value) ====================
+-- Process-wide settings not scoped to a project or user. Currently holds the
+-- self-registration toggle. Read by /api/auth/registration-status (public) and
+-- the /api/auth/register gate; written from the admin user-management page.
+CREATE TABLE IF NOT EXISTS app_setting (
+    key         VARCHAR(64) PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+-- Registration is fail-closed by default; an admin enables it from /settings/users.
+INSERT INTO app_setting (key, value) VALUES ('allow_registration', 'false')
+ON CONFLICT (key) DO NOTHING;
+
 -- ==================== 2. project ====================
 CREATE TABLE IF NOT EXISTS project (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1302,7 +1315,7 @@ CREATE TABLE IF NOT EXISTS ingest_job (
   data_source_id   UUID REFERENCES data_source(id) ON DELETE CASCADE,
   project_id       UUID NOT NULL,
   kind             TEXT NOT NULL CHECK (kind IN
-                     ('file_upload','postgres_sync','pbit_ingest','wizard_confirm')),
+                     ('file_upload','postgres_sync','pbit_ingest','pbix_extract','wizard_confirm')),
   status           TEXT NOT NULL DEFAULT 'queued' CHECK (status IN
                      ('queued','running','succeeded','failed','cancelled')),
   phase            TEXT,
@@ -1328,6 +1341,13 @@ CREATE INDEX IF NOT EXISTS idx_ingest_job_pickup
   WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS idx_ingest_job_proj
   ON ingest_job(project_id, created_at DESC);
+
+-- Forward-migration: the inline CHECK above only applies on a fresh CREATE.
+-- Existing DBs need the kind list widened to include 'pbix_extract'
+-- (collector-server pbix import job). Drop-then-add is idempotent on re-run.
+ALTER TABLE ingest_job DROP CONSTRAINT IF EXISTS ingest_job_kind_check;
+ALTER TABLE ingest_job ADD CONSTRAINT ingest_job_kind_check
+  CHECK (kind IN ('file_upload','postgres_sync','pbit_ingest','pbix_extract','wizard_confirm'));
 CREATE INDEX IF NOT EXISTS idx_ingest_job_ds
   ON ingest_job(data_source_id, created_at DESC)
   WHERE data_source_id IS NOT NULL;

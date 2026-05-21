@@ -644,8 +644,8 @@ func (e *PlanExecutor) Execute(
 }
 
 // stepFailure is a typed error returned when a step's Runner reports
-// ExecutionOK=false. failureResult unwraps it so the caller still gets the
-// upstream LakehouseResult (with errorMessage / SQL / debug info), matching
+// ExecutionOK=false. failureResultWithTrace unwraps it so the caller still gets
+// the upstream LakehouseResult (with errorMessage / SQL / debug info), matching
 // the v1 contract.
 type stepFailure struct {
 	stepID string
@@ -654,10 +654,6 @@ type stepFailure struct {
 
 func (e *stepFailure) Error() string {
 	return fmt.Sprintf("step %q failed: %s", e.stepID, e.result.ErrorMessage)
-}
-
-func failureResult(err error) (LakehouseResult, error) {
-	return failureResultWithTrace(err, nil)
 }
 
 func failureResultWithTrace(err error, trace *PlanTrace) (LakehouseResult, error) {

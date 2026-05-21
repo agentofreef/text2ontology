@@ -41,12 +41,14 @@ func limiterFor(baseURL string) *rate.Limiter {
 	return actual.(*rate.Limiter)
 }
 
-// waitLLMRate blocks until the limiter for baseURL grants a token. Called
-// from the public DoChat* entry points before each network request. Uses
-// context.Background() so callers never see context-cancel errors from the
-// limiter — backpressure is handled by waiting, not by failing.
-func waitLLMRate(baseURL string) {
-	_ = limiterFor(baseURL).Wait(context.Background())
+// waitLLMRate blocks until the limiter for baseURL grants a token or ctx is
+// cancelled. Called from the DoChat* entry points before each network request.
+// Honoring ctx here means a cancelled request stops waiting on the limiter
+// instead of holding the worker goroutine until a token frees up. The returned
+// error is intentionally ignored: the subsequent ctx-aware request will fail
+// fast with the same ctx error, so callers see a single, consistent failure.
+func waitLLMRate(ctx context.Context, baseURL string) {
+	_ = limiterFor(baseURL).Wait(ctx)
 }
 
 // SetLLMRateLimit overrides the limiter for a given baseURL. Call once at

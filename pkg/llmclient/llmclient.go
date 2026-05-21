@@ -2,7 +2,7 @@ package llmclient
 
 import (
 	"bytes"
-	"crypto/tls"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -23,6 +23,16 @@ import (
 // responding for big/reasoning models, so this is intentionally generous —
 // it only fires when the provider sends no headers at all.
 const llmHeaderTimeout = 180 * time.Second
+
+// Connection-pool tuning for the shared transports. 10+ concurrent test-runner
+// workers hit the same provider host, so the stdlib default of 2 idle
+// connections per host forces a TLS handshake on nearly every call. 32 keeps
+// the steady-state pool warm without leaking sockets (idle ones expire).
+const (
+	maxIdleConnsPerHost = 32
+	maxIdleConns        = 64
+	idleConnTimeout     = 90 * time.Second
+)
 
 // httpClientCache caches *http.Client instances keyed by "<timeoutSeconds>|<proxyURL>".
 // Reusing clients lets the underlying connection pool reuse keep-alive sockets
@@ -78,12 +88,18 @@ func makeClient(timeout time.Duration, proxyURL string) *http.Client {
 		return v.(*http.Client)
 	}
 	transport := &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     TLSClientConfig(),
 		DialContext:         (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout: 15 * time.Second,
 		// Bound TTFT separately from the overall Client.Timeout so a provider
 		// that accepts the connection but never replies still fails fast.
 		ResponseHeaderTimeout: llmHeaderTimeout,
+		// Keep enough idle keep-alive sockets per provider host that a worker
+		// pool fanning out 10+ concurrent LLM calls doesn't pay a fresh TLS
+		// handshake on every request (the default of 2 thrashes handshakes).
+		MaxIdleConns:        maxIdleConns,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeout,
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -108,10 +124,13 @@ func makeStreamClient(proxyURL string) *http.Client {
 		return v.(*http.Client)
 	}
 	transport := &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:       TLSClientConfig(),
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: llmHeaderTimeout,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -127,13 +146,34 @@ func makeStreamClient(proxyURL string) *http.Client {
 
 // EmbedTexts calls the active embedding model to embed a list of texts.
 // Returns vectors. Truncates each text to 500 chars, batches ≤4.
+//
+// Retained as the no-ctx entry point for the many call sites that lack a
+// request context; it delegates to EmbedTextsCtx with a background context.
 func EmbedTexts(db *sql.DB, texts []string) ([][]float64, error) {
+	return EmbedTextsCtx(context.Background(), db, texts)
+}
+
+// EmbedTextsCtx is the context-aware embedding call. The ctx bounds the HTTP
+// request (cancellation aborts in-flight calls) and is honored across retries.
+//
+// Unlike the previous implementation, a non-2xx embedding response is now a
+// hard error — it never silently returns zero vectors, which would corrupt
+// recall (every token would map to the origin and match nothing meaningfully).
+func EmbedTextsCtx(ctx context.Context, db *sql.DB, texts []string) ([][]float64, error) {
 	bURL, aKey, mName, _, _, proxyURL, _ := GetConfigForRoleWithProxy(db, "embedding")
 	baseURL, apiKey, modelName := bURL, aKey, mName
 	if baseURL == "" || modelName == "" {
 		return nil, fmt.Errorf("no active embedding config")
 	}
+	client := makeClient(30*time.Second, proxyURL)
+	return embedTextsVia(ctx, client, baseURL, apiKey, modelName, texts)
+}
 
+// embedTextsVia is the HTTP core of the embedding call, split out so the
+// status-check / body-close behavior is unit-testable against an httptest
+// server without a live DB-resolved config. Truncates each text to 500 chars,
+// batches ≤4, and fails loud on any non-2xx batch.
+func embedTextsVia(ctx context.Context, client *http.Client, baseURL, apiKey, modelName string, texts []string) ([][]float64, error) {
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
 		if utf8.RuneCountInString(t) > 500 {
@@ -144,7 +184,6 @@ func EmbedTexts(db *sql.DB, texts []string) ([][]float64, error) {
 		}
 	}
 
-	client := makeClient(30*time.Second, proxyURL)
 	allVecs := make([][]float64, len(truncated))
 
 	for start := 0; start < len(truncated); start += 4 {
@@ -157,27 +196,47 @@ func EmbedTexts(db *sql.DB, texts []string) ([][]float64, error) {
 		reqBody := M{"model": modelName, "input": batch}
 		reqBytes, _ := json.Marshal(reqBody)
 		url := BuildURL(baseURL, "/embeddings")
-		req, _ := http.NewRequest("POST", url, bytes.NewReader(reqBytes))
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
+		if err != nil {
+			return nil, fmt.Errorf("embedding request build failed: %w", err)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		resp, err := client.Do(req)
+		resp, err := doWithRetry(ctx, client, req)
 		if err != nil {
 			return nil, fmt.Errorf("embedding request failed: %w", err)
 		}
-		var result struct {
-			Data []struct {
-				Embedding []float64 `json:"embedding"`
-				Index     int       `json:"index"`
-			} `json:"data"`
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		for _, d := range result.Data {
-			allVecs[start+d.Index] = d.Embedding
+		// Defer-style close inside the loop: close before returning on error and
+		// after decoding on success. A function literal keeps the close paired
+		// with this iteration's response (defer would pile up across batches).
+		func() {
+			defer resp.Body.Close()
+			// Fail loud on non-2xx — do NOT decode a body that isn't a real
+			// embedding payload and silently hand back zero vectors.
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+				err = fmt.Errorf("embedding returned %d: %s", resp.StatusCode, string(body))
+				return
+			}
+			var result struct {
+				Data []struct {
+					Embedding []float64 `json:"embedding"`
+					Index     int       `json:"index"`
+				} `json:"data"`
+			}
+			if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
+				err = fmt.Errorf("embedding decode failed: %w", decErr)
+				return
+			}
+			for _, d := range result.Data {
+				allVecs[start+d.Index] = d.Embedding
+			}
+		}()
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -271,6 +330,12 @@ func DoChatWithUsage(baseURL, apiKey string, chatBody M) (string, *TokenUsage, e
 	return DoChatFull(baseURL, apiKey, chatBody, "")
 }
 
+// DoChatWithUsageCtx is the context-aware variant of DoChatWithUsage; the ctx
+// bounds the request and is honored across retries.
+func DoChatWithUsageCtx(ctx context.Context, baseURL, apiKey string, chatBody M) (string, *TokenUsage, error) {
+	return DoChatFullCtx(ctx, baseURL, apiKey, chatBody, "")
+}
+
 // DoChatWithProxy makes a chat completion call with optional proxy support.
 func DoChatWithProxy(baseURL, apiKey string, chatBody M, proxyURL string) (string, error) {
 	content, _, err := DoChatFull(baseURL, apiKey, chatBody, proxyURL)
@@ -303,16 +368,24 @@ func NormalizeMaxTokens(chatBody M) {
 
 // DoChatFull returns content + token usage + error.
 // If chatBody contains "_vendor" = "anthropic", routes to the Anthropic Messages API.
+// Retained as the no-ctx entry point; delegates to DoChatFullCtx.
 func DoChatFull(baseURL, apiKey string, chatBody M, proxyURL string) (string, *TokenUsage, error) {
+	return DoChatFullCtx(context.Background(), baseURL, apiKey, chatBody, proxyURL)
+}
+
+// DoChatFullCtx is the context-aware chat completion call. The ctx bounds the
+// HTTP request (cancellation aborts in-flight calls) and is honored across the
+// retry/backoff loop applied to 429 + 5xx responses.
+func DoChatFullCtx(ctx context.Context, baseURL, apiKey string, chatBody M, proxyURL string) (string, *TokenUsage, error) {
 	vendor, _ := chatBody["_vendor"].(string)
 	delete(chatBody, "_vendor")
 
 	// Per-baseURL rate limit — blocks here when the worker pool fans out
 	// faster than the provider's RPM allows. See ratelimit.go.
-	waitLLMRate(baseURL)
+	waitLLMRate(ctx, baseURL)
 
 	if IsAnthropic(vendor) {
-		return doAnthropicChat(baseURL, apiKey, chatBody, proxyURL)
+		return doAnthropicChat(ctx, baseURL, apiKey, chatBody, proxyURL)
 	}
 
 	// OpenAI-compatible path
@@ -322,13 +395,16 @@ func DoChatFull(baseURL, apiKey string, chatBody M, proxyURL string) (string, *T
 	// to fully render. TTFT is bounded separately by ResponseHeaderTimeout.
 	client := makeClient(300*time.Second, proxyURL)
 	url := BuildURL(baseURL, "/chat/completions")
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(reqBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
+	if err != nil {
+		return "", nil, fmt.Errorf("LLM request build failed: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
 		return "", nil, fmt.Errorf("LLM request failed: %w", err)
 	}
@@ -364,7 +440,17 @@ func DoChatFull(baseURL, apiKey string, chatBody M, proxyURL string) (string, *T
 // onToken is called for each content delta; onThinking for <think> content.
 // Supports both OpenAI-compatible and Anthropic APIs via the "_vendor" field in chatBody.
 // Returns the full accumulated content (think-tags stripped), usage, and error.
+// Retained as the no-ctx entry point; delegates to DoChatStreamCallbackCtx.
 func DoChatStreamCallback(baseURL, apiKey string, chatBody M, onToken, onThinking func(string)) (string, *TokenUsage, error) {
+	return DoChatStreamCallbackCtx(context.Background(), baseURL, apiKey, chatBody, onToken, onThinking)
+}
+
+// DoChatStreamCallbackCtx is the context-aware streaming call. The ctx bounds
+// the SSE request so cancellation tears down the in-flight stream (rather than
+// reading until the provider closes). Streaming responses are not retried —
+// retrying mid-stream would duplicate tokens — so only the limiter wait and
+// request construction observe ctx here.
+func DoChatStreamCallbackCtx(ctx context.Context, baseURL, apiKey string, chatBody M, onToken, onThinking func(string)) (string, *TokenUsage, error) {
 	vendor, _ := chatBody["_vendor"].(string)
 	delete(chatBody, "_vendor")
 
@@ -376,9 +462,9 @@ func DoChatStreamCallback(baseURL, apiKey string, chatBody M, onToken, onThinkin
 
 	// Per-baseURL rate limit — keeps streaming fanout from saturating the
 	// provider's RPM cap. Same limiter as the non-streaming path.
-	waitLLMRate(baseURL)
+	waitLLMRate(ctx, baseURL)
 
-	req, err := PrepareStreamRequest(baseURL, apiKey, vendor, chatBody)
+	req, err := prepareStreamRequestCtx(ctx, baseURL, apiKey, vendor, chatBody)
 	if err != nil {
 		return "", nil, fmt.Errorf("LLM stream request failed: %w", err)
 	}

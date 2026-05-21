@@ -23,6 +23,7 @@ const (
 	KindFileUpload     Kind = "file_upload"
 	KindPostgresSync   Kind = "postgres_sync"
 	KindPbitIngest     Kind = "pbit_ingest"
+	KindPbixExtract    Kind = "pbix_extract"
 	KindWizardConfirm  Kind = "wizard_confirm"
 )
 

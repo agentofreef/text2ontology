@@ -2,6 +2,7 @@ package llmclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,7 +32,14 @@ type ToolCallResult struct {
 // DoChatWithTools makes a non-streaming chat call with native tool definitions.
 // Returns: content (if no tool call), tool calls (if tool call), usage, error.
 // When the LLM decides to call a tool, content is empty and toolCalls is populated.
+// Retained as the no-ctx entry point; delegates to DoChatWithToolsCtx.
 func DoChatWithTools(baseURL, apiKey string, chatBody M, tools []ToolDef, proxyURL, vendor string) (content string, toolCalls []ToolCallResult, usage *TokenUsage, err error) {
+	return DoChatWithToolsCtx(context.Background(), baseURL, apiKey, chatBody, tools, proxyURL, vendor)
+}
+
+// DoChatWithToolsCtx is the context-aware variant of DoChatWithTools. The ctx
+// bounds the request and is honored across the retry/backoff loop.
+func DoChatWithToolsCtx(ctx context.Context, baseURL, apiKey string, chatBody M, tools []ToolDef, proxyURL, vendor string) (content string, toolCalls []ToolCallResult, usage *TokenUsage, err error) {
 	// Build tools array in OpenAI format (will be converted for Anthropic in convertToAnthropicBody)
 	var toolsPayload []M
 	for _, t := range tools {
@@ -47,7 +55,7 @@ func DoChatWithTools(baseURL, apiKey string, chatBody M, tools []ToolDef, proxyU
 	chatBody["tools"] = toolsPayload
 	chatBody["_vendor"] = vendor
 
-	raw, u, callErr := DoChatFullRaw(baseURL, apiKey, chatBody, proxyURL)
+	raw, u, callErr := DoChatFullRawCtx(ctx, baseURL, apiKey, chatBody, proxyURL)
 	if callErr != nil {
 		return "", nil, nil, callErr
 	}
@@ -160,16 +168,23 @@ func extractVendorXMLToolCall(content string) (ToolCallResult, bool) {
 }
 
 // DoChatFullRaw returns the raw response map (not just content).
+// Retained as the no-ctx entry point; delegates to DoChatFullRawCtx.
 func DoChatFullRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M, *TokenUsage, error) {
+	return DoChatFullRawCtx(context.Background(), baseURL, apiKey, chatBody, proxyURL)
+}
+
+// DoChatFullRawCtx is the context-aware variant of DoChatFullRaw. The ctx
+// bounds the request and is honored across the retry/backoff loop.
+func DoChatFullRawCtx(ctx context.Context, baseURL, apiKey string, chatBody M, proxyURL string) (M, *TokenUsage, error) {
 	vendor, _ := chatBody["_vendor"].(string)
 	delete(chatBody, "_vendor")
 
 	// Per-baseURL rate limit — DoChatWithTools funnels through here, so this
 	// is the choke-point for tool-call-heavy lakehouse agent traffic.
-	waitLLMRate(baseURL)
+	waitLLMRate(ctx, baseURL)
 
 	if IsAnthropic(vendor) {
-		return doAnthropicChatRaw(baseURL, apiKey, chatBody, proxyURL)
+		return doAnthropicChatRaw(ctx, baseURL, apiKey, chatBody, proxyURL)
 	}
 
 	// OpenAI-compatible path — same as DoChatFull but returns raw M
@@ -179,13 +194,16 @@ func DoChatFullRaw(baseURL, apiKey string, chatBody M, proxyURL string) (M, *Tok
 	// can take minutes. TTFT is bounded by the transport's ResponseHeaderTimeout.
 	client := makeClient(300*time.Second, proxyURL)
 	apiURL := BuildURL(baseURL, "/chat/completions")
-	req, _ := http.NewRequest("POST", apiURL, bytes.NewReader(reqBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, nil, fmt.Errorf("LLM request build failed: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("LLM request failed: %w", err)
 	}

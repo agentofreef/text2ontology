@@ -3,6 +3,8 @@ package smartquery
 import (
 	"fmt"
 	"strings"
+
+	"github.com/lakehouse2ontology/contracts"
 )
 
 // IntentHint carries the spec-level fields of a Metric Intent that the agent
@@ -11,91 +13,16 @@ import (
 // spec deterministically, without ever querying lakehouse_metric_intent
 // itself. This keeps the SQL service stateless w.r.t. intent metadata.
 //
-// Origin: agent-server resolves the intent (priority + keyword gate) and
-// fills this struct. Result post-processing (pivot / share suffix /
-// response template) stays in agent-server and reads the same intent
-// directly from its own DB; it does not flow through this hint.
-type IntentHint struct {
-	IntentID string `json:"intentId,omitempty"`
-	Name     string `json:"name,omitempty"`
-
-	// CanonicalMetric overrides spec.Metric when set and structurally
-	// different (case + whitespace insensitive). Blocks the "AI substituted
-	// count(...) for sum(...)" failure mode end-to-end.
-	CanonicalMetric string `json:"canonicalMetric,omitempty"`
-
-	// CanonicalFilters are filters the intent always applies (e.g. a
-	// "ConfirmedSales" intent might always WHERE Status='Confirmed').
-	// Merged into spec.Filters; existing filters on the same prop win.
-	CanonicalFilters []FilterItem `json:"canonicalFilters,omitempty"`
-
-	// AutoGroupBy lists the property tokens the Intent insists must appear
-	// in spec.GroupBy.
-	AutoGroupBy []string `json:"autoGroupBy,omitempty"`
-
-	// ReplaceGroupBy=true wipes spec.GroupBy and uses AutoGroupBy as the
-	// authoritative list. Used when Intent owns the entire grouping (e.g.
-	// "X11 占比" with a Distribution intent that fixes axis to PRODUCT).
-	ReplaceGroupBy bool `json:"replaceGroupBy,omitempty"`
-
-	// AddShareColumnSafe controls whether INJECT applies under
-	// AddShareColumn=true. Default false preserves user's chosen share
-	// granularity (don't widen "per-X share" to "per-(X×Y) share").
-	AddShareColumnSafe bool `json:"addShareColumnSafe,omitempty"`
-
-	// DefaultOrderByLabel — SELECT alias to ORDER BY when spec.OrderBy is
-	// empty. Typically the metric's output label (e.g. "Total_LineTotal").
-	// Empty = no default; LLM must supply orderBy if it wants ranking.
-	DefaultOrderByLabel string `json:"defaultOrderByLabel,omitempty"`
-
-	// DefaultOrderByDir — "ASC" or "DESC" (or empty). Used together with
-	// DefaultOrderByLabel.
-	DefaultOrderByDir string `json:"defaultOrderByDir,omitempty"`
-
-	// DefaultLimit — injected into spec.Limit when the LLM didn't supply
-	// one. Ranking intents typically set 10; total intents set 1.
-	// Zero = no default.
-	DefaultLimit int `json:"defaultLimit,omitempty"`
-}
+// The type is owned by the shared pkg/contracts module so this service and
+// agent-server share one definition (no drift across the HTTP wire). It has no
+// methods, so a plain alias is sufficient.
+type IntentHint = contracts.IntentHint
 
 // IntentParameter mirrors one entry of lakehouse_metric_intent.parameters JSONB.
 // It declares a typed, user-level knob the strict-mode dispatch (P7) consumes
-// via BindIntentParams. Same shape as agent-server/smartquery.IntentParameter
-// — both packages keep parallel implementations because the Phase 1 D4d
-// service-deps gate forbids cross-service Go imports. The HTTP DTOs marshal
-// identically across the wire.
-//
-// Type semantics (v1):
-//
-//	"int":             numeric value; binder writes to spec.Limit
-//	"string":          if Property set, treats as filter value on Property using Op
-//	                   (default "="); reserved for future custom routing otherwise
-//	"property_filter": LLM provides a value; binder appends spec.Filters with
-//	                   {Prop=Property, Op=Op (default "="), Value, FuzzyMatch}
-type IntentParameter struct {
-	Name        string      `json:"name"`
-	Type        string      `json:"type"`
-	Property    string      `json:"property,omitempty"`
-	Op          string      `json:"op,omitempty"`
-	Default     interface{} `json:"default,omitempty"`
-	Optional    bool        `json:"optional,omitempty"`
-	Description string      `json:"description,omitempty"`
-	FuzzyMatch  bool        `json:"fuzzyMatch,omitempty"`
-
-	// AllowedValues is a runtime-only view (not persisted in JSON). For
-	// Type=="enum_ref" the caller (handler) populates this slice from the
-	// project's lakehouse_keyword table — see spec
-	// .omc/specs/bounded-value-ref-contract.md §3.2. Semantics:
-	//   - nil   → caller could not / chose not to populate (e.g. dry-run
-	//             save validation without DB context); binding falls back
-	//             to Type="string" pass-through. Preserves backward compat
-	//             so structural validators still pass.
-	//   - non-nil (possibly empty) → caller asserts this is the full
-	//             candidate set; binding fails loudly with PARAM_VALUE_UNKNOWN
-	//             when the LLM-supplied value is not in the set.
-	// json:"-" so it doesn't accidentally serialize back into Intent records.
-	AllowedValues []string `json:"-"`
-}
+// via BindIntentParams. Owned by pkg/contracts so both services share one
+// definition; the HTTP DTOs marshal identically across the wire.
+type IntentParameter = contracts.IntentParameter
 
 // applyIntentHint mutates spec in place per the rules originally implemented
 // in agent-server's enforceIntentAutoGroupBy. Pure function: no DB, no I/O.

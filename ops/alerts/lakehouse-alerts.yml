@@ -1,0 +1,190 @@
+# ops/alerts/lakehouse-alerts.yml
+#
+# Prometheus alerting rules for the lakehouse2ontology service split.
+# Thresholds are derived from ops/sli-slo.md (initial engineering targets;
+# re-pin from the 7-14d OTel baseline at Phase 0 exit).
+#
+# IMPORTANT — units: the Go histograms in pkg/observability are recorded in
+# MILLISECONDS (metric names end in `_duration_ms`). histogram_quantile()
+# therefore returns milliseconds, so the latency thresholds below are in ms
+# to match the SLO doc (which states the targets in human-readable seconds).
+#
+# Wiring: ops/prometheus.yml has a `rule_files:` entry pointing at
+#   /etc/prometheus/alerts/*.yml
+# Mount this directory into the prometheus container (compose, NOT edited here):
+#   ./ops/alerts:/etc/prometheus/alerts:ro
+# then reload prometheus (SIGHUP or POST /-/reload).
+
+groups:
+  # ──────────────────────────────────────────────────────────────────────
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        # `up` is Prometheus's synthetic per-target scrape health gauge.
+        # Excludes otel-collector (handled by its own alert below).
+        expr: up{job!="otel-collector"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Prometheus has failed to scrape {{ $labels.job }} ({{ $labels.instance }}) for > 1m. Availability SLO is 99.5% monthly."
+
+      - alert: OtelCollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "otel-collector is down"
+          description: "The OTLP collector ({{ $labels.instance }}) has been unscrapeable for > 2m. Traces and collector-exported metrics are not flowing; service instrumentation falls back to no-op tracing (still functional)."
+
+  # ──────────────────────────────────────────────────────────────────────
+  - name: error-rates
+    rules:
+      - alert: HighHTTPErrorRate
+        # Generic 5xx error budget. Uses promhttp's per-handler request counter
+        # (exposed by every service's /metrics via promhttp.Handler). Falls back
+        # gracefully (no series → no alert) on services without status labels.
+        expr: |
+          (
+            sum by (job) (rate(promhttp_metric_handler_requests_total{code=~"5.."}[5m]))
+            /
+            sum by (job) (rate(promhttp_metric_handler_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "High 5xx error rate on {{ $labels.job }}"
+          description: "{{ $labels.job }} 5xx rate is {{ $value | humanizePercentage }} over 5m (budget: < 1%)."
+
+      - alert: MCPToolCallErrorRate
+        expr: |
+          (
+            sum(rate(mcp_tool_call_errors_total[5m]))
+            /
+            clamp_min(sum(rate(mcp_tool_call_duration_ms_count[5m])), 1)
+          ) > 0.005
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "MCP tool-call error rate > 0.5%"
+          description: "mcp-tools-server tool-call error rate is {{ $value | humanizePercentage }} over 5m (SLO: < 0.5%). Check for a broken tool, expired API key, or downstream outage."
+
+      - alert: SSEStreamErrorRate
+        expr: |
+          (
+            sum(rate(sse_stream_errors_total[5m]))
+            /
+            clamp_min(sum(rate(sse_stream_duration_ms_count[5m])), 1)
+          ) > 0.005
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSE stream error-termination rate > 0.5%"
+          description: "agent-server SSE streams are terminating with errors at {{ $value | humanizePercentage }} over 5m (SLO: < 0.5%). Possible infra instability or agent panics."
+
+      - alert: LedgerSaveConflictRate
+        expr: |
+          (
+            sum(rate(ledger_save_conflict_total[5m]))
+            /
+            clamp_min(sum(rate(ledger_save_duration_ms_count[5m])), 1)
+          ) > 0.005
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ledger optimistic-concurrency conflict rate > 0.5%"
+          description: "ledger.SaveWithRetry conflict rate is {{ $value | humanizePercentage }} over 5m (baseline < 0.1%, SLO alert at > 0.5%). Possible hot-thread contention / retry storm."
+
+  # ──────────────────────────────────────────────────────────────────────
+  - name: latency
+    rules:
+      # Thresholds are in MILLISECONDS (see header note). p99 unless stated.
+      - alert: LedgerSaveLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(ledger_save_duration_ms_bucket[5m]))) > 750
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "ledger.Save p99 > 750ms"
+          description: "ledger_save p99 is {{ $value | humanize }}ms over 5m (SLO: < 750ms)."
+
+      - alert: RecallBuildContextLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(recall_build_context_duration_ms_bucket[5m]))) > 2500
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "recall.BuildContext p99 > 2500ms"
+          description: "recall_build_context p99 is {{ $value | humanize }}ms over 5m (SLO: < 2500ms). Possible degraded/cold cache."
+
+      - alert: RecallEmbedLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(recall_embed_duration_ms_bucket[5m]))) > 200
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "recall embed (interactive) p99 > 200ms"
+          description: "recall_embed interactive p99 is {{ $value | humanize }}ms over 5m (SLO: < 200ms). Priority router may be losing the interactive lane to batch work."
+
+      - alert: SmartqueryExecuteLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(smartquery_execute_duration_ms_bucket[5m]))) > 8000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "smartquery.Execute p99 > 8000ms"
+          description: "smartquery_execute p99 is {{ $value | humanize }}ms over 5m (SLO: < 8000ms). Possible LLM stall or runaway query."
+
+      - alert: MCPToolCallLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(mcp_tool_call_duration_ms_bucket[5m]))) > 3000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "mcp.ToolCall p99 > 3000ms"
+          description: "mcp_tool_call p99 is {{ $value | humanize }}ms over 5m (SLO: < 3000ms)."
+
+      - alert: CrossServiceHTTPLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(cross_service_http_duration_ms_bucket[5m]))) > 500
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "internal cross-service HTTP p99 > 500ms"
+          description: "cross_service_http p99 is {{ $value | humanize }}ms over 5m (SLO: < 500ms). Network/serialization stall — check connection-pool starvation."
+
+      - alert: SSEFirstChunkLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(sse_stream_duration_ms_bucket[5m]))) > 5000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "SSE time-to-first-chunk p99 > 5000ms"
+          description: "sse_stream p99 is {{ $value | humanize }}ms over 5m (SLO: < 5000ms). Perceptible stall — model cold-start, buffering misconfig, or MTU fragmentation."
+
+  # ──────────────────────────────────────────────────────────────────────
+  - name: resources
+    rules:
+      - alert: PostgresPoolNearCeiling
+        # Total Postgres connections in use across all DB-connected services.
+        # Hard ceiling 120 (leaves a 20-conn reserve below max_connections).
+        expr: sum(postgres_pool_in_use) > 120
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Postgres pool in-use > 120 connections"
+          description: "Total postgres_pool_in_use across services is {{ $value }} (ceiling 120, ~20-conn reserve below max_connections). New connections may start failing — investigate pool leaks or a connection storm."
+
+      - alert: PostgresPoolWaitClimbing
+        # Early-warning companion: connections in use approaching the per-service
+        # configured max (open == max_open and all in use → callers will block).
+        expr: |
+          (postgres_pool_max_open_connections > 0)
+          and
+          (postgres_pool_in_use >= postgres_pool_max_open_connections)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres pool saturated on {{ $labels.job }}"
+          description: "{{ $labels.job }} has all {{ $value }} of its max-open connections in use for > 5m; new queries will queue on the pool."

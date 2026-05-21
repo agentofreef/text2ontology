@@ -1,16 +1,12 @@
 // lakehouse_tools.go contains helper functions migrated from
 // handler_agent_v2.go during the lakehouse-only branch split (commit
-// 47f519f3). They remain because handler_agent_lakehouse.go and
-// handler_lh_testing.go still reference:
-//   - v2ToolLinkToOd, v2ToolCreateCausality: Od linking used by
-//     lakehouse agent's knowledge-related tools
-//   - classifyExecError: maps SQL/DAX exec errors to user-friendly categories
+// 47f519f3). They remain because handler_agent_lakehouse.go still references:
+//   - classifyExecError: maps SQL exec errors to user-friendly categories
 //   - toolResultToMarkdown: formats tool outputs for agent chat streams
 //   - toonResultVal: typed value coercion for TOON responses
 package handler
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -19,102 +15,8 @@ import (
 	. "github.com/lakehouse2ontology/httputil"
 )
 
-// v2ToolLinkToOd attaches a knowledge entry to an ontology anchor (object/metric/link/property/version).
-// Used by the lakehouse agent's "link_to_od" tool call.
-func v2ToolLinkToOd(db *sql.DB, args map[string]interface{}) M {
-	knowledgeId, _ := args["knowledgeId"].(string)
-	anchorType, _ := args["anchorType"].(string)
-	anchorId, _ := args["anchorId"].(string)
-
-	if knowledgeId == "" {
-		return M{"error": "knowledgeId is required"}
-	}
-	if anchorType == "" {
-		return M{"error": "anchorType is required (object|metric|link|property)"}
-	}
-
-	// Validate knowledge exists
-	var title string
-	if err := db.QueryRow(`SELECT title FROM ont_knowledge WHERE id = $1`, knowledgeId).Scan(&title); err != nil {
-		return M{"error": fmt.Sprintf("知识 %s 不存在", knowledgeId)}
-	}
-
-	// Validate anchor entity exists
-	var anchorName string
-	switch anchorType {
-	case "object":
-		db.QueryRow(`SELECT name FROM ont_object_type WHERE id = $1`, anchorId).Scan(&anchorName)
-	case "metric":
-		db.QueryRow(`SELECT name FROM ont_metric WHERE id = $1`, anchorId).Scan(&anchorName)
-	case "link":
-		db.QueryRow(`SELECT link_name FROM ont_link_type WHERE id = $1`, anchorId).Scan(&anchorName)
-	case "property":
-		db.QueryRow(`SELECT name FROM ont_property WHERE id = $1`, anchorId).Scan(&anchorName)
-	case "version":
-		anchorName = "通用"
-		anchorId = ""
-	default:
-		return M{"error": fmt.Sprintf("无效的 anchorType: %s", anchorType)}
-	}
-	if anchorName == "" && anchorType != "version" {
-		return M{"error": fmt.Sprintf("%s %s 不存在", anchorType, anchorId)}
-	}
-
-	var err error
-	if anchorType == "object" && anchorId != "" {
-		// For Od links: set primary anchor_id AND append to anchor_ids array (dedup)
-		_, err = db.Exec(`UPDATE ont_knowledge
-			SET anchor_type = $2, anchor_id = $3, updated_at = now(),
-			    anchor_ids = (SELECT array_agg(DISTINCT e) FROM unnest(COALESCE(anchor_ids,'{}') || $3::uuid) e)
-			WHERE id = $1`, knowledgeId, anchorType, anchorId)
-	} else {
-		_, err = db.Exec(`UPDATE ont_knowledge SET anchor_type = $2, anchor_id = $3, updated_at = now() WHERE id = $1`,
-			knowledgeId, anchorType, NilIfEmpty(anchorId))
-	}
-	if err != nil {
-		return M{"error": "更新失败: " + err.Error()}
-	}
-
-	return M{"success": true, "summary": fmt.Sprintf("已将知识「%s」挂靠到 %s: %s", title, anchorType, anchorName)}
-}
-
-// v2ToolCreateCausality creates a causality relationship between two knowledge entries.
-// Used by the lakehouse agent's "create_causality" tool call.
-func v2ToolCreateCausality(db *sql.DB, projectID string, args map[string]interface{}) M {
-	fromID, _ := args["fromKnowledgeId"].(string)
-	toID, _ := args["toKnowledgeId"].(string)
-	relType, _ := args["relationType"].(string)
-	direction, _ := args["direction"].(string)
-	desc, _ := args["description"].(string)
-
-	if fromID == "" || toID == "" {
-		return M{"error": "fromKnowledgeId and toKnowledgeId are required"}
-	}
-	if relType == "" {
-		relType = "correlates"
-	}
-	if direction == "" {
-		direction = "neutral"
-	}
-
-	var causalityID string
-	err := db.QueryRow(`INSERT INTO ont_causality (project_id, from_knowledge_id, to_knowledge_id, relation_type, direction, description)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-		projectID, fromID, toID, relType, direction, desc).Scan(&causalityID)
-	if err != nil {
-		return M{"error": "创建失败: " + err.Error()}
-	}
-
-	var fromTitle, toTitle string
-	db.QueryRow(`SELECT COALESCE(title,'') FROM ont_knowledge WHERE id = $1`, fromID).Scan(&fromTitle)
-	db.QueryRow(`SELECT COALESCE(title,'') FROM ont_knowledge WHERE id = $1`, toID).Scan(&toTitle)
-
-	return M{"success": true, "causalityId": causalityID,
-		"summary": fmt.Sprintf("已创建因果关系: 「%s」 —[%s/%s]→ 「%s」", fromTitle, relType, direction, toTitle)}
-}
-
-// classifyExecError converts a raw PBI/DAX execution error into a human-readable
-// classification without exposing DAX syntax or physical table/column names.
+// classifyExecError converts a raw SQL execution error into a human-readable
+// classification without exposing query syntax or physical table/column names.
 func classifyExecError(raw string) string {
 	lower := strings.ToLower(raw)
 	switch {
@@ -140,13 +42,6 @@ func classifyExecError(raw string) string {
 	case strings.Contains(lower, "0 rows") || strings.Contains(lower, "empty"):
 		return "查询返回 0 行：筛选条件过于严格，请确认 filters.value 的值是否存在于数据中（可通过 lookup keyword 查看已知值）。"
 	default:
-		// Strip any DAX-like fragments before returning
-		daxHints := []string{"EVALUATE", "SUMMARIZECOLUMNS", "FILTER(", "TOPN(", "ADDCOLUMNS(", "CALCULATE("}
-		for _, kw := range daxHints {
-			if strings.Contains(strings.ToUpper(raw), kw) {
-				return "查询执行失败：参数有误，请重新检查 objects/filters/groupBy/metric 的值。"
-			}
-		}
 		// Safe to show a trimmed version
 		msg := raw
 		if len([]rune(msg)) > 150 {
@@ -157,7 +52,7 @@ func classifyExecError(raw string) string {
 }
 
 // toolResultToMarkdown formats a tool call as YAML with explicit INPUT and OUTPUT sections.
-// The LLM sees "what was called with what args" and "what came back" — no raw JSON, no DAX.
+// The LLM sees "what was called with what args" and "what came back" — no raw JSON.
 func toolResultToMarkdown(toolName string, _ map[string]interface{}, result M) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## function_call: %s\n\n", toolName))
@@ -170,7 +65,7 @@ func toolResultToMarkdown(toolName string, _ map[string]interface{}, result M) s
 		return sb.String()
 	}
 
-	// For smartquery: show result table (not DAX)
+	// For smartquery: show result table
 	if execStatus, ok := result["execution_status"].(string); ok {
 		if execStatus == "error" {
 			execErr, _ := result["execution_error"].(string)
