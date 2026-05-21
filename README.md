@@ -113,6 +113,68 @@ Open `http://localhost:18080` in a browser.
 
 ---
 
+## Production deployment (hardened, single ingress)
+
+The Quick Start above is for **local trial** — convenient, but it leans on default secrets and (historically) per-service host ports. For a **production-level** run, use the dedicated hardened compose file **`docker-compose.product-ready.yml`**. It runs as its own isolated stack and **exposes exactly ONE external port — the nginx gateway**. Postgres, the six Go services, and the whole observability stack (otel-collector / Jaeger / Prometheus / Grafana) are reachable **only on the internal Docker network** — there is no direct DB or service port on the host.
+
+**How it differs from Quick Start**
+
+- **Single ingress.** Only the gateway port is published (default `28080`). Everything else is internal — the attack surface is one port.
+- **Hardened runtime.** Non-root containers; per-service CPU / memory / PID limits; HTTP read/idle timeouts + DB connection-pool caps; graceful shutdown (SIGTERM drains in-flight requests, no truncated SSE); panic-recover middleware.
+- **Gateway hardening.** Per-IP rate + connection limits, proxy timeouts on non-streaming routes (SSE / ingest deliberately exempt), and security headers (CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, HSTS).
+- **Isolated compose project** (`t2o-product-ready`) with its own containers, network, and volumes — it can run **alongside** the dev stack without touching it.
+
+### 1. Configure and ROTATE secrets (required)
+
+```bash
+cp .env.shared.example .env.shared
+```
+
+Replace **every** placeholder in `.env.shared` before exposing the instance — the defaults (`*_change_me`, `admin`) are local-trial only:
+
+| Variable | Purpose |
+|---|---|
+| `POSTGRES_PASSWORD` | Postgres superuser password |
+| `ADMIN_PASSWORD` | initial `admin` web login |
+| `AUTH_TOKEN_SECRET` | HMAC key for user session tokens (use ≥ 64 random hex chars) |
+| `INTERNAL_TOKEN` | service-to-service auth token |
+
+Generate strong values, e.g. `openssl rand -hex 32`. Treat any deploy that still contains `change_me` / `=admin` as **not yet configured**.
+
+### 2. Build and start the single-ingress stack
+
+```bash
+# builds all 8 images from source and starts the isolated, hardened stack
+docker compose -f docker-compose.product-ready.yml up -d --build
+```
+
+> Pre-built multi-arch (amd64 + arm64) images are also published to `ghcr.io/agentofreef/text2ontology-*:latest` by CI on every push to `main`, if you'd rather pull than build.
+
+### 3. Verify (only the gateway is reachable)
+
+```bash
+docker compose -f docker-compose.product-ready.yml ps          # all healthy; only gateway maps a host port
+curl -fsS http://localhost:28080/healthz                       # -> ok
+curl -sI  http://localhost:28080/ | grep -i location           # -> 302 Location: /lakehouse/  (relative)
+```
+
+Open **http://localhost:28080** in a browser, sign in as `admin` with your `ADMIN_PASSWORD`, then add a chat model under `/settings/llm-config` (same as the Quick Start note).
+
+### Operating notes
+
+- **Change / restrict the public port** — edit the gateway `ports:` in `docker-compose.product-ready.yml` (e.g. `8443:8080`). To keep it off the LAN and front it with your own TLS proxy, bind to loopback: `127.0.0.1:28080:8080`.
+- **TLS** — the gateway serves plain HTTP on its one port; terminate TLS at a reverse proxy in front (or add a TLS `server {}` to `services/gateway/nginx.conf`). HSTS is emitted but is a no-op over plain HTTP.
+- **Least-privilege DB roles (recommended)** — by default services connect as the Postgres superuser. To run each service on a scoped role: apply `ops/db-roles.sql` to the DB, set per-service `*_DSN` vars in `.env`, point each service's `DATABASE_URL` at its scoped role, and verify with `scripts/check-runtime-grants.sh`.
+- **Lifecycle**
+  ```bash
+  docker compose -f docker-compose.product-ready.yml logs -f gateway
+  docker compose -f docker-compose.product-ready.yml down        # stop, keep the DB volume
+  docker compose -f docker-compose.product-ready.yml down -v      # stop and WIPE the DB volume
+  ```
+- **Update** — `git pull && docker compose -f docker-compose.product-ready.yml up -d --build`.
+
+---
+
 ## A note before you start
 
 Most of what people sell as "AI agent + your database" runs on an unspoken assumption: that schema metadata plus an LLM is enough to answer business questions. I spent a long time trying to make that work — in different shapes, on different stacks — and watched it break the same way every time. So a few honest words before you spend your weekend on this.
