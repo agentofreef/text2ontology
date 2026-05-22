@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"testing"
 
 	"github.com/lakehouse2ontology/services/agent-server/recall"
@@ -47,7 +48,7 @@ func TestBuildVerdictFromLLMHints_HoleTwoFix(t *testing.T) {
 		{Name: "year_range", Description: "spans an entire year"},
 	}
 
-	verdict := buildVerdictFromLLMHints(hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
 	if verdict.Feasible {
 		t.Fatalf("hole-2 guard failed: gate let through a wrong-shape coverage claim (verdict=%+v)", verdict)
 	}
@@ -80,7 +81,7 @@ func TestBuildVerdictFromLLMHints_ShapeMatchAccepts(t *testing.T) {
 	}}
 	vocab := []shapeCap{{Name: "year_range", Description: "spans an entire year"}}
 
-	verdict := buildVerdictFromLLMHints(hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
 	if !verdict.Feasible {
 		t.Fatalf("happy path regressed: %+v", verdict)
 	}
@@ -114,7 +115,7 @@ func TestBuildVerdictFromLLMHints_EmptyVocabKeepsLegacy(t *testing.T) {
 	}}
 
 	// vocab nil → legacy path, LLM verdict is trusted.
-	verdict := buildVerdictFromLLMHints(hints, intents, nil)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil)
 	if !verdict.Feasible {
 		t.Fatalf("legacy path regressed with empty vocab: %+v", verdict)
 	}
@@ -143,7 +144,7 @@ func TestBuildVerdictFromLLMHints_UnknownShapeKeepsLegacy(t *testing.T) {
 	}}
 	vocab := []shapeCap{{Name: "single_month_prefix", Description: "YYYY-MM prefix"}}
 
-	verdict := buildVerdictFromLLMHints(hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
 	if !verdict.Feasible {
 		t.Fatalf("guard fired on a shape not in vocab: %+v", verdict)
 	}
@@ -218,7 +219,7 @@ func TestBuildVerdictFromLLMHints_SubsumptionAccepts(t *testing.T) {
 		{Name: "multi_period_range", Satisfies: []string{"single_period_prefix"}},
 	}
 
-	verdict := buildVerdictFromLLMHints(hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
 	if !verdict.Feasible {
 		t.Fatalf("subsumption acceptance failed: a range param should cover a single-period requirement (%+v)", verdict)
 	}
@@ -242,7 +243,7 @@ func TestBuildVerdictFromLLMHints_UndeclaredFilterDoesNotGate(t *testing.T) {
 		{Kind: "filter", Name: "X11", Shape: "等值", Covered: boolPtr(false), UncoveredReason: "参数表中无任何Intent"},
 		{Kind: "dimension", Name: "年度", Shape: "分组", Covered: boolPtr(false)},
 	}
-	verdict := buildVerdictFromLLMHints(hints, intents, nil)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil)
 	if !verdict.Feasible {
 		t.Fatalf("metric-only gate regressed: an undeclared filter/dimension must not gate when an Intent was recalled (%+v)", verdict)
 	}
@@ -266,8 +267,42 @@ func TestBuildVerdictFromLLMHints_NoIntentsInfeasible(t *testing.T) {
 		{Kind: "metric", Name: "early order"},
 		{Kind: "filter", Name: "X11", Covered: boolPtr(false)},
 	}
-	verdict := buildVerdictFromLLMHints(hints, nil, nil) // no intents recalled
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, nil, nil) // no intents recalled
 	if verdict.Feasible {
 		t.Fatalf("expected infeasible when no Intent was recalled, got %+v", verdict)
+	}
+}
+
+// Stage B value-domain gate — pure + fail-open behavior.
+
+func TestLooksNumericOrDate(t *testing.T) {
+	for _, s := range []string{"2024", "2024/05", "2024-2025", "2024.05.01", "12:30", " 2023 "} {
+		if !looksNumericOrDate(s) {
+			t.Errorf("expected %q to look numeric/date", s)
+		}
+	}
+	for _, s := range []string{"TBD", "X11", "Beverages", "Not ready", "Q1FY25"} {
+		if looksNumericOrDate(s) {
+			t.Errorf("expected %q to NOT look numeric/date", s)
+		}
+	}
+}
+
+func TestResolveFilterValue_NilDBFailsOpen(t *testing.T) {
+	// Without a DB the value gate must be inert (exists=true, no ambiguity) so
+	// it never refuses.
+	exists, props := resolveFilterValue(context.Background(), nil, "", "TBD")
+	if !exists || len(props) != 0 {
+		t.Fatalf("nil DB must fail open (exists=true, no props), got exists=%v props=%v", exists, props)
+	}
+	// And buildVerdictFromLLMHints must stay feasible with a value-bearing
+	// filter when there's no DB to validate against.
+	hints := []llmRequirementHint{
+		{Kind: "metric", Name: "x"},
+		{Kind: "filter", Name: "开发测试状态", Value: "TBD", Covered: boolPtr(false)},
+	}
+	v := buildVerdictFromLLMHints(context.Background(), nil, "", hints, []recall.MetricIntent{{Name: "m"}}, nil)
+	if !v.Feasible {
+		t.Fatalf("nil-DB value gate must not refuse, got %+v", v)
 	}
 }

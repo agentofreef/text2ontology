@@ -292,7 +292,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			if !ok {
 				return composeError(fmt.Sprintf("filters[%d] must be an object", i), "")
 			}
-			ref, _, errM := resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
+			ref, dimOD, errM := resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
 			if errM != nil {
 				return errM
 			}
@@ -305,6 +305,30 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 				return composeError(
 					fmt.Sprintf("filters[%d].op=%q not allowed", i, op),
 					"whitelist: =, !=, >, <, >=, <=, in, not_in, like, between")
+			}
+			// Stage A — value-domain guard (defense-in-depth). For equality-type
+			// filters on a LOW-cardinality categorical property, reject a value
+			// that isn't in the property's known domain (from lakehouse_keyword),
+			// so the LLM can't silently run a fabricated value (e.g. "TBD" on a
+			// {Ready, Not ready} field). Range/like ops and high-cardinality
+			// props are skipped (domain unknown/too large → fail-open).
+			if value != "" && (op == "=" || op == "!=" || op == "in" || op == "not_in") {
+				owningOD := odName
+				if dimOD != "" {
+					owningOD = dimOD
+				}
+				if odID := odIDByName[owningOD]; odID != "" {
+					if domain, known := lowCardValueDomain(ctx, db, odID, bareFilterPropName(StrVal(fm, "property"))); known {
+						for _, v := range splitFilterValues(value, op) {
+							if v != "" && !valueInDomain(v, domain) {
+								return composeError(
+									fmt.Sprintf("filters[%d]: 值 %q 不在属性 %q 的已知值域内", i, v, bareFilterPropName(StrVal(fm, "property"))),
+									"该属性值域: "+strings.Join(domain, " | ")+
+										" —— 若用户的说法不在其中，请勿臆造映射；向用户澄清，或换一个属性/值。")
+							}
+						}
+					}
+				}
 			}
 			spec.Filters = append(spec.Filters, smartquery.FilterItem{
 				Prop:  ref,
@@ -451,4 +475,93 @@ func sortedKeys(m map[string]bool) []string {
 		}
 	}
 	return out
+}
+
+// ── Stage A: value-domain guard helpers ──────────────────────────────────────
+
+// valueDomainCap bounds how many distinct value-keywords a property may have to
+// be treated as a LOW-cardinality categorical domain. Above this we cannot
+// reliably enumerate the domain, so the guard skips validation (fail-open).
+const valueDomainCap = 40
+
+// bareFilterPropName extracts the property name from a filter reference,
+// dropping a granularity suffix (e.g. "(月)") and an "OD." qualifier.
+func bareFilterPropName(rawRef string) string {
+	s := stripGranularitySuffix(strings.TrimSpace(rawRef))
+	if idx := strings.LastIndex(s, "."); idx >= 0 {
+		s = s[idx+1:]
+	}
+	return strings.TrimSpace(s)
+}
+
+// splitFilterValues splits an in/not_in comma list into individual values;
+// other ops yield the single trimmed value.
+func splitFilterValues(value, op string) []string {
+	if op == "in" || op == "not_in" {
+		parts := strings.Split(value, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+	return []string{strings.TrimSpace(value)}
+}
+
+// normForDomain lowercases and strips spaces/underscores so domain membership
+// matches recall's surface-form normalization ("Not ready" ≈ "notready").
+func normForDomain(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "_", "")
+	return s
+}
+
+// valueInDomain reports whether v matches any domain member (normalised).
+func valueInDomain(v string, domain []string) bool {
+	nv := normForDomain(v)
+	for _, d := range domain {
+		if normForDomain(d) == nv {
+			return true
+		}
+	}
+	return false
+}
+
+// lowCardValueDomain returns the distinct value-keywords for a property when it
+// is a low-cardinality categorical (≤ valueDomainCap distinct values). Returns
+// (domain, true) for a known low-card domain; (nil, false) when the property is
+// high-cardinality, has no value vocabulary, or on any error — fail-open, so the
+// guard never blocks a filter it cannot confidently validate.
+func lowCardValueDomain(ctx context.Context, db *sql.DB, odID, propName string) ([]string, bool) {
+	if db == nil || odID == "" || propName == "" {
+		return nil, false
+	}
+	var propID string
+	if err := db.QueryRowContext(ctx,
+		`SELECT id FROM ont_property WHERE object_type_id=$1 AND name=$2`,
+		odID, propName).Scan(&propID); err != nil {
+		return nil, false
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT keyword FROM lakehouse_keyword
+		WHERE property_id=$1
+		  AND COALESCE(is_column_name, false) = false
+		  AND COALESCE(is_stopword, false) = false
+		  AND COALESCE(is_machine_code, false) = false
+		LIMIT $2`, propID, valueDomainCap+1)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if rows.Scan(&k) == nil && strings.TrimSpace(k) != "" {
+			out = append(out, k)
+		}
+	}
+	if rows.Err() != nil || len(out) == 0 || len(out) > valueDomainCap {
+		return nil, false // error, no vocab, or high-cardinality → can't validate
+	}
+	return out, true
 }

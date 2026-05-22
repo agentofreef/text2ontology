@@ -319,11 +319,13 @@ func formatSynthMessage(synthResult M, synthFailCount int) (content string, didF
 	}
 	passed, _ := synthResult["passed"].(bool)
 	if passed {
-		ans, _ := synthResult["answer"].(string)
-		if ans != "" {
-			return "Synthesizer 已生成通过 mechanical gates 的回复。**请直接 echo 输出以下内容**（不要修改、不要重新解释、不要补充）：\n\n" + ans, false
-		}
-		return "", false
+		// Cite-only discipline (核心铁律): synthesize is a QUALITY GATE, not the
+		// answer. We do NOT echo its literal-number prose — the final answer
+		// MUST be the agent's own cell-ref response (「sum(tN.列)」/「tN.列[行]」/
+		// 「tN」), which the frontend (dataTemplate.ts) renders to real values.
+		// Echoing synthesize's numbers would let the model "answer" with literals
+		// instead of citing data, which the project strictly forbids.
+		return "数据校验通过（synthesizer mechanical gates）。现在写最终中文答复，**所有数字一律用 cell-ref 引用语法**（「sum(tN.列名)」/「tN.列名[行号]」/整表「tN」），**严禁直接写数字** —— 前端会把引用渲染成真实值。", false
 	}
 	if synthFailCount >= synthFollowUpMaxFails {
 		return "", false
@@ -699,6 +701,7 @@ FULLY_LOADED_ODS_PLACEHOLDER
 - **命中 Intent** → 带 intent 字段（从 context 顶部「🎯 查询意图」小节挑），套用策展好的口径（Mode A）。
 - **没有合适 Intent** → 不填 intent，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成 Intent 就回"无法处理"。
 - 只有当问题要测的指标在目录里**完全找不到对应 OD/度量**时，才告知用户"当前查询超出已配置范围"。
+- **筛选值必须来自 OD Catalog 里该属性的值域**（property 后大括号里列出的那些值）。用户的筛选概念找不到对应字段、映射到多个字段无法确定、或值不在该属性值域内时——**不要臆造映射**（不要把"TBD"硬塞成"Not ready"，也不要在 4 个 readiness 里随便挑一个），改用 declare_capability_gap 声明，或向用户澄清。
 
 ## 歧义处理
 
@@ -1399,7 +1402,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// USE_MISSION_ACT is on AND agentType is "lakehouse" (builder has no
 		// recall Intents to gate against).
 		if missionActEnabled && agentType == "lakehouse" {
-			if infeasibleAnswer := runReachabilityJudge(ctx, db, shadowM, userQuestion, recallResult.MetricIntents); infeasibleAnswer != "" {
+			if infeasibleAnswer := runReachabilityJudge(ctx, db, projectID, shadowM, userQuestion, recallResult.MetricIntents); infeasibleAnswer != "" {
 				// Infeasible — stream the machine-templated answer and stop.
 				sendSSE("token", infeasibleAnswer)
 				// Persist as a zero-round assistant step so the turn is not blank.

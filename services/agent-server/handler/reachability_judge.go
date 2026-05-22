@@ -106,6 +106,7 @@ func loadShapeVocab(ctx context.Context, db *sql.DB) []shapeCap {
 type llmRequirementHint struct {
 	Kind            string   `json:"kind"`
 	Name            string   `json:"name"`
+	Value           string   `json:"value"` // filter value in the user's original words (e.g. "TBD", "X11")
 	Shape           string   `json:"shape"`
 	Why             string   `json:"why"`
 	Covered         *bool    `json:"covered"`
@@ -130,6 +131,7 @@ type decomposeResult struct {
 func runReachabilityJudge(
 	ctx context.Context,
 	db *sql.DB,
+	projectID string,
 	sm *shadowMission,
 	question string,
 	intents []recall.MetricIntent,
@@ -154,7 +156,7 @@ func runReachabilityJudge(
 	}
 
 	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
-	verdict := buildVerdictFromLLMHints(res.Requirements, intents, vocab)
+	verdict := buildVerdictFromLLMHints(ctx, db, projectID, res.Requirements, intents, vocab)
 
 	// ── Persist (best-effort) ────────────────────────────────────────────────
 	sm.recordReachability(ctx, verdict)
@@ -170,6 +172,11 @@ func runReachabilityJudge(
 
 	if verdict.Feasible {
 		return ""
+	}
+	if verdict.Kind == "clarify" {
+		// Ambiguous filter value(s) — answerable once the user disambiguates.
+		// Ask rather than refuse outright.
+		return "〔需要你先澄清一下〕\n\n" + verdict.Reason
 	}
 	return buildInfeasibilityAnswer(verdict)
 }
@@ -188,7 +195,7 @@ func runReachabilityJudge(
 //     does NOT gate: the ReAct loop resolves dimensions/filters via OD
 //     property recall + SmartQuery (groupBy/filter + ont_link joins), so
 //     refusing on their absence only produced false negatives.
-func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap) mission.ReachabilityVerdict {
+func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string, hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap) mission.ReachabilityVerdict {
 	realIntentNames := map[string]bool{}
 	for _, mi := range intents {
 		realIntentNames[mi.Name] = true
@@ -214,6 +221,10 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 	// negatives — e.g. a recalled metric whose year / product filter wasn't
 	// declared as a parameter was wrongly refused.
 	var blockers []string
+	// clarifyMsgs collects filter values that are ambiguous across several
+	// low-cardinality fields — answerable once the user picks one, so they
+	// yield a "clarify" verdict rather than an outright refusal.
+	var clarifyMsgs []string
 
 	for _, h := range hints {
 		rc := mission.RequirementCoverage{
@@ -275,6 +286,26 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 				rc.MissingNote = fmt.Sprintf("无已授权 Intent 以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
 			}
 		}
+
+		// Value-domain gate (Stage B): resolve a filter's categorical value
+		// against the project's value vocabulary. Absent everywhere → genuine
+		// gap (refuse, so the loop can't fabricate a mapping). Present in ≥2
+		// low-card fields → ambiguous (ask which). Exactly one / high-card →
+		// proceed (the ReAct loop composes it). Numeric/date values are skipped.
+		if h.Kind == "filter" && strings.TrimSpace(h.Value) != "" && !looksNumericOrDate(h.Value) {
+			exists, lowCard := resolveFilterValue(ctx, db, projectID, h.Value)
+			switch {
+			case !exists:
+				rc.Covered = false
+				rc.MissingNote = fmt.Sprintf("筛选值「%s」在本体里找不到对应取值", h.Value)
+				blockers = append(blockers, fmt.Sprintf("数据里没有任何字段的取值是「%s」（用户提到的「%s」在本体中不存在）", h.Value, h.Name))
+			case len(lowCard) >= 2:
+				rc.Covered = false
+				rc.MissingNote = fmt.Sprintf("值「%s」同时是 %s 的取值，需澄清按哪个字段筛", h.Value, strings.Join(lowCard, "、"))
+				clarifyMsgs = append(clarifyMsgs, fmt.Sprintf("「%s」在多个字段里都出现（%s）——你想按哪个筛？", h.Value, strings.Join(lowCard, " / ")))
+			}
+		}
+
 		v.Requirements = append(v.Requirements, rc)
 	}
 
@@ -284,8 +315,20 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 		blockers = append(blockers, "未召回到任何可用于度量的 Intent —— 当前本体没有与该指标相关的已授权口径")
 	}
 
-	v.Feasible = len(blockers) == 0
-	v.Reason = buildVerdictReason(v, blockers)
+	v.Feasible = len(blockers) == 0 && len(clarifyMsgs) == 0
+	switch {
+	case len(blockers) > 0:
+		// gap / hole-2 / metric-absent → cannot answer (gap takes precedence
+		// over clarification: a missing field/value can't be fixed by asking).
+		v.Kind = "gap"
+		v.Reason = buildVerdictReason(v, blockers)
+	case len(clarifyMsgs) > 0:
+		// only ambiguity → answerable once the user disambiguates.
+		v.Kind = "clarify"
+		v.Reason = "需要澄清：" + strings.Join(clarifyMsgs, "；") + "。"
+	default:
+		v.Reason = buildVerdictReason(v, nil)
+	}
 	return v
 }
 
@@ -417,7 +460,7 @@ func decomposeQuestion(
 第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个 Intent 真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
 
 只输出一个 JSON 对象，不要包裹 markdown 代码块，不要输出任何其他文字：
-{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a"],"uncovered_reason":"..."}]}
+{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","value":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a"],"uncovered_reason":"..."}]}
 
 sub_questions 规则：
 - 每个元素是一句完整的自然语言子问题，尽量保留用户原话里的关键词。
@@ -429,6 +472,7 @@ requirements 字段规则：
 - kind="dimension" 表示用户想按其分组的维度。
 - kind="filter" 表示用户想按其筛选的条件。
 - name：对于 dimension/filter，必须使用下方参数表中真实出现的参数 property 名称；如果整张参数表里没有匹配的 property，用问题中的原始词，并把这一项标为 covered=false。
+- value（仅 filter）：该筛选要匹配的具体值，**用用户原话**（如 "TBD" / "X11" / "Beverages"）。**不要**把它替换成你猜测的字段名或你以为对应的合法值——原样照抄；服务端会拿它去本体值域里核对。没有具体筛选值就留空。
 - shape：一两个词描述该要素的形态。
   - metric 用"标量/求和/计数"等。
   - dimension 用"分组"。
@@ -529,6 +573,7 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vo
 type reqItemJSON struct {
 	Kind            string   `json:"kind"`
 	Name            string   `json:"name"`
+	Value           string   `json:"value"`
 	Shape           string   `json:"shape"`
 	Why             string   `json:"why"`
 	Covered         *bool    `json:"covered"`
@@ -583,6 +628,7 @@ func normalizeReqItems(items []reqItemJSON) []llmRequirementHint {
 		out = append(out, llmRequirementHint{
 			Kind:            kind,
 			Name:            name,
+			Value:           strings.TrimSpace(it.Value),
 			Shape:           strings.TrimSpace(it.Shape),
 			Why:             strings.TrimSpace(it.Why),
 			Covered:         it.Covered,
@@ -683,4 +729,84 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// looksNumericOrDate reports whether s is a number / date / range token rather
+// than a categorical term. Such values are served by range/equality on the raw
+// column and are NOT expected in the value-keyword vocabulary, so the value-gap
+// gate skips them (avoids false gaps on "2024", "2024/05", "2024-2025").
+func looksNumericOrDate(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != ' ' && r != '/' && r != '.' && r != ':' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveFilterValue locates a filter VALUE in the project's value vocabulary
+// (lakehouse_keyword) for the Stage B value-domain gate. Returns:
+//   - existsAnywhere: the value matches a value-keyword on ANY property
+//     (high- or low-cardinality), case/space/underscore-normalised.
+//   - lowCardProps:   the LOW-cardinality categorical properties whose value
+//     domain contains it, as "OD.PROP" labels (used to detect ambiguity).
+//
+// db == nil → (true, nil): inert, never gates without a database. Any query
+// error also fails open (returns existsAnywhere=true) so the gate never refuses
+// on infrastructure trouble.
+func resolveFilterValue(ctx context.Context, db *sql.DB, projectID, value string) (existsAnywhere bool, lowCardProps []string) {
+	v := strings.TrimSpace(value)
+	if db == nil || projectID == "" || v == "" {
+		return true, nil
+	}
+	// Low-cardinality categorical properties whose domain contains v.
+	if rows, err := db.QueryContext(ctx, `
+		SELECT o.name, p.name
+		FROM ont_property p
+		JOIN ont_object_type o ON o.id = p.object_type_id
+		WHERE o.mark = true
+		  AND p.id IN (
+			SELECT k.property_id FROM lakehouse_keyword k
+			WHERE k.project_id = $1 AND k.property_id IS NOT NULL
+			  AND COALESCE(k.is_column_name, false) = false
+			  AND COALESCE(k.is_stopword, false) = false
+			  AND COALESCE(k.is_machine_code, false) = false
+			  AND regexp_replace(lower(k.keyword), '[ _]', '', 'g') = regexp_replace(lower($2), '[ _]', '', 'g')
+		  )
+		  AND (
+			SELECT count(DISTINCT k2.keyword) FROM lakehouse_keyword k2
+			WHERE k2.property_id = p.id
+			  AND COALESCE(k2.is_column_name, false) = false
+			  AND COALESCE(k2.is_stopword, false) = false
+			  AND COALESCE(k2.is_machine_code, false) = false
+		  ) <= $3`,
+		projectID, v, valueDomainCap); err == nil {
+		for rows.Next() {
+			var od, prop string
+			if rows.Scan(&od, &prop) == nil {
+				lowCardProps = append(lowCardProps, od+"."+prop)
+			}
+		}
+		rows.Close()
+	}
+	if len(lowCardProps) > 0 {
+		return true, lowCardProps
+	}
+	// Not in any low-card domain → does it exist anywhere (incl. high-card,
+	// e.g. a specific MTM number / product name)? Machine codes included here.
+	var n int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM lakehouse_keyword
+		WHERE project_id = $1
+		  AND COALESCE(is_column_name, false) = false
+		  AND COALESCE(is_stopword, false) = false
+		  AND regexp_replace(lower(keyword), '[ _]', '', 'g') = regexp_replace(lower($2), '[ _]', '', 'g')`,
+		projectID, v).Scan(&n); err != nil {
+		return true, nil // fail-open
+	}
+	return n > 0, nil
 }
