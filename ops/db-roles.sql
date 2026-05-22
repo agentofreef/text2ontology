@@ -73,15 +73,28 @@ END $fn$ LANGUAGE plpgsql;
 -- backend-api writes vectors only via HTTP to recall-server; direct DB write
 -- is a defense-in-depth denial. SELECT retained for read-only endpoints like
 -- /api/ontology/learned-facts that surface vector metadata.
+-- NOTE (grant-gap fix): ont_alias + ont_query_log added — handler_alias.go and
+-- handler_query_log.go do full CRUD (list/create/mark/delete aliases + the
+-- question-history UI). ont_lakehouse_sql_log + ont_sql_passthrough_log added —
+-- backend-api inserts/deletes/reads the SQL execution log views. ont_agent_annotation
+-- added read-only (handler reads token-annotation rows; agent-server owns writes).
+-- ont_fact_definition added — the learned-facts list subquery counts it. ont_topic +
+-- ont_knowledge_definition + ont_knowledge_example added — the knowledge list (which the
+-- ontology graph needs to map join_key causality edges onto property nodes) LEFT JOINs
+-- ont_topic and subqueries the def/example counts.
+-- Without these the corresponding public endpoints silently return empty (permission
+-- denied swallowed into an empty result set).
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE', ARRAY[
     'user', 'project', 'project_member',
-    'prompt_config', 'llm_config',
-    'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
-    'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
-    'lakehouse_keyword', 'lakehouse_metric_intent'
+    'prompt_config', 'llm_config', 'llm_role_binding',
+    'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type', 'ont_alias',
+    'ont_knowledge', 'ont_topic', 'ont_knowledge_definition', 'ont_knowledge_example',
+    'ont_causality', 'ont_learned_fact', 'ont_fact_definition', 'ont_fact_link',
+    'lakehouse_keyword', 'lakehouse_metric_intent', 'ont_query_log',
+    'ont_lakehouse_sql_log', 'ont_sql_passthrough_log'
   ], 'backend_api_user');
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT',
-  ARRAY['ont_agent_thread', 'ont_agent_step', 'ont_vector_entry'], 'backend_api_user');
+  ARRAY['ont_agent_thread', 'ont_agent_step', 'ont_vector_entry', 'ont_agent_annotation'], 'backend_api_user');
 -- Explicit REVOKE on UPDATE of thread_state to enforce P4.
 SELECT pg_temp.grant_if_exists('REVOKE', 'UPDATE', ARRAY['ont_agent_thread'], 'backend_api_user');
 SELECT pg_temp.grant_if_exists('REVOKE', 'INSERT, DELETE', ARRAY['ont_agent_thread'], 'backend_api_user');
@@ -95,16 +108,41 @@ SELECT pg_temp.grant_if_exists('REVOKE', 'INSERT, UPDATE, DELETE', ARRAY['ont_ve
 -- agent_server_user owns them outright. Missed in the original grant set;
 -- without these the worker error-loops with "permission denied for table
 -- ont_test_run". Wave 4-4 P1-8 cutover grant-gap fix.
+-- NOTE (grant-gap fix): ont_agent_annotation + ont_test_case_tag +
+-- ont_test_case_tag_link added — agent-server does full CRUD on the token-annotation
+-- store and the test-case tag/tag-link tables; they were missed in the original set.
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE',
-  ARRAY['ont_agent_thread', 'ont_agent_step',
-        'ont_test_suite', 'ont_test_case', 'ont_test_run', 'ont_test_run_case'],
+  ARRAY['ont_agent_thread', 'ont_agent_step', 'ont_agent_annotation',
+        'ont_test_suite', 'ont_test_case', 'ont_test_run', 'ont_test_run_case',
+        'ont_test_case_tag', 'ont_test_case_tag_link'],
   'agent_server_user');
+-- NOTE (grant-gap fix): llm_config + llm_role_binding added — agent-server
+-- resolves the agent/synthesizer/tokenize LLM model per role via
+-- llmclient.GetConfigForRole (SELECT base_url/api_key/model from these tables).
+-- Without SELECT the lookup returns an empty base_url, so the LLM POST hits a
+-- bare "/v1/chat/completions" → "unsupported protocol scheme """.
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
     'lakehouse_keyword', 'lakehouse_metric_intent',
+    'lakehouse_shape_capability',
+    'llm_config', 'llm_role_binding',
     'user', 'project'
   ], 'agent_server_user');
+-- NOTE (grant-gap fix): MissionAct tables. agent-server is the SOLE owner of
+-- ont_mission — pkg/mission.Store upserts it (INSERT … ON CONFLICT DO UPDATE)
+-- and SELECTs by id/thread; the thread SELECT also backs
+-- GET /api/ontology/lakehouse-missions (HandleMissionsByThread), which returned
+-- 500 "permission denied for table ont_mission" before this grant. Mission
+-- writes are best-effort (logged, never fail the turn), so the gap stayed
+-- invisible until the read endpoint surfaced it. capability_gap_log is an
+-- INSERT-only audit sink (writeCapabilityGapLog). lakehouse_shape_capability
+-- (added to the SELECT array above) is the reachability judge's shape vocab —
+-- without SELECT loadShapeVocab silently returns nil and the gate degrades to
+-- LLM-only, skipping the deterministic shape guard. ont_mission +
+-- capability_gap_log use uuid text ids (no sequence). All under USE_MISSION_ACT.
+SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE', ARRAY['ont_mission'], 'agent_server_user');
+SELECT pg_temp.grant_if_exists('GRANT', 'INSERT', ARRAY['capability_gap_log'], 'agent_server_user');
 
 -- 5. recall_server_user: RO on ontology + lakehouse (reads vector columns for cosine
 -- similarity search). Vector *writes* (keyword_vector, alias_vector, content_vector
@@ -175,6 +213,21 @@ BEGIN
   END LOOP;
 END $$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO collector_server_user;
+
+-- collector-server finalizes an ingest by pointing the project at its lakehouse
+-- schema (wizard confirm, pbit SSE import, and pbix extract all do
+-- `UPDATE project SET lakehouse_schema=…`). Without this the project reads as
+-- "not configured" and SmartQuery / the lakehouse-sql UI / the builder agent
+-- see no data even though the tables + ontology landed. Column-scoped UPDATE
+-- keeps it tight: collector cannot INSERT/DELETE projects or alter other columns.
+DO $$
+BEGIN
+  IF to_regclass('public.project') IS NOT NULL THEN
+    EXECUTE 'GRANT UPDATE (lakehouse_schema, source_type, status, updated_at) ON TABLE public.project TO collector_server_user';
+  ELSE
+    RAISE NOTICE 'collector_server_user: table public.project absent — skipping project UPDATE grant';
+  END IF;
+END $$;
 
 -- 9. Sequence grants for INSERTing roles.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO

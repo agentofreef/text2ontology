@@ -26,11 +26,16 @@ import (
 )
 
 // readerRoles are the roles that must be able to read collector-created
-// schemas after the role cutover.
+// schemas after the role cutover. backend_api_user is included because it
+// serves the lakehouse-sql console endpoints directly against these schemas:
+// /lakehouse-sql/schema lists the per-project tables and /lakehouse-sql/execute
+// runs the user's SELECT. Without USAGE + SELECT the console reads as "no data
+// tables" even though the import succeeded.
 var readerRoles = []string{
 	"lakehouse_sql_server_user",
 	"agent_server_user",
 	"recall_server_user",
+	"backend_api_user",
 }
 
 // ownerRole owns the tables collector creates; ALTER DEFAULT PRIVILEGES is
