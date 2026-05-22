@@ -1,39 +1,54 @@
-# docker-compose.yml — lakehouse2ontology service mesh
+# docker-compose.yml — text2ontology, the single production-grade stack.
 #
-# Architecture: `gateway` (nginx) is the SOLE external port-forwarding
-# entry/exit for the whole stack. Every other service binds only on the
-# compose network; the gateway proxies the public URL surface (frontend +
-# /api/* + /connector/* + /mcp + /api/mcp/*) to the right service via
-# compose DNS. See services/gateway/nginx.conf for the routing rules.
-# Postgres is the one deliberate exception — its 5438 port stays open for
-# DB administration tooling.
+# ONE compose file for the whole project. The nginx `gateway` is the SOLE
+# external ingress (host port 28080); Postgres, the six Go services, and the
+# observability stack are reachable only on the internal Docker network (the
+# observability UIs bind to 127.0.0.1 for local inspection). Non-root
+# containers, per-service resource limits, least-privilege DB roles, graceful
+# shutdown, and a one-shot `db-migrate` runner are all wired in.
 #
-# Operator checklist before first run:
-#   cp .env.shared.example .env.shared   # fill in DATABASE_URL + API keys
-#   docker compose up -d
-#   curl -s http://localhost:18080/healthz   # gateway liveness
-#   open  http://localhost:18080             # UI (or http://localhost:10020)
+# Pull-and-run: this file references the CI-published multi-arch images
+# (ghcr.io/agentofreef/text2ontology-*:latest). A user just needs:
+#
+#     docker compose up -d        # pulls prebuilt images, runs the whole stack
+#     open http://localhost:28080 # admin / admin (default)
+#
+# It runs out of the box — every secret has a safe DEV default baked in below.
+# For a real deployment:
+#   1. cp .env.example .env
+#   2. set strong values (openssl rand -hex 32) for every secret
+#   3. set REQUIRE_STRONG_SECRETS=true  → services then FAIL-CLOSED on weak secrets
+# `.env` is auto-read by docker compose for ${VAR} interpolation; it is
+# gitignored — never commit real secrets.
+#
+# Maintainers building images locally: use `make build` (docker build per
+# service); CI publishes :latest on push to main. The frontend image must be
+# built in CI / on a glibc x86_64 or native arm64 runner — its @swc/core
+# postinstall SIGBUSes under some local emulation setups.
+
+name: text2ontology
+
+# Shared app-service env — safe DEV defaults, override via .env for production.
+# The `change_me` / `admin` sentinels are deliberate: with
+# REQUIRE_STRONG_SECRETS=true the services refuse to start until you replace them.
+x-app-env: &app-env
+  REQUIRE_STRONG_SECRETS: ${REQUIRE_STRONG_SECRETS:-false}
+  AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:-t2o_dev_change_me_auth_secret_min_32_chars_0000}
+  INTERNAL_TOKEN: ${INTERNAL_TOKEN:-t2o_dev_change_me_internal_token}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+  CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:28080}
+  OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
 
 services:
-
-  # ── Gateway: SOLE external port-forwarding ingress ──────────────────────────
-  # text2ontology-gateway is a thin nginx that reverse-proxies the public URL
-  # surface to the right service over compose DNS. The browser hits ONE host
-  # port; every other service binds only on the compose network. See
-  # services/gateway/nginx.conf for the authoritative routing rules.
+  # ── Single external ingress ────────────────────────────────────────────────
   gateway:
-    build:
-      context: .
-      dockerfile: services/gateway/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-gateway:latest
-    # Resource limits (P1-14): bound blast radius of a runaway service. Compose
-    # v2 supports these top-level per-service keys. Dev-sane defaults.
+    image: ghcr.io/agentofreef/text2ontology-gateway:${IMAGE_TAG:-latest}
     mem_limit: 256m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
     ports:
-      - "18080:8080"
-      - "10020:8080"
+    - 28080:8080
     depends_on:
       frontend:
         condition: service_healthy
@@ -53,18 +68,10 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # ── Frontend (Next.js static, served by an internal nginx) ─────────────────
-  # Reached only via the gateway in production; bundle is built with empty
-  # NEXT_PUBLIC_*_URL so the browser uses same-origin URLs that the gateway
-  # then dispatches by path.
   frontend:
-    build:
-      context: .
-      dockerfile: services/frontend/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-frontend:latest
-    # Resource limits (P1-14): static nginx is light; keep it modest.
+    image: ghcr.io/agentofreef/text2ontology-frontend:${IMAGE_TAG:-latest}
     mem_limit: 256m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
     depends_on:
       backend-api:
@@ -81,84 +88,53 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # ── Go service stubs ────────────────────────────────────────────────────────
-  # Each has its own services/<name>/Dockerfile.
-  # Phase 1+ will replace each stub with the real migrated implementation.
-
+  # ── Go services (each connects as its own least-privilege Postgres role) ────
   backend-api:
-    # Phase 3 B4a: swapped stub → real service. Currently owns the
-    # six leaf ontology CRUD entity pairs migrated in B2/B3
-    # (versions, aliases, rules, methods, skills, links) under
-    # /internal/backend-api/*. The monolith reverse-proxies the
-    # public /api/ontology/* surface here when BACKEND_API_URL is
-    # set (see services/backend-api/cmd/server/register_public_api.go).
-    build:
-      context: .
-      dockerfile: services/backend-api/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-backend-api:latest
-    # Resource limits (P1-14): dev-sane caps for an app service.
+    image: ghcr.io/agentofreef/text2ontology-backend-api:${IMAGE_TAG:-latest}
     mem_limit: 512m
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8090"]
-    env_file:
-      - .env.shared
     environment:
-      DATABASE_URL: "${BACKEND_API_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "backend-api"
-      # P7.4 dry-run validation on POST/PUT /api/ontology/metric-intents.
-      # Empty / unset → save without validation (dev-friendly degraded mode).
-      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
-
+      <<: *app-env
+      DATABASE_URL: postgres://backend_api_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: backend-api
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8090/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8090/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       lakehouse-sql-server:
         condition: service_healthy
     restart: unless-stopped
 
   agent-server:
-    # Phase 2 A4a: swapped stub → real service. Talks to sibling
-    # services via compose DNS (lakehouse-sql-server:8094,
-    # recall-server:8093) — no host NAT round-trip.
-    build:
-      context: .
-      dockerfile: services/agent-server/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-agent-server:latest
-    # Resource limits (P1-14): the LLM worker pool fans out concurrent calls,
-    # so give it the full app-service allotment.
+    image: ghcr.io/agentofreef/text2ontology-agent-server:${IMAGE_TAG:-latest}
     mem_limit: 512m
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8092"]
-    env_file:
-      - .env.shared
     environment:
-      DATABASE_URL: "${AGENT_SERVER_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "agent-server"
-      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
-      RECALL_SERVER_URL: "http://recall-server:8093"
-      # MissionAct (.omc/specs/mission-act.md). Off ⇒ byte-identical
-      # legacy behavior; on ⇒ shadow missions + capability-gap tool.
-      USE_MISSION_ACT: "true"
-
+      <<: *app-env
+      DATABASE_URL: postgres://agent_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: agent-server
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
+      RECALL_SERVER_URL: http://recall-server:8093
+      USE_MISSION_ACT: 'true'
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       lakehouse-sql-server:
         condition: service_healthy
       recall-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8092/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8092/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -166,95 +142,63 @@ services:
     restart: unless-stopped
 
   recall-server:
-    # Phase 1 R4a: swapped stub → real service (Od recall + vector + OTel).
-    build:
-      context: .
-      dockerfile: services/recall-server/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-recall-server:latest
-    # Resource limits (P1-14): dev-sane caps for an app service.
+    image: ghcr.io/agentofreef/text2ontology-recall-server:${IMAGE_TAG:-latest}
     mem_limit: 512m
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8093"]
-    env_file:
-      - .env.shared
     environment:
-      DATABASE_URL: "${RECALL_SERVER_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "recall-server"
-
+      <<: *app-env
+      DATABASE_URL: postgres://recall_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: recall-server
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8093/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8093/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   lakehouse-sql-server:
-    # Phase 1 D4a: swapped from shared Phase-0 stub to real service
-    # (OTel + pgvector-aware SQL engine). Other services still stub.
-    build:
-      context: .
-      dockerfile: services/lakehouse-sql-server/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:latest
-    # Resource limits (P1-14): dev-sane caps for an app service.
+    image: ghcr.io/agentofreef/text2ontology-lakehouse-sql-server:${IMAGE_TAG:-latest}
     mem_limit: 512m
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8094"]
-    env_file:
-      - .env.shared
     environment:
-      DATABASE_URL: "${LAKEHOUSE_SQL_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "lakehouse-sql-server"
-
+      <<: *app-env
+      DATABASE_URL: postgres://lakehouse_sql_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: lakehouse-sql-server
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8094/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8094/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   mcp-tools-server:
-    # Phase 3 MCP: swapped stub → real service. External MCP tool gateway
-    # exposing lookup_od + execute_smartquery + recall_tokens to
-    # third-party consumers (Claude Code, operator scripts). Has its own
-    # bearer-token auth (MCP_API_KEY) distinct from INTERNAL_TOKEN.
-    # No direct DB access — proxies to backend-api + recall-server +
-    # lakehouse-sql-server via compose DNS.
-    build:
-      context: .
-      dockerfile: services/mcp-tools-server/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:latest
-    # Resource limits (P1-14): dev-sane caps for an app service.
+    image: ghcr.io/agentofreef/text2ontology-mcp-tools-server:${IMAGE_TAG:-latest}
     mem_limit: 512m
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8095"]
-    env_file:
-      - .env.shared
     environment:
-      # DB is for the mcp_api_key auth store only. Container must
-      # reach WSL-private Postgres through host-gateway.
-      DATABASE_URL: "${MCP_TOOLS_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "mcp-tools-server"
-      RECALL_SERVER_URL: "http://recall-server:8093"
-      LAKEHOUSE_SQL_URL: "http://lakehouse-sql-server:8094"
-      BACKEND_API_URL: "http://backend-api:8090"
-
+      <<: *app-env
+      DATABASE_URL: postgres://mcp_tools_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: mcp-tools-server
+      RECALL_SERVER_URL: http://recall-server:8093
+      LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
+      BACKEND_API_URL: http://backend-api:8090
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       recall-server:
         condition: service_healthy
       lakehouse-sql-server:
@@ -262,7 +206,7 @@ services:
       backend-api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8095/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8095/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -270,59 +214,41 @@ services:
     restart: unless-stopped
 
   collector-server:
-    # Phase 1: collector-server shell. Phase 2-4 will add ingest routes.
-    build:
-      context: .
-      dockerfile: services/collector-server/Dockerfile
-    image: ghcr.io/agentofreef/text2ontology-collector-server:latest
-    # Resource limits (P1-14): PBIX parse (pandas/pbixray) is the heaviest app
-    # workload, so allow a bit more memory than the other services.
+    image: ghcr.io/agentofreef/text2ontology-collector-server:${IMAGE_TAG:-latest}
     mem_limit: 1g
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
     command: ["-port", "8096"]
-    env_file:
-      - .env.shared
     environment:
-      DATABASE_URL: "${COLLECTOR_SERVER_DSN}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      OTEL_SERVICE_NAME: "collector-server"
-      PBIT_STAGING_ROOT: "/data/pbit-staging"
-      PBIX_SCRIPTS_DIR: "/app/scripts"
-      FILE_UPLOAD_ROOT: "/data/uploads"
+      <<: *app-env
+      DATABASE_URL: postgres://collector_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      OTEL_SERVICE_NAME: collector-server
+      PBIT_STAGING_ROOT: /data/pbit-staging
+      PBIX_SCRIPTS_DIR: /app/scripts
+      FILE_UPLOAD_ROOT: /data/uploads
     volumes:
-      - collector-staging:/data/pbit-staging
-      - collector-uploads:/data/uploads
-
+    - collector-staging:/data/pbit-staging
+    - collector-uploads:/data/uploads
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8096/healthz"]
+      test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8096/healthz?check=db"']
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
-  # NOTE: No `frontend` service — backend-api serves the static Next.js export
-  # via the -static flag (per plan OQ-1). Run: backend-api -static ./frontend/out
-
-  # ── Observability stack (P1-15) ─────────────────────────────────────────────
-  # otel-collector receives OTLP from all 6 services (they already point
-  # OTEL_EXPORTER_OTLP_ENDPOINT at otel-collector:4317), fans traces to Jaeger,
-  # and exposes a Prometheus scrape on :8889. Brought up ahead of the DB-role
-  # cutover (Wave 4) so that high-blast-radius wave is observable. Operator UIs
-  # bind to 127.0.0.1 only (gateway remains the sole public ingress).
+  # ── Observability (UIs bound to 127.0.0.1 only) ────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
-    # Resource limits (P1-14): modest caps for the observability sidecars.
     mem_limit: 256m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
-      - ./ops/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    - ./ops/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     depends_on:
       jaeger:
         condition: service_started
@@ -330,69 +256,99 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:latest
-    # Resource limits (P1-14): modest caps for the observability sidecars.
     mem_limit: 512m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
     environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+      COLLECTOR_OTLP_ENABLED: 'true'
     ports:
-      - "127.0.0.1:16686:16686"
+    - 127.0.0.1:16686:16686
     restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:latest
-    # Resource limits (P1-14): modest caps for the observability sidecars.
     mem_limit: 512m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
-      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./ops/alerts:/etc/prometheus/alerts:ro
+    - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - ./ops/alerts:/etc/prometheus/alerts:ro
     ports:
-      - "127.0.0.1:9090:9090"
+    - 127.0.0.1:9090:9090
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    mem_limit: 128m
+    cpus: '0.25'
+    pids_limit: 128
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+    - ./ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+    - 127.0.0.1:9093:9093
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
-    # Resource limits (P1-14): modest caps for the observability sidecars.
     mem_limit: 512m
-    cpus: "0.5"
+    cpus: '0.5'
     pids_limit: 256
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-    volumes:
-      - grafana-data:/var/lib/grafana
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      # Land on the SLO dashboard right after login instead of an empty home.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/dashboards/lakehouse.json
     ports:
-      - "127.0.0.1:3000:3000"
+    - 127.0.0.1:3000:3000
+    volumes:
+    - grafana-data:/var/lib/grafana
+    - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+    - ./ops/grafana/dashboards-provisioned:/etc/dashboards:ro
     depends_on:
       prometheus:
         condition: service_started
     restart: unless-stopped
 
-  # ── Local Postgres (pgvector) ───────────────────────────────────────────────
-  # Self-contained: schema.sql is auto-applied on first start via
-  # /docker-entrypoint-initdb.d. No manual psql step required.
+  # ── Database + one-shot migration runner ───────────────────────────────────
+  db-migrate:
+    # One-shot: brings the DB (fresh OR existing) up to the current schema +
+    # per-service least-privilege roles + role passwords, then applies
+    # docs/migrations/*.sql exactly once each. App services wait for it
+    # (depends_on: service_completed_successfully).
+    image: pgvector/pgvector:pg16
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 256
+    environment:
+      DATABASE_URL: postgres://lakehouse2ontology-enterprise:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}
+    entrypoint: ["sh", "/run-migrations.sh"]
+    volumes:
+    - ./scripts/run-migrations.sh:/run-migrations.sh:ro
+    - ./docs/schema/schema.sql:/migrations/schema.sql:ro
+    - ./ops/db-roles.sql:/migrations/db-roles.sql:ro
+    - ./docs/migrations:/migrations/versions:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   postgres:
     image: pgvector/pgvector:pg16
-    # Resource limits (P1-14): Postgres gets the largest memory budget since it
-    # backs every service; pids a touch higher for connection-heavy workloads.
     mem_limit: 1g
-    cpus: "1.0"
+    cpus: '1.0'
     pids_limit: 512
+    # max_connections raised from the default 100 to cover the 6-service pool
+    # budget (6 × srvkit MaxOpen 20 = 120) plus headroom for psql/maintenance.
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
     environment:
       POSTGRES_DB: lakehouse2ontology-enterprise
       POSTGRES_USER: lakehouse2ontology-enterprise
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-    ports:
-      - "5438:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      # Auto-init: schema.sql runs once, when the volume is empty.
-      - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lakehouse2ontology-enterprise"]
       interval: 5s
