@@ -176,13 +176,18 @@ func runReachabilityJudge(
 
 // buildVerdictFromLLMHints turns the LLM's per-item judgement into a
 // ReachabilityVerdict. The LLM owns the shape-aware coverage decision; this
-// function adds two deterministic guards:
+// function decides feasibility with a metric-only gate plus deterministic
+// guards:
 //
 //   - covered_by names are sanitised against the real Intent name set, so a
-//     hallucinated intent name cannot prop up a feasible verdict.
-//   - if after sanitisation a dimension/filter has covered=true but no real
-//     covered_by, it falls back to declarative name-match against the
-//     intent parameter table; if that also fails the item is forced uncovered.
+//     hallucinated intent name cannot prop up a coverage claim.
+//   - feasibility is refused ONLY by (a) a hole-2 trap — a cited real Intent
+//     whose parameter shape cannot serve the requirement — or (b) the
+//     metric-only gate: recall surfaced no Intent at all. A dimension/filter
+//     with no declared parameter is shown as uncovered for transparency but
+//     does NOT gate: the ReAct loop resolves dimensions/filters via OD
+//     property recall + SmartQuery (groupBy/filter + ont_link joins), so
+//     refusing on their absence only produced false negatives.
 func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap) mission.ReachabilityVerdict {
 	realIntentNames := map[string]bool{}
 	for _, mi := range intents {
@@ -197,6 +202,19 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 	specs := buildIntentSpecs(intents) // for fallback declarative match
 
 	v := mission.ReachabilityVerdict{Feasible: true}
+
+	// blockers collects the ONLY conditions that make a turn infeasible:
+	//   (1) a hole-2 trap — a cited real Intent declares a parameter whose
+	//       shape cannot serve the requirement (the loop would misuse it); and
+	//   (2) the metric-only gate below — recall surfaced no Intent at all.
+	// A dimension/filter that simply has no declared parameter is NOT a
+	// blocker: dimensions/filters are resolved downstream by the ReAct loop
+	// (OD property recall + SmartQuery groupBy/filter + ont_link joins), not by
+	// intent-parameter coverage. Gating on their absence produced false
+	// negatives — e.g. a recalled metric whose year / product filter wasn't
+	// declared as a parameter was wrongly refused.
+	var blockers []string
+
 	for _, h := range hints {
 		rc := mission.RequirementCoverage{
 			Dimension: h.Name,
@@ -223,43 +241,51 @@ func buildVerdictFromLLMHints(hints []llmRequirementHint, intents []recall.Metri
 		llmSaysCovered := h.Covered != nil && *h.Covered
 		switch {
 		case llmSaysCovered && len(realCoveredBy) > 0:
-			// Hole-2 guard: when shape is a registered vocab name, the cited
-			// Intents must ALSO declare a parameter with the same
-			// shapeCapability. Without this, "real intent name + wrong shape"
-			// slips through — which is the exact bug class this gate exists
-			// to catch. Skipped (legacy behaviour) when shape is empty / not
-			// in the vocab, so an unpopulated vocab never causes regression.
+			// Hole-2 trap (the SOLE dimension/filter blocker): when shape is a
+			// registered vocab name, the cited Intents must ALSO declare a
+			// parameter with the same shapeCapability. A real intent name with
+			// a wrong-shape parameter is a concrete mis-fit the loop would
+			// misuse — refuse it. Skipped (legacy) when shape is empty / not in
+			// the vocab, so an unpopulated vocab never gates.
 			if vocabKnown[h.Shape] && !anyCitedIntentServesShape(realCoveredBy, h.Shape, intents, satisfies) {
 				rc.MissingNote = fmt.Sprintf(
 					"已授权 Intent (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
 					strings.Join(realCoveredBy, "、"), h.Shape)
-				v.Feasible = false
-				break
+				blockers = append(blockers, fmt.Sprintf("「%s」需要 %s 形态，但已召回 Intent 的参数无法服务", h.Name, h.Shape))
+				v.Requirements = append(v.Requirements, rc)
+				continue
 			}
 			rc.Covered = true
 			rc.CoveredBy = realCoveredBy
 		case llmSaysCovered && len(realCoveredBy) == 0:
-			// LLM said covered but cited no real intent — fall back to declarative
-			// name match. If even that fails, force uncovered.
+			// LLM said covered but cited no real intent — fall back to
+			// declarative name match. If that also fails, mark uncovered for
+			// display but DO NOT gate: the loop resolves it downstream.
 			fallback := mission.CoveringIntents(mission.DecompItem{Name: h.Name, Kind: h.Kind}, specs)
 			if len(fallback) > 0 {
 				rc.Covered = true
 				rc.CoveredBy = fallback
 			} else {
-				rc.MissingNote = "LLM 标可达但未指明真实 Intent；按参数表也无匹配"
-				v.Feasible = false
+				rc.MissingNote = "无已声明参数显式覆盖；将在执行阶段按 OD 属性 / SmartQuery 解析"
 			}
-		default: // LLM says uncovered (or didn't decide).
+		default: // LLM says uncovered (or didn't decide) — display only, no gate.
 			if h.UncoveredReason != "" {
 				rc.MissingNote = h.UncoveredReason
 			} else {
-				rc.MissingNote = fmt.Sprintf("没有已授权 Intent 以「%s」形态覆盖「%s」", h.Shape, h.Name)
+				rc.MissingNote = fmt.Sprintf("无已授权 Intent 以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
 			}
-			v.Feasible = false
 		}
 		v.Requirements = append(v.Requirements, rc)
 	}
-	v.Reason = buildVerdictReason(v)
+
+	// Metric-only gate: refuse the turn only when recall surfaced NO Intent at
+	// all — there is nothing to measure. (See blockers comment above.)
+	if len(intents) == 0 {
+		blockers = append(blockers, "未召回到任何可用于度量的 Intent —— 当前本体没有与该指标相关的已授权口径")
+	}
+
+	v.Feasible = len(blockers) == 0
+	v.Reason = buildVerdictReason(v, blockers)
 	return v
 }
 
@@ -309,12 +335,17 @@ func anyCitedIntentServesShape(cited []string, required string, intents []recall
 // finalised requirements list. Feasible: name the dimensions covered.
 // Infeasible: name the uncovered ones AND surface the LLM's shape reason
 // (since the failure is usually about shape mismatch, not absence).
-func buildVerdictReason(v mission.ReachabilityVerdict) string {
-	type un struct {
-		name, shape, why string
+func buildVerdictReason(v mission.ReachabilityVerdict, blockers []string) string {
+	if !v.Feasible {
+		if len(blockers) == 0 {
+			return "不可行。"
+		}
+		return "不可行：" + strings.Join(blockers, "；") + "。"
 	}
-	var uncovered []un
-	var covered []string
+	// Feasible: name the covered dimensions and flag any that will be resolved
+	// at execution time (no declared parameter, but the ReAct loop handles them
+	// via OD property recall + SmartQuery).
+	var covered, willResolve []string
 	for _, r := range v.Requirements {
 		if r.Kind != "dimension" && r.Kind != "filter" {
 			continue
@@ -322,27 +353,24 @@ func buildVerdictReason(v mission.ReachabilityVerdict) string {
 		if r.Covered {
 			covered = append(covered, r.Dimension)
 		} else {
-			uncovered = append(uncovered, un{name: r.Dimension, shape: r.Shape, why: r.MissingNote})
+			willResolve = append(willResolve, r.Dimension)
 		}
 	}
-	if v.Feasible {
-		if len(covered) == 0 {
-			return "可行：问题不涉及需要授权的筛选维度。"
-		}
-		return fmt.Sprintf("可行：所需维度（%s）均被已授权 Intent 以匹配形态覆盖。", strings.Join(collectNames(covered), "、"))
+	if len(covered) == 0 && len(willResolve) == 0 {
+		return "可行：问题不涉及需要授权的筛选维度。"
 	}
-	var parts []string
-	for _, u := range uncovered {
-		s := fmt.Sprintf("「%s」", u.name)
-		if u.shape != "" {
-			s += fmt.Sprintf("（需要 %s 形态）", u.shape)
-		}
-		if u.why != "" {
-			s += "：" + u.why
-		}
-		parts = append(parts, s)
+	var sb strings.Builder
+	sb.WriteString("可行")
+	if len(covered) > 0 {
+		sb.WriteString(fmt.Sprintf("：维度（%s）已被已授权 Intent 覆盖", strings.Join(collectNames(covered), "、")))
+	} else {
+		sb.WriteString("：已召回相关 Intent")
 	}
-	return "不可行：" + strings.Join(parts, "；") + "。"
+	if len(willResolve) > 0 {
+		sb.WriteString(fmt.Sprintf("；筛选/维度（%s）将在执行阶段按 OD 属性 / SmartQuery 解析", strings.Join(collectNames(willResolve), "、")))
+	}
+	sb.WriteString("。")
+	return sb.String()
 }
 
 // collectNames dedupes a string slice while preserving order.

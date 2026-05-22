@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -36,6 +37,25 @@ import (
 
 	. "github.com/lakehouse2ontology/httputil"
 )
+
+// reflectEnabled / reRecallEnabled are debug A/B kill-switches (debug-infra ⑤).
+// Both default ON — behavior is unchanged unless explicitly disabled. Set
+// USE_REFLECT / USE_RE_RECALL to a falsey value (0/false/off/no) to remove that
+// mechanism, so its value (round count / tokens / answer correctness) can be
+// measured by re-running the same question with it off.
+var reflectEnabled = envFlagDefaultOn("USE_REFLECT")
+var reRecallEnabled = envFlagDefaultOn("USE_RE_RECALL")
+
+// envFlagDefaultOn returns false only for an explicit falsey value; unset or
+// anything else is treated as enabled.
+func envFlagDefaultOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
 
 // reflectToolDescription is shown to the LLM. We do NOT need it called by
 // the LLM in the happy path (auto-invoke handles that), but the description
@@ -54,7 +74,14 @@ type ReflectVerdict struct {
 	Verdict           string   `json:"verdict"`            // "match" | "mismatch" | "uncertain"
 	Reasoning         string   `json:"reasoning"`
 	MissingDimensions []string `json:"missing_dimensions"` // hints to feed re_recall
-	SuggestedAction   string   `json:"suggested_action"`   // "answer" | "re_recall" | "lookup_then_smartquery"
+	SuggestedAction   string   `json:"suggested_action"`   // "answer" | "re_recall" | "smartquery"
+	// Source/RuleName are debug provenance (debug-infra ②): which path
+	// produced this verdict — "rule" (deterministic ruleBasedVerdict, RuleName
+	// names which rule), "llm" (LLM fallback), "plan" (plan-mode short-circuit),
+	// or "fallback" (LLM down + rule undecided). Lets the loop-trace explain
+	// flip-flops (e.g. an LLM reflect oscillating across near-identical specs).
+	Source   string `json:"source,omitempty"`
+	RuleName string `json:"rule_name,omitempty"`
 }
 
 // runReflectTool is the dispatchTool handler for reflect_query_result. Args:
@@ -84,6 +111,7 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 			"reasoning":          "userQuestion 为空，无法评估",
 			"missing_dimensions": []string{},
 			"suggested_action":   "answer",
+			"source":             "short_circuit",
 		}
 	}
 	if resp == nil {
@@ -92,6 +120,7 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 			"reasoning":          "smartqueryResp 为空，无 result 可比",
 			"missing_dimensions": []string{},
 			"suggested_action":   "answer",
+			"source":             "short_circuit",
 		}
 	}
 
@@ -111,6 +140,7 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 				"reasoning":          "composite Intent (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
 				"missing_dimensions": []string{},
 				"suggested_action":   "answer",
+				"source":             "plan",
 			}
 		}
 	}
@@ -121,6 +151,8 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 		"reasoning":          v.Reasoning,
 		"missing_dimensions": v.MissingDimensions,
 		"suggested_action":   v.SuggestedAction,
+		"source":             v.Source,    // debug-infra ②: "rule" | "llm" | "fallback"
+		"rule_name":          v.RuleName,  // debug-infra ②: which rule fired (when source=rule)
 	}
 }
 
@@ -144,6 +176,7 @@ func evaluateShape(db *sql.DB, userQuestion string, smartqueryArgs map[string]in
 	// "per-X without groupBy" disaster. We still ALSO call the LLM for
 	// nuanced cases unless the rule is confident.
 	if v, confident := ruleBasedVerdict(userQuestion, rowCount, groupBy, resp); confident {
+		v.Source = "rule"
 		return v
 	}
 
@@ -162,10 +195,13 @@ func evaluateShape(db *sql.DB, userQuestion string, smartqueryArgs map[string]in
 				Reasoning:         "LLM 不可用且 rule check 不能确定 shape；按现有结果作答",
 				MissingDimensions: hints,
 				SuggestedAction:   "answer",
+				Source:            "fallback",
 			}
 		}
+		v.Source = "rule"
 		return v
 	}
+	llmVerdict.Source = "llm"
 	return llmVerdict
 }
 
@@ -297,13 +333,14 @@ func ruleBasedVerdict(userQuestion string, rowCount int, groupBy []string, resp 
 			Reasoning:         reason,
 			MissingDimensions: hints,
 			SuggestedAction:   "re_recall",
+			RuleName:          "breakdown_lowrows",
 		}, true
 	}
 
 	// Dimension mismatch: user explicitly asked for breakdown by dim X
 	// (e.g. "哪些客户" / "每个员工") but the result has no column / groupBy
-	// corresponding to X. Confident mismatch — points to compose_query so
-	// the LLM can build {odName, groupBy:[X]} with cross-OD joins.
+	// corresponding to X. Confident mismatch — points to smartquery's compose
+	// mode (no intent) so the LLM can build {odName, groupBy:[X]} with cross-OD joins.
 	//
 	// This catches the case where the strict-mode intent fired with the
 	// wrong dimension (e.g. asked "哪些客户" got Sales.ByEmployee → 9 rows
@@ -329,7 +366,8 @@ func ruleBasedVerdict(userQuestion string, rowCount int, groupBy []string, resp 
 					"用户要求按 %q 维度展开（如 %q），但结果列 %v 不含对应字段",
 					requestedDim, requestedDim, columns),
 				MissingDimensions: hints,
-				SuggestedAction:   "compose_query",
+				SuggestedAction:   "smartquery",
+				RuleName:          "dim_mismatch",
 			}, true
 		}
 	}
@@ -349,7 +387,8 @@ func ruleBasedVerdict(userQuestion string, rowCount int, groupBy []string, resp 
 				Verdict:           "mismatch",
 				Reasoning:         fmt.Sprintf("用户提到了特定过滤值 %q（如「X 类别下」/「X 客户」/「X 国家」），但本次查询没有应用任何 filter", filterValMention),
 				MissingDimensions: hints,
-				SuggestedAction:   "compose_query",
+				SuggestedAction:   "smartquery",
+				RuleName:          "filter_value_missing",
 			}, true
 		}
 	}
@@ -365,6 +404,7 @@ func ruleBasedVerdict(userQuestion string, rowCount int, groupBy []string, resp 
 			Reasoning:         "无分组/排名意图且结果为单行聚合 → 视为匹配",
 			MissingDimensions: []string{},
 			SuggestedAction:   "answer",
+			RuleName:          "aggregate_single_row",
 		}, true
 	}
 
@@ -813,6 +853,21 @@ func autoInvokeReflect(
 		}
 	}
 
+	// Decouple synthesize from reflect: ALWAYS machine-compose a successful
+	// result up front so the final answer carries real numbers. synthesize used
+	// to be gated behind reflect verdict=match — a never-matching (flaky LLM)
+	// reflect starved it, and the agent then hand-wrote `「t3...」` symbolic
+	// templates as the final answer. Composing here means the loop always has a
+	// clean "echo this" answer to fall back on, regardless of verdict (and
+	// regardless of whether reflect runs at all).
+	synthMsg := autoInvokeSynthesize(dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, smartqueryResult, smartqueryArgs, synthFailCount, time.Now())
+
+	// reflect is advisory-only now, and skippable for A/B (debug-infra ⑤).
+	// When disabled we still synthesized above, so answers stay clean.
+	if !reflectEnabled {
+		return synthMsg
+	}
+
 	reflectArgs := map[string]interface{}{
 		"userQuestion":   userQuestion,
 		"smartqueryArgs": smartqueryArgs,
@@ -830,9 +885,8 @@ func autoInvokeReflect(
 	suggestedAction, _ := reflectResult["suggested_action"].(string)
 	missing := stringSliceFromAny(reflectResult["missing_dimensions"])
 
-	switch verdict {
-	case "mismatch":
-		// Drop synthesize. Tell the main LLM what's wrong + how to fix it.
+	if verdict == "mismatch" {
+		// Advisory only — the synthesized answer above is the clean fallback.
 		var hintsHint string
 		if len(missing) > 0 {
 			quoted := make([]string, len(missing))
@@ -844,30 +898,30 @@ func autoInvokeReflect(
 		var actionHint string
 		switch suggestedAction {
 		case "re_recall":
-			actionHint = "\n请调用 re_recall(hints=[…]) 重启 recall 把缺失维度作为 token 喂回。"
+			actionHint = "\n可调用 re_recall(hints=[…]) 把缺失维度作为 token 喂回，或不带 intent 重新 smartquery 自由组合。"
+		case "smartquery":
+			actionHint = "\n可不带 intent 重新 smartquery（自由组合 odName+metric+filters+groupBy）补齐缺失维度。"
 		case "lookup_then_smartquery":
-			actionHint = "\n请调用 lookup 找回相关 OD/property，再以正确 intent 重新 smartquery。"
+			actionHint = "\n可调用 lookup 找回相关 OD/property，再重新 smartquery。"
 		default:
-			actionHint = "\n请用 re_recall 或 lookup 探查后再 smartquery。"
+			actionHint = "\n可 re_recall / lookup 探查后再 smartquery。"
 		}
-		return fmt.Sprintf("\n\n⚠️ reflect verdict: mismatch — %s%s%s\n请补救后再答用户。最多再尝试 2 轮。", reasoning, hintsHint, actionHint)
-
-	case "match":
-		// Happy path: chain into synthesize like before for the polished
-		// prose answer. Reuse autoInvokeSynthesize's body verbatim — same
-		// SSE/step semantics as legacy.
-		synthMsg := autoInvokeSynthesize(dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, smartqueryResult, smartqueryArgs, synthFailCount, time.Now())
-		return synthMsg
-
-	default: // "uncertain"
-		// Don't block — prefer answering with what we have. Reuse the synth
-		// path so prose composition still happens.
-		synthMsg := autoInvokeSynthesize(dispatchTool, sendSSEFull, saveRoundStep, sentMsgsSnapshot, userQuestion, smartqueryResult, smartqueryArgs, synthFailCount, time.Now())
-		if synthMsg == "" {
-			return "\n\nℹ️ reflect verdict: uncertain — 请直接回答用户。"
+		advisory := fmt.Sprintf("\n\n⚠️ reflect verdict: mismatch — %s%s%s\n最多再尝试 2 轮改进；若不再改进，**直接 echo 上面已合成的答复，勿自行手写表格/占位符**。", reasoning, hintsHint, actionHint)
+		if synthMsg != "" {
+			return synthMsg + advisory
 		}
+		// No synthesized answer (synth gate failed) — advisory only.
+		return advisory
+	}
+
+	// match / uncertain — the synthesized answer (composed above) is the response.
+	if synthMsg != "" {
 		return synthMsg
 	}
+	if verdict == "uncertain" {
+		return "\n\nℹ️ reflect verdict: uncertain — 请直接回答用户。"
+	}
+	return ""
 }
 
 // stringSliceFromAny is provided by handler_lh_testing_export.go.

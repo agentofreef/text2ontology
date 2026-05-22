@@ -50,26 +50,10 @@ import (
 	. "github.com/lakehouse2ontology/httputil"
 )
 
-const composeQueryToolDescription = `自由组合一次查询（catalog 受限版本）。
-当 strict 模式 smartquery 没有完美匹配的 intent，且 reflect 已经判定 verdict=mismatch 时使用。
-你不能写 SQL — 只能从已有 OD 的 property / 聚合函数白名单里挑组合。
-
-入参：
-  odName   string   主 OD 名（必填，**单个**）
-  metric   string   聚合表达式，例 "sum(NetAmount)" / "count(id)" / "avg(UnitPrice)"
-                    支持函数：sum / avg / min / max / count / distinct_count
-                    ⚠ count 必须带 property 名（例 count(id)）；count(*) 不被引擎接受
-                    （会造成 JOIN 双重计数，引擎选择强制显式 count(<id 列>) 而非 *）
-  filters  array    过滤项 [{property, op, value}]，每个 property 必须是 odName 的一个 property
-                    op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between
-  groupBy  array    分组列 ["property1","property2"]，必须是 odName 的 property
-  orderBy  array    [{label,dir}] 可选；label 是结果列名（如 "Total_NetAmount"），dir = "ASC"|"DESC"
-  limit    int      可选，>=1
-
-返回：和 smartquery 一致的 result（execution_status / generated_sql / total_rows / execution_result / 等）。
-失败时 error.code = COMPOSE_FAILED + 详细原因（哪个 token 不存在 / 哪个 op 不允许）。
-
-MVP 限制：暂不支持跨 OD JOIN（v2 才加 1 跳）。所有 filter/groupBy 必须是主 OD 已有的 property。`
+// NOTE: the LLM-facing description for composition lives in
+// smartqueryToolDescription (Mode B) — compose is now the no-intent branch of
+// the unified `smartquery` tool, not a separate tool. runComposeQueryTool below
+// remains the implementation that path delegates to.
 
 // metricExprRE matches "func(arg)" where arg is a property name.
 // Examples: sum(NetAmount), count(id), avg(UnitPrice), distinct_count(CustomerID).

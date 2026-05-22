@@ -108,8 +108,8 @@ func buildODCatalogBlock(ctx context.Context, db *sql.DB, projectID string) stri
 	}
 
 	var b strings.Builder
-	b.WriteString("## 📋 OD Catalog（compose_query 可用 token）\n\n")
-	b.WriteString("调用 compose_query 时 odName / metric arg / filters[].property / groupBy[] 都必须从下表选。\n")
+	b.WriteString("## 📋 OD Catalog（smartquery 自由组合模式可用 token）\n\n")
+	b.WriteString("调用 smartquery 自由组合模式（不带 intent）时 odName / metric arg / filters[].property / groupBy[] 都必须从下表选。\n")
 	b.WriteString("**跨 OD 引用语法**：filter/groupBy 里写 `OD.Property` 形式（如 `CUSTOMER.Country` / `PRODUCT.CategoryName`），引擎会自动按下面列出的链路（→）做 JOIN。primary `odName` 仍只填一个主 OD。\n\n")
 	for _, r := range ods {
 		propPart := "（无 property — 先 inspect）"

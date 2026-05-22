@@ -30,14 +30,14 @@ const (
 	startAnalysisPlanToolDescription = `进入「分析计划」模式。
 
 当 context 顶部出现「📊 分析 Skill」块、且用户问的是"影响 / 为什么 / 如何 / 综合评估"这类需要多维度展开的问题时调用本工具。
-若用户只想"快查一个数"，不要进入分析计划，直接用 smartquery / compose_query。
+若用户只想"快查一个数"，不要进入分析计划，直接用 smartquery。
 
 调用后服务端会基于该分析模式卡片建立一份「特征清单」(feature list)，并激活第一个特征。
 随后你按 WIP=1 规则逐个特征推进：每个特征用一个数据工具拿到结果 → 调用 verify_feature 上报 → 服务端激活下一个。`
 
 	verifyFeatureToolDescription = `上报当前 active 特征的验证结论。
 
-在你用 smartquery / compose_query / lookup 等工具为某个特征拿到数据之后调用。
+在你用 smartquery / lookup 等工具为某个特征拿到数据之后调用。
 verdict：
   pass    — 数据满足该特征的验证条件
   fail    — 不满足；服务端会退回让你换工具/参数重试（预算 2 次，耗尽自动转 blocked）
@@ -98,7 +98,7 @@ func activeFeatureBlock(l *analysis.FeatureLedger) M {
 						ToolHints: r.ToolHints,
 					},
 					"instruction": fmt.Sprintf(
-						"特征 %q 仍在进行中。用一个工具（smartquery / compose_query / query_dag / lookup）拿到数据，再调用 verify_feature 上报结论。",
+						"特征 %q 仍在进行中。用一个工具（smartquery / query_dag / lookup）拿到数据，再调用 verify_feature 上报结论。",
 						r.ID),
 				}
 			}

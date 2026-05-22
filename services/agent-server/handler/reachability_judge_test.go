@@ -226,3 +226,48 @@ func TestBuildVerdictFromLLMHints_SubsumptionAccepts(t *testing.T) {
 		t.Fatalf("expected covered requirement, got %+v", verdict.Requirements)
 	}
 }
+
+// TestBuildVerdictFromLLMHints_UndeclaredFilterDoesNotGate verifies the
+// metric-only gate: when an Intent IS recalled but a filter/dimension has no
+// declared parameter covering it, the verdict stays feasible (the ReAct loop
+// resolves dimensions/filters via OD property recall + SmartQuery). Gating on
+// the absence of a declared parameter was the false-negative this pass fixes —
+// e.g. "X11产品early order年度趋势": the metric (early order) is recalled, but
+// the X11 filter and 年度 dimension aren't intent parameters, yet the question
+// is answerable downstream.
+func TestBuildVerdictFromLLMHints_UndeclaredFilterDoesNotGate(t *testing.T) {
+	intents := []recall.MetricIntent{{Name: "ORDER.ORDER_QUANTITY"}} // no parameters declared
+	hints := []llmRequirementHint{
+		{Kind: "metric", Name: "early order"},
+		{Kind: "filter", Name: "X11", Shape: "等值", Covered: boolPtr(false), UncoveredReason: "参数表中无任何Intent"},
+		{Kind: "dimension", Name: "年度", Shape: "分组", Covered: boolPtr(false)},
+	}
+	verdict := buildVerdictFromLLMHints(hints, intents, nil)
+	if !verdict.Feasible {
+		t.Fatalf("metric-only gate regressed: an undeclared filter/dimension must not gate when an Intent was recalled (%+v)", verdict)
+	}
+	// The uncovered filter/dimension are still surfaced for transparency.
+	var sawUncovered bool
+	for _, r := range verdict.Requirements {
+		if (r.Kind == "filter" || r.Kind == "dimension") && !r.Covered {
+			sawUncovered = true
+		}
+	}
+	if !sawUncovered {
+		t.Fatalf("expected the undeclared filter/dimension to be shown as uncovered, got %+v", verdict.Requirements)
+	}
+}
+
+// TestBuildVerdictFromLLMHints_NoIntentsInfeasible verifies the metric-only
+// gate fires when recall surfaced NO Intent at all — there is nothing to
+// measure, so the turn is correctly refused.
+func TestBuildVerdictFromLLMHints_NoIntentsInfeasible(t *testing.T) {
+	hints := []llmRequirementHint{
+		{Kind: "metric", Name: "early order"},
+		{Kind: "filter", Name: "X11", Covered: boolPtr(false)},
+	}
+	verdict := buildVerdictFromLLMHints(hints, nil, nil) // no intents recalled
+	if verdict.Feasible {
+		t.Fatalf("expected infeasible when no Intent was recalled, got %+v", verdict)
+	}
+}
