@@ -481,6 +481,22 @@ func HandlePbixExtractJob(ctx context.Context, db *sql.DB, j *job.Job, rep *job.
 		`, finalSchema, dsID); err != nil {
 			return fmt.Errorf("mark data_source ready: %w", err)
 		}
+
+		// Point the project at the lakehouse schema so SmartQuery, the
+		// lakehouse-sql UI, and the builder agent recognise the data as
+		// configured — without this the project reads as empty even though the
+		// tables + ontology landed. finalSchema is deterministic per project
+		// (shared across all of its data sources), so this is idempotent under
+		// multi-source coexistence; preserve an existing *-lakehouse label.
+		if _, err := db.ExecContext(ctx, `
+			UPDATE project
+			SET lakehouse_schema = $1,
+			    source_type = CASE WHEN source_type LIKE '%-lakehouse' THEN source_type ELSE 'pbix-lakehouse' END,
+			    updated_at = now()
+			WHERE id = $2
+		`, finalSchema, projectID); err != nil {
+			return fmt.Errorf("set project.lakehouse_schema: %w", err)
+		}
 		return nil
 	})
 	if lockErr != nil {

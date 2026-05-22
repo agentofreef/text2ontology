@@ -123,7 +123,8 @@
     "delete_project_confirm": "确定要删除项目 \"{name}\" 吗？",
     "new_project": "新建项目",
     "preferences": "偏好设置",
-    "user_management": "用户管理"
+    "user_management": "用户管理",
+    "ontology": "本体"
   },
   "ui": {
     "upload_success": "上传成功：{detail}",
@@ -878,6 +879,32 @@
       "prop_link_values_empty": "无属性链接值",
       "prop_alias_placeholder": "输入别名，回车添加...",
       "prop_alias_add_btn": "添加"
+    },
+    "search_placeholder": "搜索对象…",
+    "more_actions": "更多操作",
+    "empty_list": "暂无对象",
+    "batch_selected": "已选 {count} 项",
+    "batch_mark": "标记 / 激活",
+    "batch_unmark": "取消标记 / 停用",
+    "batch_delete": "批量删除",
+    "select_all": "全选",
+    "clear_selection": "清除",
+    "inspector": {
+      "title": "检视器",
+      "edit_detail": "编辑详情",
+      "go_query": "去 Lakehouse SQL 查询",
+      "delete": "删除",
+      "mark": "已标记",
+      "unmark": "未标记",
+      "description": "描述",
+      "properties": "属性",
+      "links": "关系",
+      "semantic_sql": "语义 SQL",
+      "edge_from": "从",
+      "edge_to": "到",
+      "delete_link": "删除关系",
+      "empty": "请选择一个对象或关系",
+      "cardinality": "基数"
     }
   },
   "intent": {
@@ -1834,8 +1861,8 @@
         "postgres_desc": "连接外部 Postgres，按表同步到湖仓",
         "sqlite_title": "SQLite 文件",
         "sqlite_desc": "上传本地 .sqlite / .db 文件，一次性导入",
-        "pbi_title": "Power BI (.pbit)",
-        "pbi_desc": "上传 .pbit 文件解析 Power BI 数据模型",
+        "pbi_title": "Power BI (.pbit / .pbix)",
+        "pbi_desc": "上传 .pbit 模板或 .pbix 文件，解析 Power BI 数据模型",
         "file_title": "Excel / CSV 文件",
         "file_desc": "上传本地文件或填写 URL 拉取远端数据",
         "file": {
@@ -1899,15 +1926,15 @@
           "create_and_continue": "创建源并继续"
         },
         "pbi": {
-          "invalid_ext": "仅支持 .pbit 文件",
-          "select_file": "请选择 .pbit 文件",
+          "invalid_ext": "仅支持 .pbit 和 .pbix 文件",
+          "select_file": "请选择 .pbit 或 .pbix 文件",
           "upload_failed": "上传失败",
           "back": "返回",
           "add_source": "添加数据源",
           "label_optional": "标签（可选）",
           "label_placeholder": "便于识别的名称",
-          "drop_hint": "拖拽 .pbit 文件到此处，或点击选择",
-          "supported_formats": "仅支持 Power BI Template (.pbit)",
+          "drop_hint": "拖拽 .pbit 或 .pbix 文件到此处，或点击选择",
+          "supported_formats": "支持 Power BI Template (.pbit) 与 Power BI Desktop (.pbix)",
           "uploading": "上传中…",
           "upload_parse": "上传并解析"
         },
@@ -1978,7 +2005,13 @@
     "syncing_btn": "后台导入中…",
     "import_tables": "导入 {count} 张表",
     "syncing_tooltip": "后台正在导入数据，请稍候（任务中心可查看进度）",
-    "no_tables_detected": "未检测到数据表"
+    "no_tables_detected": "未检测到数据表",
+    "imported_title": "数据源已导入",
+    "imported_hint": "该 Power BI (.pbix) 文件已解码并直接载入项目湖仓，无需确认步骤。下列表格可直接查询。",
+    "imported_tables": "已导入的表",
+    "imported_ok": "已成功导入 {count} 张表到湖仓",
+    "view_in_lakehouse": "前往湖仓对象",
+    "view_in_sql": "打开 SQL 控制台"
   },
   "setup_wizard": {
     "init_project": "初始化新项目",
@@ -1989,8 +2022,8 @@
     "source_type": "数据源类型",
     "postgres_title": "PostgreSQL 数据库",
     "postgres_desc": "连接外部 Postgres，按表同步到湖仓",
-    "pbi_title": "Power BI (.pbit)",
-    "pbi_desc": "上传 .pbit 文件解析 Power BI 数据模型",
+    "pbi_title": "Power BI (.pbit / .pbix)",
+    "pbi_desc": "上传 .pbit 模板或 .pbix 文件，解析 Power BI 数据模型",
     "file_title": "Excel / CSV 文件",
     "file_desc": "上传本地文件或填写 URL 拉取远端数据",
     "create_failed": "创建项目失败，请重试",

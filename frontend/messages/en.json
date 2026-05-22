@@ -123,7 +123,8 @@
     "delete_project_confirm": "Delete project \"{name}\"?",
     "new_project": "New project",
     "preferences": "Preferences",
-    "user_management": "User Management"
+    "user_management": "User Management",
+    "ontology": "Ontology"
   },
   "ui": {
     "upload_success": "Upload succeeded: {detail}",
@@ -878,6 +879,32 @@
       "prop_link_values_empty": "No property link values",
       "prop_alias_placeholder": "Enter alias, press Enter to add...",
       "prop_alias_add_btn": "Add"
+    },
+    "search_placeholder": "Search objects…",
+    "more_actions": "More actions",
+    "empty_list": "No objects",
+    "batch_selected": "{count} selected",
+    "batch_mark": "Mark / Activate",
+    "batch_unmark": "Unmark / Deactivate",
+    "batch_delete": "Delete",
+    "select_all": "Select all",
+    "clear_selection": "Clear",
+    "inspector": {
+      "title": "Inspector",
+      "edit_detail": "Edit detail",
+      "go_query": "Query in Lakehouse SQL",
+      "delete": "Delete",
+      "mark": "Marked",
+      "unmark": "Unmarked",
+      "description": "Description",
+      "properties": "Properties",
+      "links": "Links",
+      "semantic_sql": "Semantic SQL",
+      "edge_from": "From",
+      "edge_to": "To",
+      "delete_link": "Delete relationship",
+      "empty": "Select an object or relationship",
+      "cardinality": "Cardinality"
     }
   },
   "intent": {
@@ -1834,8 +1861,8 @@
         "postgres_desc": "Connect to an external Postgres and sync tables into the Lakehouse",
         "sqlite_title": "SQLite File",
         "sqlite_desc": "Upload a local .sqlite / .db file for one-shot import",
-        "pbi_title": "Power BI (.pbit)",
-        "pbi_desc": "Upload a .pbit file to parse the Power BI data model",
+        "pbi_title": "Power BI (.pbit / .pbix)",
+        "pbi_desc": "Upload a .pbit template or .pbix file to parse the Power BI data model",
         "file_title": "Excel / CSV File",
         "file_desc": "Upload a local file or provide a URL to pull remote data",
         "file": {
@@ -1899,15 +1926,15 @@
           "create_and_continue": "Create source and continue"
         },
         "pbi": {
-          "invalid_ext": "Only .pbit files are supported",
-          "select_file": "Please select a .pbit file",
+          "invalid_ext": "Only .pbit and .pbix files are supported",
+          "select_file": "Please select a .pbit or .pbix file",
           "upload_failed": "Upload failed",
           "back": "Back",
           "add_source": "Add data source",
           "label_optional": "Label (optional)",
           "label_placeholder": "A friendly name",
-          "drop_hint": "Drop a .pbit file here, or click to select",
-          "supported_formats": "Power BI Template (.pbit) only",
+          "drop_hint": "Drop a .pbit or .pbix file here, or click to select",
+          "supported_formats": "Power BI Template (.pbit) or Power BI Desktop (.pbix)",
           "uploading": "Uploading…",
           "upload_parse": "Upload and parse"
         },
@@ -1978,7 +2005,13 @@
     "syncing_btn": "Importing in background…",
     "import_tables": "Import {count} tables",
     "syncing_tooltip": "Background import in progress (check Task Center for progress)",
-    "no_tables_detected": "No tables detected"
+    "no_tables_detected": "No tables detected",
+    "imported_title": "Data Source Imported",
+    "imported_hint": "This Power BI (.pbix) file has been decoded and loaded straight into the project lakehouse — no confirmation step is needed. The tables below are ready to query.",
+    "imported_tables": "Imported tables",
+    "imported_ok": "Successfully imported {count} tables into the lakehouse",
+    "view_in_lakehouse": "View Lakehouse Objects",
+    "view_in_sql": "Open SQL Console"
   },
   "setup_wizard": {
     "init_project": "Initialize new project",
@@ -1989,8 +2022,8 @@
     "source_type": "Data source type",
     "postgres_title": "PostgreSQL Database",
     "postgres_desc": "Connect to an external Postgres and sync tables into the Lakehouse",
-    "pbi_title": "Power BI (.pbit)",
-    "pbi_desc": "Upload a .pbit file to parse the Power BI data model",
+    "pbi_title": "Power BI (.pbit / .pbix)",
+    "pbi_desc": "Upload a .pbit template or .pbix file to parse the Power BI data model",
     "file_title": "Excel / CSV File",
     "file_desc": "Upload a local file or provide a URL to pull remote data",
     "create_failed": "Failed to create project, please retry",

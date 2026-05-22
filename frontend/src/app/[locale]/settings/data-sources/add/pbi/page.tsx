@@ -34,7 +34,7 @@ export default function AddPBIPage() {
     const f = e.dataTransfer.files[0]
     if (f) {
       const ext = f.name.split('.').pop()?.toLowerCase()
-      if (!['pbit'].includes(ext ?? '')) {
+      if (!['pbit', 'pbix'].includes(ext ?? '')) {
         setError(t('invalid_ext'))
         return
       }
@@ -56,11 +56,36 @@ export default function AddPBIPage() {
       setError(t('select_file'))
       return
     }
+    const ext = file.name.split('.').pop()?.toLowerCase()
+    const isPbix = ext === 'pbix'
     setUploading(true)
     setError('')
     try {
       const fd = new FormData()
       fd.append('file', file)
+
+      if (isPbix) {
+        // .pbix carries compressed VertiPaq data decoded by a heavy Python
+        // subprocess, so the upload only enqueues an extract job and returns
+        // immediately. The job populates the ontology and flips the source to
+        // 'ready' on its own — there is no wizard confirm step, so land on the
+        // data-sources list where the status badge tracks progress.
+        fd.append('project_id', currentProject.id)
+        if (label) fd.append('label', label)
+        const res = await fetch(`${getApiBase()}/connector/pbix/upload`, {
+          method: 'POST',
+          headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+          body: fd,
+        })
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error || data.message || `HTTP ${res.status}`)
+        }
+        router.push('/settings/data-sources')
+        return
+      }
+
+      // .pbit is a text DataModelSchema parsed inline → wizard confirm flow.
       fd.append('projectId', currentProject.id)
       if (label) fd.append('label', label)
       const res = await fetch(`${getApiBase()}/connector/pbit/upload`, {
@@ -106,7 +131,7 @@ export default function AddPBIPage() {
           {t('add_source')}
         </span>
         <span className="text-ink-ghost">/</span>
-        <h1 className="text-base font-semibold text-ink">Power BI Template</h1>
+        <h1 className="text-base font-semibold text-ink">Power BI (.pbit / .pbix)</h1>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
@@ -136,7 +161,7 @@ export default function AddPBIPage() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pbit"
+              accept=".pbit,.pbix"
               onChange={handleFileSelect}
               className="hidden"
             />

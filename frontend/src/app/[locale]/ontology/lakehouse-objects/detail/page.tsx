@@ -119,9 +119,30 @@ export default function LakehouseObjectDetailPage() {
     }
   }, [currentProject, objectId, initialLoad])
 
-  // Load lakehouse tables for browser + autocomplete
+  // Load lakehouse tables for the browser + SQL autocomplete. Primary source is
+  // the project's actual lakehouse schema (/lakehouse-sql/schema), which is
+  // universal across every connector (pbit / pbix / sqlite / file / postgres).
+  // The PBIT import-progress endpoint is only a fallback for legacy projects
+  // whose lakehouse schema list comes back empty — it returns nothing for PBIX,
+  // which is why this browser used to render empty after a .pbix import.
   const fetchTables = useCallback(async () => {
     if (!currentProject) return
+    try {
+      const res = await api<{ data: Array<{ name: string; columns?: Array<{ name: string; type?: string }> }> }>(
+        `/lakehouse-sql/schema?projectId=${currentProject.id}`,
+      )
+      const tables: PbitTablePreview[] = (res?.data ?? []).map((t) => ({
+        name: t.name,
+        sourceType: 'pbix',
+        columnCount: (t.columns ?? []).length,
+        columns: (t.columns ?? []).map((c) => ({ name: c.name, dataType: c.type ?? 'text' })),
+        partitionKind: 'external',
+      }))
+      if (tables.length > 0) {
+        setLakehouseTables(tables)
+        return
+      }
+    } catch { /* fall through to PBIT import progress */ }
     try {
       const progress = await api<ImportProgressResponse>(`/connector/pbit/progress?projectId=${currentProject.id}`)
       if (progress.pbitConfig?.tables) {
