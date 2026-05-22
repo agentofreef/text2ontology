@@ -97,8 +97,8 @@ services:
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       lakehouse-sql-server:
         condition: service_healthy
     restart: unless-stopped
@@ -125,8 +125,8 @@ services:
       RECALL_SERVER_URL: http://recall-server:8093
       USE_MISSION_ACT: 'true'
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       lakehouse-sql-server:
         condition: service_healthy
       recall-server:
@@ -168,8 +168,8 @@ services:
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
   lakehouse-sql-server:
     build:
@@ -199,8 +199,8 @@ services:
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
   mcp-tools-server:
     build:
@@ -225,8 +225,8 @@ services:
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
       BACKEND_API_URL: http://backend-api:8090
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       recall-server:
         condition: service_healthy
       lakehouse-sql-server:
@@ -276,8 +276,8 @@ services:
       retries: 10
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -347,6 +347,30 @@ services:
       prometheus:
         condition: service_started
     restart: unless-stopped
+  db-migrate:
+    # One-shot migration runner: brings the DB (fresh OR existing) up to the
+    # current schema + per-service least-privilege roles + role passwords, then
+    # applies docs/migrations/*.sql exactly once each. App services wait for this
+    # to finish (depends_on: service_completed_successfully). Replaces the old
+    # initdb-only bootstrap so EXISTING databases also receive updates.
+    image: pgvector/pgvector:pg16
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 256
+    environment:
+      # Superuser DSN — the runner creates roles + applies DDL.
+      DATABASE_URL: postgres://lakehouse2ontology-enterprise:${POSTGRES_PASSWORD}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    entrypoint: ["sh", "/run-migrations.sh"]
+    volumes:
+    - ./scripts/run-migrations.sh:/run-migrations.sh:ro
+    - ./docs/schema/schema.sql:/migrations/schema.sql:ro
+    - ./ops/db-roles.sql:/migrations/db-roles.sql:ro
+    - ./docs/migrations:/migrations/versions:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
   postgres:
     image: pgvector/pgvector:pg16
     mem_limit: 1g
@@ -367,11 +391,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
     - postgres-data:/var/lib/postgresql/data
-    # initdb runs these in order on a FRESH volume only: schema → per-service
-    # least-privilege roles+grants → set role passwords from POSTGRES_PASSWORD.
-    - ./docs/schema/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    - ./ops/db-roles.sql:/docker-entrypoint-initdb.d/02-db-roles.sql:ro
-    - ./ops/initdb/03-role-passwords.sh:/docker-entrypoint-initdb.d/03-role-passwords.sh:ro
+    # Schema + roles + passwords + versioned migrations are applied by the
+    # `db-migrate` one-shot service (scripts/run-migrations.sh) on every up —
+    # it handles fresh AND existing DBs. (initdb-only bootstrap was removed:
+    # it ran only on an empty volume, so existing DBs never got updates.)
     healthcheck:
       test:
       - CMD-SHELL

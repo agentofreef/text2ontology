@@ -92,9 +92,14 @@ analyst-llm-smoke: ## Phase 2B gate: 25-tool surface compatible w/ claude/openai
 db-psql: ## Open psql shell on the project DB ($$DATABASE_URL from .env.shared)
 	@set -a && . ./.env.shared && set +a && psql "$$DATABASE_URL"
 
-migrate: ## Apply a migration (pass FILE=docs/migrations/<name>.sql)
+migrate: ## Apply a single migration file (pass FILE=docs/migrations/<name>.sql)
 	@if [ -z "$(FILE)" ]; then echo "ERROR: FILE=docs/migrations/<name>.sql is required"; exit 2; fi
 	@set -a && . ./.env.shared && set +a && psql "$$DATABASE_URL" -f "$(FILE)"
+
+migrate-up: ## Run the full migration runner (baseline + roles + versioned migrations) vs $$DATABASE_URL
+	@set -a && . ./.env.shared && set +a && \
+		SCHEMA_FILE=docs/schema/schema.sql ROLES_FILE=ops/db-roles.sql MIGRATIONS_DIR=docs/migrations \
+		sh scripts/run-migrations.sh
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
