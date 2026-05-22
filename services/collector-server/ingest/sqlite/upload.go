@@ -2,8 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +16,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/contracts"
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
 )
 
 // Service holds shared state for SQLite connector handlers. Mirrors
@@ -72,6 +77,13 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "MISSING_PROJECT_ID", "project_id required")
 		return
 	}
+
+	// IDOR guard: project_id arrives in the multipart body, which the auth
+	// middleware does NOT gate (it only gates ?projectId=). Verify access.
+	if !authmw.EnforceProjectAccess(w, r, s.DB, projectID) {
+		return
+	}
+
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "MISSING_FILE", err.Error())
@@ -91,7 +103,8 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		label = hdr.Filename
 	}
 
-	// 1. Save file to disk under /data/uploads/{dsID}/{filename}.
+	// 1. Save file to disk under /data/uploads/{dsID}/{filename}, hashing as we
+	//    go (the sha256 is used for same-content dedup below).
 	dirPath := filepath.Join(s.UploadRoot, dsID)
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "MKDIR_FAILED", err.Error())
@@ -100,45 +113,50 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	diskPath := filepath.Join(dirPath, hdr.Filename)
 	out, err := os.Create(diskPath)
 	if err != nil {
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
 		return
 	}
-	written, copyErr := io.Copy(out, io.LimitReader(file, s.MaxBytes+1))
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(out, hasher), io.LimitReader(file, s.MaxBytes+1))
 	out.Close()
 	if copyErr != nil {
-		os.Remove(diskPath)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusInternalServerError, "WRITE_FAILED", copyErr.Error())
 		return
 	}
 	if written > s.MaxBytes {
-		os.Remove(diskPath)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE",
 			fmt.Sprintf("uploaded %d bytes > limit %d", written, s.MaxBytes))
 		return
 	}
+	contentHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// 2. Validate by opening + 3. discover catalog (synchronous, fast for typical SQLite files).
 	sqliteDB, err := Open(ctx, diskPath)
 	if err != nil {
-		os.Remove(diskPath)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "INVALID_SQLITE", err.Error())
 		return
 	}
 	catalog, err := Discover(ctx, sqliteDB)
 	sqliteDB.Close()
 	if err != nil {
-		os.Remove(diskPath)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "DISCOVER_FAILED", err.Error())
 		return
 	}
 	if len(catalog) == 0 {
-		os.Remove(diskPath)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "EMPTY_DB",
 			"no user tables found in SQLite file")
 		return
 	}
 
-	// 4. Insert data_source row. status='pending' — staging is created in /sync.
+	// 4. Dedup + insert data_source row under the per-project lock so two
+	//    byte-identical concurrent uploads cannot both pass. status='pending' —
+	//    staging is created in /sync.
 	configJSON := map[string]any{
 		"filename":  hdr.Filename,
 		"size":      hdr.Size,
@@ -146,12 +164,35 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		"disk_path": diskPath,
 	}
 	cfgRaw, _ := json.Marshal(configJSON)
-	if _, err := s.DB.ExecContext(ctx, `
-		INSERT INTO data_source (id, project_id, type, label, config_json, status)
-		VALUES ($1, $2, 'sqlite', $3, $4, 'pending')
-	`, dsID, projectID, label, cfgRaw); err != nil {
-		os.Remove(diskPath)
-		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", err.Error())
+	lockErr := pbit.WithProjectLock(ctx, s.DB, projectID, func(lctx context.Context) error {
+		var existingID string
+		dErr := s.DB.QueryRowContext(lctx, `
+			SELECT id FROM data_source
+			WHERE project_id = $1 AND content_hash = $2 AND status <> 'failed'
+			LIMIT 1`, projectID, contentHash).Scan(&existingID)
+		if dErr == nil {
+			return &dupErr{existingID: existingID}
+		}
+		if !errors.Is(dErr, sql.ErrNoRows) {
+			return fmt.Errorf("dedup check: %w", dErr)
+		}
+		if _, err := s.DB.ExecContext(lctx, `
+			INSERT INTO data_source (id, project_id, type, label, config_json, status, content_hash)
+			VALUES ($1, $2, 'sqlite', $3, $4, 'pending', $5)
+		`, dsID, projectID, label, cfgRaw, contentHash); err != nil {
+			return fmt.Errorf("db insert: %w", err)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		os.RemoveAll(dirPath)
+		var de *dupErr
+		if errors.As(lockErr, &de) {
+			writeError(w, http.StatusConflict, "DUPLICATE_CONTENT",
+				"identical content already imported in this project; delete the existing source to re-upload")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", lockErr.Error())
 		return
 	}
 
@@ -168,6 +209,12 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// dupErr signals that an upload's content already exists in the project, so the
+// handler should answer 409 instead of 500.
+type dupErr struct{ existingID string }
+
+func (e *dupErr) Error() string { return "duplicate content (data_source " + e.existingID + ")" }
 
 // writeError writes a contracts.ErrorEnvelope as JSON.
 func writeError(w http.ResponseWriter, status int, code, msg string) {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/contracts"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/pgschema"
 )
@@ -86,6 +87,10 @@ func (s *Service) handleSourcesByID(w http.ResponseWriter, r *http.Request) {
 // postgres /catalog. Useful when the wizard wants a fresh view (e.g. after
 // the user replaces the file out-of-band).
 func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, id string) {
+	// IDOR guard: by-id route, resolve project from the source and check access.
+	if !authmw.EnforceEntityProject(w, r, s.DB, "data_source", "id", id) {
+		return
+	}
 	dbPath, err := loadDiskPath(r.Context(), s.DB, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
@@ -115,6 +120,12 @@ func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, id strin
 // Same SSE shape as postgres connector: emits sync_started, optional per-table
 // sync_progress, and sync_complete / sync_failed.
 func (s *Service) handleSync(w http.ResponseWriter, r *http.Request, id string) {
+	// IDOR guard: this by-id route carries no projectId; resolve the source's
+	// project and confirm the caller can access it before any DB/file work.
+	if !authmw.EnforceEntityProject(w, r, s.DB, "data_source", "id", id) {
+		return
+	}
+
 	var req struct {
 		Tables []string `json:"tables"`
 	}

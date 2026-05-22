@@ -7,8 +7,11 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/contracts"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
 	"github.com/lakehouse2ontology/services/collector-server/job"
@@ -61,6 +65,13 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// IDOR guard: the auth middleware only gates ?projectId= in the query
+	// string; this route carries project_id in the multipart body, so verify
+	// the bearer caller can access it (writes 401/403 on failure).
+	if !authmw.EnforceProjectAccess(w, r, s.DB, projectID) {
+		return
+	}
+
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "MISSING_FILE", err.Error())
@@ -75,26 +86,9 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create data_source row (status=syncing) — see flow comment above.
-	// Status starts as 'syncing' rather than 'connecting' so existing UI that
-	// distinguishes "in-progress" works without changes.
 	dsID := uuid.New().String()
 	if label == "" {
 		label = hdr.Filename
-	}
-	configJSON := map[string]any{
-		"filename": hdr.Filename,
-		"size":     hdr.Size,
-		"ext":      ext,
-	}
-	cfgRaw, _ := json.Marshal(configJSON)
-	_, err = s.DB.ExecContext(ctx, `
-		INSERT INTO data_source (id, project_id, type, label, config_json, status)
-		VALUES ($1, $2, 'file', $3, $4, 'syncing')
-	`, dsID, projectID, label, cfgRaw)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", err.Error())
-		return
 	}
 
 	dirPath := filepath.Join(s.UploadRoot, dsID)
@@ -113,64 +107,105 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	diskPath := filepath.Join(dirPath, safeName)
 	out, err := os.Create(diskPath)
 	if err != nil {
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
 		return
 	}
 
-	written, copyErr := io.Copy(out, io.LimitReader(file, s.MaxBytes+1))
+	// Stream to disk while computing the content hash (used for dedup below).
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(out, hasher), io.LimitReader(file, s.MaxBytes+1))
 	out.Close()
 
 	if copyErr != nil {
-		os.Remove(diskPath)
-		s.failDataSource(ctx, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusInternalServerError, "WRITE_FAILED", copyErr.Error())
 		return
 	}
 	if written > s.MaxBytes {
-		os.Remove(diskPath)
-		s.failDataSource(ctx, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE",
 			fmt.Sprintf("uploaded %d bytes > limit %d", written, s.MaxBytes))
 		return
 	}
+	contentHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Parse headers synchronously — fast, returns the catalog the wizard needs.
 	sheets, parseErr := parseHeaders(diskPath, ext)
 	if parseErr != nil {
-		s.failDataSource(ctx, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "PARSE_FAILED", parseErr.Error())
 		return
 	}
 	if len(sheets) == 0 {
-		s.failDataSource(ctx, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "EMPTY_FILE", "no readable sheets / headers found")
 		return
 	}
 
 	stagingSchema := "collector_" + strings.ReplaceAll(dsID, "-", "_")
-	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE data_source SET staging_schema=$1, updated_at=now() WHERE id=$2`,
-		stagingSchema, dsID); err != nil {
-		s.failDataSource(ctx, dsID)
-		writeError(w, http.StatusInternalServerError, "DB_UPDATE_FAILED", err.Error())
-		return
+	configJSON := map[string]any{
+		"filename": hdr.Filename,
+		"size":     hdr.Size,
+		"ext":      ext,
 	}
+	cfgRaw, _ := json.Marshal(configJSON)
 
-	// Enqueue COPY job. Worker pool runs writeAllSheetsToStaging asynchronously.
-	jobID, err := job.Enqueue(ctx, s.DB, job.EnqueueArgs{
-		DataSourceID: &dsID,
-		ProjectID:    projectID,
-		Kind:         job.KindFileUpload,
-		Payload: fileUploadPayload{
-			DiskPath:      diskPath,
-			Ext:           ext,
-			StagingSchema: stagingSchema,
-			Filename:      hdr.Filename,
-		},
+	// Dedup + register atomically under the per-project lock so two
+	// byte-identical concurrent uploads cannot both pass the check. The
+	// data_source row, staging_schema, and the COPY job are all created here.
+	var jobID string
+	lockErr := pbit.WithProjectLock(ctx, s.DB, projectID, func(lctx context.Context) error {
+		var existingID string
+		dErr := s.DB.QueryRowContext(lctx, `
+			SELECT id FROM data_source
+			WHERE project_id = $1 AND content_hash = $2 AND status <> 'failed'
+			LIMIT 1`, projectID, contentHash).Scan(&existingID)
+		if dErr == nil {
+			return &dupErr{existingID: existingID}
+		}
+		if !errors.Is(dErr, sql.ErrNoRows) {
+			return fmt.Errorf("dedup check: %w", dErr)
+		}
+
+		// Create data_source row (status=syncing). Status starts as 'syncing'
+		// rather than 'connecting' so existing UI that distinguishes
+		// "in-progress" works without changes.
+		if _, err := s.DB.ExecContext(lctx, `
+			INSERT INTO data_source (id, project_id, type, label, config_json, status, staging_schema, content_hash)
+			VALUES ($1, $2, 'file', $3, $4, 'syncing', $5, $6)
+		`, dsID, projectID, label, cfgRaw, stagingSchema, contentHash); err != nil {
+			return fmt.Errorf("db insert: %w", err)
+		}
+
+		// Enqueue COPY job. Worker pool runs writeAllSheetsToStaging asynchronously.
+		jid, err := job.Enqueue(lctx, s.DB, job.EnqueueArgs{
+			DataSourceID: &dsID,
+			ProjectID:    projectID,
+			Kind:         job.KindFileUpload,
+			Payload: fileUploadPayload{
+				DiskPath:      diskPath,
+				Ext:           ext,
+				StagingSchema: stagingSchema,
+				Filename:      hdr.Filename,
+			},
+		})
+		if err != nil {
+			_, _ = s.DB.ExecContext(lctx, `DELETE FROM data_source WHERE id = $1`, dsID)
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		jobID = jid
+		return nil
 	})
-	if err != nil {
-		s.failDataSource(ctx, dsID)
-		writeError(w, http.StatusInternalServerError, "JOB_ENQUEUE_FAILED", err.Error())
+	if lockErr != nil {
+		os.RemoveAll(dirPath)
+		var de *dupErr
+		if errors.As(lockErr, &de) {
+			writeError(w, http.StatusConflict, "DUPLICATE_CONTENT",
+				"identical content already imported in this project; delete the existing source to re-upload")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", lockErr.Error())
 		return
 	}
 
@@ -192,6 +227,12 @@ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+// dupErr signals that an upload's content already exists in the project, so the
+// handler should answer 409 instead of 500.
+type dupErr struct{ existingID string }
+
+func (e *dupErr) Error() string { return "duplicate content (data_source " + e.existingID + ")" }
 
 // fileUploadPayload is the JSONB written into ingest_job.payload for jobs of
 // kind file_upload. Both upload.go (multipart) and url.go (URL fetch) write

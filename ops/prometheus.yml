@@ -19,7 +19,7 @@ rule_files:
 # Forward firing alerts to Alertmanager (ops/alertmanager.yml), which dedups,
 # groups, and DELIVERS them to a real receiver. Without this block, alerts only
 # show in the Prometheus UI and notify no one. Alertmanager runs as the
-# `alertmanager` service in docker-compose.product-ready.yml.
+# `alertmanager` service in docker-compose.yml.
 alerting:
   alertmanagers:
     - static_configs:

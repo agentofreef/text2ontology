@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -80,15 +81,16 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 		srcType       string
 		projectID     string
 		status        string
+		label         string
 		stagingSchema sql.NullString
 		configRaw     []byte
 		wizardRaw     []byte
 	)
 	err := db.QueryRowContext(ctx, `
-		SELECT type, project_id, status, staging_schema,
+		SELECT type, project_id, status, COALESCE(label,''), staging_schema,
 		       config_json, COALESCE(wizard_state, '{}'::jsonb)
 		FROM data_source WHERE id = $1
-	`, dsID).Scan(&srcType, &projectID, &status, &stagingSchema, &configRaw, &wizardRaw)
+	`, dsID).Scan(&srcType, &projectID, &status, &label, &stagingSchema, &configRaw, &wizardRaw)
 	if err != nil {
 		return fmt.Errorf("wizard.Confirm: load data_source: %w", err)
 	}
@@ -111,7 +113,7 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 	// tables: there is no staging schema and no sync→merge pipeline (those are
 	// file/sqlite/pbi only). Branch out before the staging machinery below.
 	if srcType == "postgres" {
-		return confirmPostgresFDW(ctx, db, dsID, projectID, configRaw, ws)
+		return confirmPostgresFDW(ctx, db, dsID, projectID, label, configRaw, ws)
 	}
 
 	// 2. Build catalog depending on source type. (postgres is handled earlier
@@ -166,56 +168,82 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 	// agent queries.
 	finalSchema := pbitpkg.SanitizeSchemaName(projectID)
 
-	// 4. Terminal tx on collector's own DB.
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("wizard.Confirm: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
+	// 4-8. Terminal merge under the per-project advisory lock so concurrent
+	//      imports into the SAME project serialize: the cross-source table-name
+	//      de-collision probes and the CREATE/RENAME into the shared proj_<hex>
+	//      schema must see a stable view (see pbit.WithProjectLock).
+	lockErr := pbitpkg.WithProjectLock(ctx, db, projectID, func(lctx context.Context) error {
+		// Resolve collision-free physical names for the staging tables BEFORE the
+		// terminal tx: a raw table name already taken by ANOTHER data source in
+		// this project gets a deterministic label suffix so the second source's
+		// tables don't clobber the first's. file/sqlite confirm does not write
+		// ont_object_type here (ontology is authored later), so this rename is
+		// purely physical — but it MUST be applied so a future ontology built on
+		// these tables references the de-collided names.
+		stagingTables, terr := listSchemaTables(lctx, db, stagingSchema.String)
+		if terr != nil {
+			return fmt.Errorf("list staging tables: %w", terr)
+		}
+		nameMap, nerr := pbitpkg.ResolveCollisionFreeNames(db, finalSchema, projectID, dsID, label, stagingTables)
+		if nerr != nil {
+			return fmt.Errorf("resolve collision-free names: %w", nerr)
+		}
 
-	// 5. Merge staging tables into final schema (incremental — works even if
-	//    final schema already exists from a prior import). This is the ONLY
-	//    transformation Confirm does to the lakehouse: it lands raw data in
-	//    proj_<hex>.<table>. Ontology design (ont_object_type / ont_property
-	//    / lakehouse_keyword / metric_intent) is intentionally left to the
-	//    user (or an AI agent) to author later via the dedicated pages —
-	//    "import to lakehouse" and "design ontology" are separate concerns.
-	if err := pbitpkg.MergeStagingIntoFinal(tx, stagingSchema.String, finalSchema); err != nil {
-		return fmt.Errorf("wizard.Confirm: merge staging: %w", err)
-	}
-	// Reference pbitSchema so the unused-var compiler check stays quiet — kept
-	// around for callers that may want it for future ontology-suggestion flows.
-	_ = pbitSchema
+		tx, err := db.BeginTx(lctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
 
-	// 6. Write the final schema name back to project.lakehouse_schema so
-	//    downstream consumers (Lakehouse Agent, Builder Agent, smartquery, etc.)
-	//    can locate the lakehouse for this project. finalSchema is deterministic
-	//    from project_id (SanitizeSchemaName), so re-imports are no-ops on this
-	//    column — but the first import MUST set it or the project's lakehouse
-	//    is invisible to every reader downstream.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE project
-		SET lakehouse_schema = $1,
-		    updated_at = now()
-		WHERE id = $2
-	`, finalSchema, projectID); err != nil {
-		return fmt.Errorf("wizard.Confirm: update project.lakehouse_schema: %w", err)
-	}
+		// 5. Merge staging tables into final schema (incremental — works even if
+		//    final schema already exists from a prior import), renaming each table
+		//    to its collision-free name. This is the ONLY transformation Confirm
+		//    does to the lakehouse: it lands raw data in proj_<hex>.<table>.
+		//    Ontology design (ont_object_type / ont_property / lakehouse_keyword
+		//    / metric_intent) is intentionally left to the user (or an AI agent)
+		//    to author later via the dedicated pages — "import to lakehouse" and
+		//    "design ontology" are separate concerns.
+		if err := pbitpkg.MergeStagingIntoFinalWithNames(tx, stagingSchema.String, finalSchema, nameMap); err != nil {
+			return fmt.Errorf("merge staging: %w", err)
+		}
+		// Reference pbitSchema so the unused-var compiler check stays quiet — kept
+		// around for callers that may want it for future ontology-suggestion flows.
+		_ = pbitSchema
 
-	// 7. Mark data_source completed.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE data_source
-		SET status       = 'completed',
-		    last_sync_at = now(),
-		    updated_at   = now()
-		WHERE id = $1
-	`, dsID); err != nil {
-		return fmt.Errorf("wizard.Confirm: update status: %w", err)
-	}
+		// 6. Write the final schema name back to project.lakehouse_schema so
+		//    downstream consumers (Lakehouse Agent, Builder Agent, smartquery, etc.)
+		//    can locate the lakehouse for this project. finalSchema is deterministic
+		//    from project_id (SanitizeSchemaName), so re-imports are no-ops on this
+		//    column — but the first import MUST set it or the project's lakehouse
+		//    is invisible to every reader downstream.
+		if _, err := tx.ExecContext(lctx, `
+			UPDATE project
+			SET lakehouse_schema = $1,
+			    updated_at = now()
+			WHERE id = $2
+		`, finalSchema, projectID); err != nil {
+			return fmt.Errorf("update project.lakehouse_schema: %w", err)
+		}
 
-	// 8. Commit.
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("wizard.Confirm: commit: %w", err)
+		// 7. Mark data_source completed.
+		if _, err := tx.ExecContext(lctx, `
+			UPDATE data_source
+			SET status       = 'completed',
+			    last_sync_at = now(),
+			    updated_at   = now()
+			WHERE id = $1
+		`, dsID); err != nil {
+			return fmt.Errorf("update status: %w", err)
+		}
+
+		// 8. Commit.
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		return fmt.Errorf("wizard.Confirm: %w", lockErr)
 	}
 
 	// 9. Trigger vector embedding in the background (best-effort).
@@ -236,7 +264,7 @@ func Confirm(ctx context.Context, db *sql.DB, dsID string) error {
 // foreign tables under proj_<hex>, points project.lakehouse_schema at that
 // schema, and marks the data source completed. No rows are copied — every
 // downstream query is pushed down to the remote at run time.
-func confirmPostgresFDW(ctx context.Context, db *sql.DB, dsID, projectID string, configRaw []byte, ws contracts.WizardStateUpdate) error {
+func confirmPostgresFDW(ctx context.Context, db *sql.DB, dsID, projectID, label string, configRaw []byte, ws contracts.WizardStateUpdate) error {
 	var cfgMap map[string]any
 	if err := json.Unmarshal(configRaw, &cfgMap); err != nil {
 		return fmt.Errorf("wizard.Confirm: parse pg config: %w", err)
@@ -277,27 +305,52 @@ func confirmPostgresFDW(ctx context.Context, db *sql.DB, dsID, projectID string,
 	}
 
 	finalSchema := pbitpkg.SanitizeSchemaName(projectID)
-	if err := pgpkg.SetupForeignSchema(ctx, db, dsID, finalSchema, cfg, tables); err != nil {
-		return fmt.Errorf("wizard.Confirm: setup foreign schema: %w", err)
-	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("wizard.Confirm: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE project SET lakehouse_schema = $1, updated_at = now() WHERE id = $2
-	`, finalSchema, projectID); err != nil {
-		return fmt.Errorf("wizard.Confirm: update project.lakehouse_schema: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE data_source SET status='completed', last_sync_at=now(), updated_at=now() WHERE id=$1
-	`, dsID); err != nil {
-		return fmt.Errorf("wizard.Confirm: update status: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("wizard.Confirm: commit: %w", err)
+	// Serialize per-project so cross-source de-collision probes and the
+	// IMPORT/RENAME into the shared proj_<hex> schema see a stable view.
+	lockErr := pbitpkg.WithProjectLock(ctx, db, projectID, func(lctx context.Context) error {
+		// Resolve collision-free names for the foreign tables: the imported base
+		// name is the part after the last dot of each "schema.table". A name
+		// already taken by ANOTHER source in this project gets a label suffix.
+		baseNames := make([]string, 0, len(tables))
+		for _, t := range tables {
+			n := t
+			if dot := strings.LastIndex(t, "."); dot >= 0 {
+				n = t[dot+1:]
+			}
+			baseNames = append(baseNames, n)
+		}
+		nameMap, nerr := pbitpkg.ResolveCollisionFreeNames(db, finalSchema, projectID, dsID, label, baseNames)
+		if nerr != nil {
+			return fmt.Errorf("resolve collision-free names: %w", nerr)
+		}
+
+		if err := pgpkg.SetupForeignSchema(lctx, db, dsID, finalSchema, cfg, tables, nameMap); err != nil {
+			return fmt.Errorf("setup foreign schema: %w", err)
+		}
+
+		tx, err := db.BeginTx(lctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if _, err := tx.ExecContext(lctx, `
+			UPDATE project SET lakehouse_schema = $1, updated_at = now() WHERE id = $2
+		`, finalSchema, projectID); err != nil {
+			return fmt.Errorf("update project.lakehouse_schema: %w", err)
+		}
+		if _, err := tx.ExecContext(lctx, `
+			UPDATE data_source SET status='completed', last_sync_at=now(), updated_at=now() WHERE id=$1
+		`, dsID); err != nil {
+			return fmt.Errorf("update status: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		return fmt.Errorf("wizard.Confirm: %w", lockErr)
 	}
 
 	// Vector embedding in the background (best-effort), same as the file path.
@@ -350,6 +403,26 @@ func cleanOntologyByTableNames(ctx context.Context, tx *sql.Tx, projectID string
 		return fmt.Errorf("cleanOntologyByTableNames: %w", err)
 	}
 	return nil
+}
+
+// listSchemaTables returns the base-table names in a Postgres schema. Used by
+// Confirm to enumerate the staging tables for collision-free renaming at merge.
+func listSchemaTables(ctx context.Context, db *sql.DB, schema string) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // catalogFromWizardState reconstructs a minimal []TableInfo from wizard_state

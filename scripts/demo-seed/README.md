@@ -18,32 +18,38 @@ The `z-` prefix on the mount names ensures these run **after** the base `schema.
 
 ## How to bring it up
 
+> The standalone `docker-compose.demo.yml` overlay was removed when the project
+> consolidated to a single `docker-compose.yml`. Bring up the normal stack, then
+> load the demo seeds into its Postgres by hand (order matters):
+
 ```bash
 # 1) (optional) regenerate the workstream/milestone/dependency SQL
 python3 scripts/demo-seed/generate.py
 
-# 2) start the full stack with the demo overlay
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+# 2) start the stack
+docker compose up -d
 
-# 3) verify (one-shot sanity check)
-docker compose -f docker-compose.yml -f docker-compose.demo.yml --profile demo-verify run --rm demo-init-check
+# 3) load the demo seeds: ddl → static → generated → ontology
+for f in ddl seed_static seed_generated seed_ontology; do
+  docker compose exec -T postgres psql -U lakehouse2ontology-enterprise \
+    -d lakehouse2ontology-enterprise < scripts/demo-seed/$f.sql
+done
 
 # 4) open
-open http://localhost:18080
+open http://localhost:28080
 ```
 
-Login as `admin` / your `.env.shared` `ADMIN_PASSWORD`.
+Login as `admin` / your `ADMIN_PASSWORD` (default `admin`).
 The demo project is named **"Demo · 跨部门新品上市"** (uuid `d0000000-0000-0000-0000-000000000001`).
 
 ## Reset
 
+The demo data now lives in the same `postgres-data` volume as everything else
+(there is no separate demo volume anymore). To start clean:
+
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.demo.yml down -v
+docker compose down -v && docker compose up -d   # wipes the DB, then re-apply the seeds above
 ```
-
-The `-v` wipes the `postgres-data-demo` volume, so the next `up` re-runs all seeds fresh.
-
-The demo volume is **separate** from the real `postgres-data` volume — your real ingested projects are untouched by switching profiles.
 
 ## Hero question
 

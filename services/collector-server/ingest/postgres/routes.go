@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/contracts"
 )
 
@@ -101,6 +102,13 @@ func createSource(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		})
 		return
 	}
+
+	// IDOR guard: project_id arrives in the JSON body, which the auth
+	// middleware does NOT gate (it only gates ?projectId=). Verify access.
+	if !authmw.EnforceProjectAccess(w, r, db, req.ProjectID) {
+		return
+	}
+
 	cfgJSON, _ := json.Marshal(req.ConfigJSON)
 
 	var id string
@@ -154,6 +162,10 @@ func handleSourcesByID(db *sql.DB) http.HandlerFunc {
 
 // GET /api/connector/postgres/sources/{id}/catalog
 func getSourceCatalog(w http.ResponseWriter, r *http.Request, db *sql.DB, id string) {
+	// IDOR guard: by-id route, resolve project from the source and check access.
+	if !authmw.EnforceEntityProject(w, r, db, "data_source", "id", id) {
+		return
+	}
 	cfg, err := loadSourceConfig(r.Context(), db, id)
 	if err != nil {
 		jsonResp(w, http.StatusNotFound, contracts.ErrorEnvelope{
@@ -190,6 +202,10 @@ func getSourceCatalog(w http.ResponseWriter, r *http.Request, db *sql.DB, id str
 // connect→sync→confirm progress flow still has a "sync" step to call: it just
 // flips the source to 'ready' and emits the SSE events the frontend expects.
 func postSourceSync(w http.ResponseWriter, r *http.Request, db *sql.DB, id string) {
+	// IDOR guard: by-id route, resolve project from the source and check access.
+	if !authmw.EnforceEntityProject(w, r, db, "data_source", "id", id) {
+		return
+	}
 	if _, err := db.ExecContext(r.Context(),
 		`UPDATE data_source SET status='ready', updated_at=now() WHERE id=$1`, id,
 	); err != nil {
@@ -216,6 +232,10 @@ func postSourceSync(w http.ResponseWriter, r *http.Request, db *sql.DB, id strin
 
 // GET /api/connector/postgres/sources/{id}/status
 func getSourceStatus(w http.ResponseWriter, r *http.Request, db *sql.DB, id string) {
+	// IDOR guard: by-id route, resolve project from the source and check access.
+	if !authmw.EnforceEntityProject(w, r, db, "data_source", "id", id) {
+		return
+	}
 	var status, stagingSchema sql.NullString
 	var updatedAt time.Time
 	err := db.QueryRowContext(r.Context(),

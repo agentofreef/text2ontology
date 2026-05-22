@@ -1305,12 +1305,20 @@ CREATE TABLE IF NOT EXISTS data_source (
   created_by      UUID REFERENCES "user"(id),
   created_at      TIMESTAMPTZ DEFAULT now(),
   updated_at      TIMESTAMPTZ DEFAULT now(),
-  last_sync_at    TIMESTAMPTZ
+  last_sync_at    TIMESTAMPTZ,
+  -- sha256 (hex) of the uploaded source bytes (PBIX / file connectors). Lets us
+  -- reject re-uploading byte-identical content into the same project (409);
+  -- different content coexists as a new data_source. NULL for sources with no
+  -- uploaded artifact (postgres/sqlite live connectors).
+  content_hash    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_data_source_project ON data_source(project_id);
 CREATE INDEX IF NOT EXISTS idx_data_source_status_updated ON data_source(status, updated_at)
   WHERE status IN ('wizard_in_progress', 'syncing');
+-- Fast "does this project already have a source with identical content?" probe.
+CREATE INDEX IF NOT EXISTS idx_data_source_project_hash ON data_source(project_id, content_hash)
+  WHERE content_hash IS NOT NULL;
 
 -- data_source_id on ont_object_type: deferred to here (instead of next to the
 -- other ont_object_type ALTERs ~650 lines above) because the FK references

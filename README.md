@@ -32,48 +32,43 @@ Read the full thesis: [**Ontology Before Query** (manifesto)](./docs/manifesto/m
 
 ## Architecture
 
-Six Go services on the `18000-19000` port range, plus a Next.js frontend served by nginx — seven deployable containers in total (eight with the bundled Postgres).
+Six Go services plus a Next.js frontend, all behind an nginx gateway. **Only the gateway publishes a host port (`28080`)** — the frontend, the six services, Postgres, and the observability stack are reachable **only on the internal Docker network**. Eight built images (gateway + frontend + 6 Go services), plus Postgres and the observability stack. Ports in the diagram are each service's **internal** port (not mapped to the host):
 
 ```
                     ┌─────────────────────────────────┐
-                    │     frontend  :18080            │   Next.js + nginx
-                    │     (browser entrypoint)        │
+       browser ──▶  │     gateway   :28080            │   nginx — the only public ingress
+                    │     (reverse-proxy, by path)    │   (everything below is internal-only)
                     └──────────────┬──────────────────┘
                                    │
-       ┌───────────────────────────┼───────────────────────────┐
-       ▼                           ▼                           ▼
-  agent-server               backend-api                collector-server
-  :18092                     :18090                     :18096
-  AI Agent — 2 modes         Ontology CRUD              Data connectors:
-  (query / build)            Auth + projects            PBIT / Excel / CSV /
-                             Config                     SQLite / Postgres
-       │                           │                           │
-       ▼                           ▼                           │
-  recall-server          lakehouse-sql-server                  │
-  :18093                 :18094                                │
-  3-tier recall          SmartQuery engine                     │
-  (EXACT/FUZZY/VEC)      + L3 validators                       │
-                                                               │
-                                          mcp-tools-server :18095
-                                          MCP gateway (lookup_od,
-                                          execute_smartquery, …)
-                                                               │
-       └───────────────────────────┬───────────────────────────┘
-                                   ▼
+       ┌──────────────┬────────────┼────────────┬──────────────┐
+       ▼              ▼            ▼            ▼              ▼
+  frontend       backend-api   agent-server  recall-server  collector-server
+  :8080          :8090         :8092         :8093          :8096
+  Next.js        Ontology CRUD AI Agent      3-tier recall  Data connectors:
+                 Auth+projects (query/build) (EXACT/FUZZY   PBIT/Excel/CSV
+                                              /VEC)          /SQLite/Postgres
+                      │            │            │
+                      ▼            ▼            ▼
+              lakehouse-sql-server :8094     mcp-tools-server :8095
+              SmartQuery engine              MCP gateway
+              (ontology → SQL compiler)      (lookup_od / execute_smartquery)
+                      │
+                      ▼
                     ┌─────────────────────────────────┐
                     │     Postgres + pgvector         │   bundled in compose
                     │     (single source of truth)    │
                     └─────────────────────────────────┘
 ```
 
-Per-service responsibility:
-- **frontend** `:18080` — Next.js static export served by nginx; reverse-proxies API calls
-- **backend-api** `:18090` — CRUD for `ont_*` / `lakehouse_*` tables, auth, projects, export/import
-- **agent-server** `:18092` — Lakehouse Agent SSE (lakehouse / builder modes)
-- **recall-server** `:18093` — Exact + vector + intent recall over `ont_*`
-- **lakehouse-sql-server** `:18094` — SmartQuery engine (deterministic ontology → SQL compiler). The LLM picks `(OD, Intent, Keyword)` from finite sets; this engine stitches the JOINs deterministically via pre-defined `ont_link` relationships — **the LLM never sees a table or a JOIN**.
-- **mcp-tools-server** `:18095` — MCP tool gateway for external clients (Claude Code, etc.)
-- **collector-server** `:18096` — Sole data-ingest entrypoint (PBI/Postgres/File + wizard state machine)
+Per-service responsibility (internal ports; only the gateway is published):
+- **gateway** `:28080` (public) — nginx; the only external ingress, reverse-proxies to frontend + services by path
+- **frontend** `:8080` — Next.js static export served by nginx
+- **backend-api** `:8090` — CRUD for `ont_*` / `lakehouse_*` tables, auth, projects, export/import
+- **agent-server** `:8092` — Lakehouse Agent SSE (lakehouse / builder modes)
+- **recall-server** `:8093` — Exact + vector + intent recall over `ont_*`
+- **lakehouse-sql-server** `:8094` — SmartQuery engine (deterministic ontology → SQL compiler). The LLM picks `(OD, Intent, Keyword)` from finite sets; this engine stitches the JOINs deterministically via pre-defined `ont_link` relationships — **the LLM never sees a table or a JOIN**.
+- **mcp-tools-server** `:8095` — MCP tool gateway for external clients (Claude Code, etc.)
+- **collector-server** `:8096` — Sole data-ingest entrypoint (PBI/Postgres/File + wizard state machine)
 
 Detailed architecture and design rationale: [**Design Philosophy**](./docs/spec/design-philosophy.en.md) ([中文](./docs/spec/design-philosophy.zh.md)).
 
@@ -83,29 +78,24 @@ Detailed architecture and design rationale: [**Design Philosophy**](./docs/spec/
 
 **Prerequisites:** Docker (with `docker compose` v2+).
 
-Five commands. Five minutes. Schema auto-applies on first start. Default admin is `admin / admin` for local trial — rotate before exposing the instance beyond localhost.
+Two commands. The single `docker-compose.yml` pulls prebuilt multi-arch images from GHCR and starts the whole stack — schema, least-privilege DB roles, and observability are all wired up automatically. Default login is `admin / admin` for local trial — harden before exposing beyond localhost (see Production below).
 
 ```bash
 # 1. clone
 git clone https://github.com/agentofreef/text2ontology
 cd text2ontology
 
-# 2. configure (defaults work; rotate secrets before deploy)
-cp .env.shared.example .env.shared
+# 2. start everything (pulls images + applies schema, ~1-3 min first time)
+docker compose up -d
 
-# 3. start everything (schema auto-applies, ~1-3 min first time)
-docker compose --env-file .env.shared up -d
+# 3. verify (the gateway is the sole public ingress)
+curl -fsS http://localhost:28080/healthz   # -> ok
 
-# 4. verify all 7 services are healthy
-for p in 18080 18090 18092 18093 18094 18095 18096; do
-  curl -fsS localhost:$p/healthz
-done
-
-# 5. open
-open http://localhost:18080
+# 4. open
+open http://localhost:28080
 ```
 
-Open `http://localhost:18080` in a browser.
+Open `http://localhost:28080` and sign in as `admin` / `admin`. No `.env`, no flags — every secret has a safe dev default baked into `docker-compose.yml`.
 
 **To use the Agent**: sign in as `admin` with the `ADMIN_PASSWORD` you set in `.env.shared`, then go to `/settings/llm-config` and add at least one chat model (Claude / OpenAI / DeepSeek / Qwen — vendor + base URL + API key + model name) and activate it for the chat role. Credentials live in the database — **no env changes, no container restart needed.**
 
@@ -115,63 +105,51 @@ Open `http://localhost:18080` in a browser.
 
 ## Production deployment (hardened, single ingress)
 
-The Quick Start above is for **local trial** — convenient, but it leans on default secrets and (historically) per-service host ports. For a **production-level** run, use the dedicated hardened compose file **`docker-compose.product-ready.yml`**. It runs as its own isolated stack and **exposes exactly ONE external port — the nginx gateway**. Postgres, the six Go services, and the whole observability stack (otel-collector / Jaeger / Prometheus / Grafana) are reachable **only on the internal Docker network** — there is no direct DB or service port on the host.
+There is ONE compose file — `docker-compose.yml` — and it is already the hardened, single-ingress topology. Only the nginx `gateway` publishes a host port (`28080`); Postgres, the six Go services, and the whole observability stack (otel-collector / Jaeger / Prometheus / Grafana / Alertmanager) are reachable **only on the internal Docker network** (the observability UIs bind to `127.0.0.1` for local inspection). Non-root containers, per-service CPU / memory / PID limits, HTTP timeouts + DB connection-pool caps, graceful shutdown, panic-recover middleware, least-privilege DB roles, and a one-shot `db-migrate` runner are all built in.
 
-**How it differs from Quick Start**
+Quick Start runs this exact stack with safe **dev defaults**. Before exposing it beyond localhost, set strong secrets and turn on fail-closed enforcement:
 
-- **Single ingress.** Only the gateway port is published (default `28080`). Everything else is internal — the attack surface is one port.
-- **Hardened runtime.** Non-root containers; per-service CPU / memory / PID limits; HTTP read/idle timeouts + DB connection-pool caps; graceful shutdown (SIGTERM drains in-flight requests, no truncated SSE); panic-recover middleware.
-- **Gateway hardening.** Per-IP rate + connection limits, proxy timeouts on non-streaming routes (SSE / ingest deliberately exempt), and security headers (CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, HSTS).
-- **Isolated compose project** (`t2o-product-ready`) with its own containers, network, and volumes — it can run **alongside** the dev stack without touching it.
-
-### 1. Configure and ROTATE secrets (required)
+### 1. Set strong secrets + enable enforcement
 
 ```bash
-cp .env.shared.example .env.shared
+cp .env.example .env
 ```
 
-Replace **every** placeholder in `.env.shared` before exposing the instance — the defaults (`*_change_me`, `admin`) are local-trial only:
+`.env` is auto-read by docker compose. Set every secret to a strong value and flip enforcement on:
 
 | Variable | Purpose |
 |---|---|
-| `POSTGRES_PASSWORD` | Postgres superuser password |
+| `POSTGRES_PASSWORD` | Postgres superuser + every scoped role password (use hex) |
 | `ADMIN_PASSWORD` | initial `admin` web login |
-| `AUTH_TOKEN_SECRET` | HMAC key for user session tokens (use ≥ 64 random hex chars) |
+| `AUTH_TOKEN_SECRET` | HMAC key for user session tokens (≥ 32 chars) |
 | `INTERNAL_TOKEN` | service-to-service auth token |
+| `GRAFANA_ADMIN_PASSWORD` | Grafana admin login |
+| `REQUIRE_STRONG_SECRETS=true` | makes services **FAIL-CLOSED** on any weak/placeholder secret |
 
-Generate strong values, e.g. `openssl rand -hex 32`. Treat any deploy that still contains `change_me` / `=admin` as **not yet configured**.
+Generate strong values, e.g. `openssl rand -hex 32`. With `REQUIRE_STRONG_SECRETS=true`, any leftover `change_me` / `admin` makes the services refuse to start — so a misconfigured deploy fails loudly instead of running insecure.
 
-### 2. Build and start the single-ingress stack
-
-```bash
-# builds all 8 images from source and starts the isolated, hardened stack
-docker compose -f docker-compose.product-ready.yml up -d --build
-```
-
-> Pre-built multi-arch (amd64 + arm64) images are also published to `ghcr.io/agentofreef/text2ontology-*:latest` by CI on every push to `main`, if you'd rather pull than build.
-
-### 3. Verify (only the gateway is reachable)
+### 2. Start and verify
 
 ```bash
-docker compose -f docker-compose.product-ready.yml ps          # all healthy; only gateway maps a host port
-curl -fsS http://localhost:28080/healthz                       # -> ok
-curl -sI  http://localhost:28080/ | grep -i location           # -> 302 Location: /lakehouse/  (relative)
+docker compose up -d                                     # pulls prebuilt :latest images
+curl -fsS http://localhost:28080/healthz                 # -> ok
+curl -sI  http://localhost:28080/ | grep -i location     # -> 302 Location: /lakehouse/  (relative)
 ```
 
-Open **http://localhost:28080** in a browser, sign in as `admin` with your `ADMIN_PASSWORD`, then add a chat model under `/settings/llm-config` (same as the Quick Start note).
+Open **http://localhost:28080**, sign in as `admin` with your `ADMIN_PASSWORD`, then add a chat model under `/settings/llm-config` (same as the Quick Start note).
 
 ### Operating notes
 
-- **Change / restrict the public port** — edit the gateway `ports:` in `docker-compose.product-ready.yml` (e.g. `8443:8080`). To keep it off the LAN and front it with your own TLS proxy, bind to loopback: `127.0.0.1:28080:8080`.
-- **TLS** — the gateway serves plain HTTP on its one port; terminate TLS at a reverse proxy in front (or add a TLS `server {}` to `services/gateway/nginx.conf`). HSTS is emitted but is a no-op over plain HTTP.
-- **Least-privilege DB roles (recommended)** — by default services connect as the Postgres superuser. To run each service on a scoped role: apply `ops/db-roles.sql` to the DB, set per-service `*_DSN` vars in `.env`, point each service's `DATABASE_URL` at its scoped role, and verify with `scripts/check-runtime-grants.sh`.
+- **TLS** — the gateway serves plain HTTP on `28080`; terminate TLS at a reverse proxy in front (or add a TLS `server {}` to `services/gateway/nginx.conf`). HSTS is emitted but is a no-op over plain HTTP.
+- **Restrict the public port** — edit the gateway `ports:` in `docker-compose.yml` (e.g. bind `127.0.0.1:28080:8080` to keep it off the LAN behind your own TLS proxy).
+- **Build / publish images** — users pull prebuilt images; maintainers build locally with `make build` (per-service `docker build`). CI publishes multi-arch (amd64 + arm64) `:latest` to `ghcr.io/agentofreef/text2ontology-*` on every push to `main`.
 - **Lifecycle**
   ```bash
-  docker compose -f docker-compose.product-ready.yml logs -f gateway
-  docker compose -f docker-compose.product-ready.yml down        # stop, keep the DB volume
-  docker compose -f docker-compose.product-ready.yml down -v      # stop and WIPE the DB volume
+  docker compose logs -f gateway
+  docker compose down            # stop, keep the DB volume
+  docker compose down -v         # stop and WIPE the DB volume
+  git pull && docker compose pull && docker compose up -d   # update to latest images
   ```
-- **Update** — `git pull && docker compose -f docker-compose.product-ready.yml up -d --build`.
 
 ---
 
@@ -297,7 +275,7 @@ Items inside each priority bucket are roughly ordered by what I'd reach for next
 
 | Area | What's in |
 |---|---|
-| Foundation | 6 Go services + Next.js frontend; 4-layer hexagonal architecture; Postgres + pgvector; self-contained docker compose; 7 images on GHCR |
+| Foundation | 6 Go services + Next.js frontend; 4-layer hexagonal architecture; Postgres + pgvector; single hardened docker compose (single ingress); 8 images on GHCR |
 | Ontology core | 7 concepts (OD / Property / OK / OL / Link / Causality / Intent / Keyword); three-tier recall (EXACT / FUZZY / VEC); Thread Memory Ledger; SmartQuery engine — deterministic ontology → SQL; per-OD `semantic_sql` over many physical tables |
 | Agent | Two modes (lakehouse / builder); ≥3-turn interview gate; `mark=false → human activate` lifecycle |
 | Regression testing | Named test suites of agent-facing questions (`ont_test_suite` / `ont_test_case`); background runner executes suites against the live stack; run-over-run diff at `/ontology/lakehouse-agent/dataset-testing` |

@@ -66,6 +66,11 @@ func listSourcesHandler(db *sql.DB) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "project_id required"})
 			return
 		}
+		// IDOR guard: project_id (underscore) bypasses the middleware's
+		// ?projectId= (camelCase) gate, so authorize the caller here.
+		if !authmw.EnforceProjectAccess(w, r, db, pid) {
+			return
+		}
 		rows, err := db.QueryContext(r.Context(), `
 			SELECT id, project_id, type, label, status,
 			       COALESCE(config_json::text, '{}'),
@@ -129,6 +134,11 @@ func lakehouseTablesHandler(db *sql.DB) http.HandlerFunc {
 		if _, err := uuid.Parse(pid); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "project_id required (uuid)"})
+			return
+		}
+		// IDOR guard: project_id is read from the body/underscore query, not the
+		// middleware-gated ?projectId=, so authorize the caller here.
+		if !authmw.EnforceProjectAccess(w, r, db, pid) {
 			return
 		}
 		// Schema name follows pbit.SanitizeSchemaName: "proj_" + hex (no dashes).
@@ -210,6 +220,14 @@ func sourceByIDHandler(db *sql.DB) http.HandlerFunc {
 		id := strings.TrimPrefix(r.URL.Path, prefix)
 		if id == "" || strings.Contains(id, "/") {
 			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+
+		// IDOR guard: this source is addressed by id with no project_id in the
+		// request, so resolve its project and authorize the caller (covers both
+		// GET and DELETE). Returns 404 on missing/forbidden so existence of
+		// another project's source is never confirmed.
+		if !authmw.EnforceEntityProject(w, r, db, "data_source", "id", id) {
 			return
 		}
 
