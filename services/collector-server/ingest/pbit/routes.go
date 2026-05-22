@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lib/pq"
 )
 
@@ -166,12 +167,20 @@ func handleImport(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		sseSetup(w)
-
 		if req.ImportId == "" || req.ProjectId == "" {
-			writeSSE(w, map[string]interface{}{"phase": "error", "error": "importId and projectId required"})
+			corsHeaders(w)
+			jsonResp(w, http.StatusBadRequest, map[string]string{"error": "importId and projectId required"})
 			return
 		}
+
+		// IDOR guard: projectId arrives in the JSON body (not gated by the auth
+		// middleware). Verify BEFORE switching to the SSE stream so a 401/403 can
+		// still be written as a normal JSON response.
+		if !authmw.EnforceProjectAccess(w, r, db, req.ProjectId) {
+			return
+		}
+
+		sseSetup(w)
 
 		stagingDir := filepath.Join(getStagingRoot(), req.ImportId)
 		xlsxDir := filepath.Join(stagingDir, "xlsx")
@@ -405,68 +414,72 @@ func handleImport(db *sql.DB) http.HandlerFunc {
 		// --- Step 5: Terminal transaction ---
 		writeSSE(w, map[string]interface{}{"phase": "committing"})
 
-		tx, err := db.Begin()
-		if err != nil {
-			// Cleanup staging.
-			_ = DropSchemaCascade(db, stagingSchema)
-			_ = os.RemoveAll(stagingDir)
-			failImport("begin terminal tx: " + err.Error())
-			return
-		}
-
-		// Merge staging tables into final schema (incremental — safe even if
-		// final schema already exists from a prior import).
-		if err := MergeStagingIntoFinal(tx, stagingSchema, finalSchema); err != nil {
-			tx.Rollback() //nolint:errcheck
-			_ = DropSchemaCascade(db, stagingSchema)
-			_ = os.RemoveAll(stagingDir)
-			failImport("merge schema: " + err.Error())
-			return
-		}
-
-		// Remove only the ontology rows for tables in this import (not all Od).
-		var tableNames []string
-		for _, t := range pbit.Tables {
-			tableNames = append(tableNames, t.Name)
-		}
-		if err := CleanOntologyByTableNames(r.Context(), tx, req.ProjectId, tableNames); err != nil {
-			tx.Rollback() //nolint:errcheck
-			failImport("clean ontology by table names: " + err.Error())
-			return
-		}
-
-		// The PBIT/PBIX batch import is keyed by import_id and has no data_source
-		// row, so leave data_source_id NULL ("").
-		if _, err := PopulateOntology(tx, req.ProjectId, finalSchema, pbit, derivedResults, ""); err != nil {
-			tx.Rollback() //nolint:errcheck
-			failImport("populate ontology: " + err.Error())
-			return
-		}
-
 		finalStatus := "success"
 		if anyTableFailed {
 			finalStatus = "partial"
 		}
 
-		if _, err := tx.Exec(`UPDATE ont_import_log SET status=$1 WHERE id=$2`, finalStatus, importLogID); err != nil {
-			tx.Rollback() //nolint:errcheck
-			failImport("update import log: " + err.Error())
-			return
-		}
+		// Serialize the staging→final merge + ontology write per-project so a
+		// concurrent import into the SAME project can't interleave on the shared
+		// proj_<hex> schema (see WithProjectLock). A nil return means the closure
+		// finished cleanly; a non-nil error has NOT yet been surfaced to the SSE
+		// stream, so the caller does that once below.
+		mergeErr := WithProjectLock(r.Context(), db, req.ProjectId, func(lctx context.Context) error {
+			tx, err := db.Begin()
+			if err != nil {
+				_ = DropSchemaCascade(db, stagingSchema)
+				_ = os.RemoveAll(stagingDir)
+				return fmt.Errorf("begin terminal tx: %w", err)
+			}
 
-		if _, err := tx.Exec(`
-			UPDATE project
-			SET source_type='pbit-lakehouse', lakehouse_schema=$1, status='active'
-			WHERE id=$2`,
-			finalSchema, req.ProjectId,
-		); err != nil {
-			tx.Rollback() //nolint:errcheck
-			failImport("update project: " + err.Error())
-			return
-		}
+			// Merge staging tables into final schema (incremental — safe even if
+			// final schema already exists from a prior import).
+			if err := MergeStagingIntoFinal(tx, stagingSchema, finalSchema); err != nil {
+				tx.Rollback() //nolint:errcheck
+				_ = DropSchemaCascade(db, stagingSchema)
+				_ = os.RemoveAll(stagingDir)
+				return fmt.Errorf("merge schema: %w", err)
+			}
 
-		if err := tx.Commit(); err != nil {
-			failImport("commit terminal tx: " + err.Error())
+			// Remove only the ontology rows for tables in this import (not all Od).
+			var tableNames []string
+			for _, t := range pbit.Tables {
+				tableNames = append(tableNames, t.Name)
+			}
+			if err := CleanOntologyByTableNames(lctx, tx, req.ProjectId, tableNames); err != nil {
+				tx.Rollback() //nolint:errcheck
+				return fmt.Errorf("clean ontology by table names: %w", err)
+			}
+
+			// The PBIT/PBIX batch import is keyed by import_id and has no data_source
+			// row, so leave data_source_id NULL ("").
+			if _, err := PopulateOntology(tx, req.ProjectId, finalSchema, pbit, derivedResults, ""); err != nil {
+				tx.Rollback() //nolint:errcheck
+				return fmt.Errorf("populate ontology: %w", err)
+			}
+
+			if _, err := tx.Exec(`UPDATE ont_import_log SET status=$1 WHERE id=$2`, finalStatus, importLogID); err != nil {
+				tx.Rollback() //nolint:errcheck
+				return fmt.Errorf("update import log: %w", err)
+			}
+
+			if _, err := tx.Exec(`
+				UPDATE project
+				SET source_type='pbit-lakehouse', lakehouse_schema=$1, status='active'
+				WHERE id=$2`,
+				finalSchema, req.ProjectId,
+			); err != nil {
+				tx.Rollback() //nolint:errcheck
+				return fmt.Errorf("update project: %w", err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit terminal tx: %w", err)
+			}
+			return nil
+		})
+		if mergeErr != nil {
+			failImport(mergeErr.Error())
 			return
 		}
 
@@ -520,6 +533,12 @@ func handleAddTable(db *sql.DB) http.HandlerFunc {
 		tableName := r.FormValue("tableName")
 		if projectID == "" || tableName == "" {
 			jsonResp(w, 400, map[string]string{"error": "projectId and tableName required"})
+			return
+		}
+
+		// IDOR guard: projectId arrives in the multipart body (not gated by the
+		// auth middleware). Verify access before touching the project's lakehouse.
+		if !authmw.EnforceProjectAccess(w, r, db, projectID) {
 			return
 		}
 

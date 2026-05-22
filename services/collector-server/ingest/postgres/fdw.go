@@ -27,7 +27,14 @@ import (
 //
 // db is the ontology's own Postgres (collector DB). cfg describes the remote.
 // tables are "schema.table" names (the form Discover emits).
-func SetupForeignSchema(ctx context.Context, db *sql.DB, dsID, finalSchema string, cfg Config, tables []string) error {
+//
+// renameMap (optional) maps the imported base table name (the part after the
+// last dot in each "schema.table") to a collision-free name within the project:
+// after IMPORT FOREIGN SCHEMA lands the foreign tables under their original
+// names, each entry triggers an ALTER FOREIGN TABLE ... RENAME so a second data
+// source in the same project does not collide with an existing table. Pass nil
+// to import under the original names.
+func SetupForeignSchema(ctx context.Context, db *sql.DB, dsID, finalSchema string, cfg Config, tables []string, renameMap map[string]string) error {
 	if len(tables) == 0 {
 		return fmt.Errorf("SetupForeignSchema: no tables selected")
 	}
@@ -76,10 +83,34 @@ func SetupForeignSchema(ctx context.Context, db *sql.DB, dsID, finalSchema strin
 		return fmt.Errorf("create final schema %q: %w", finalSchema, err)
 	}
 
+	// Import into a private per-source staging schema first, then move each
+	// foreign table into finalSchema under its collision-free name. Importing
+	// straight INTO finalSchema would fail when another source in the project
+	// already owns a table of the same original name (IMPORT FOREIGN SCHEMA can't
+	// rename on import); the staging hop lets us land + rename safely.
+	importSchema := finalSchema + "_fdwimp_" + strings.ReplaceAll(dsID, "-", "_")
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		`DROP SCHEMA IF EXISTS %s CASCADE`, pq.QuoteIdentifier(importSchema),
+	)); err != nil {
+		return fmt.Errorf("drop stale import schema: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE SCHEMA %s`, pq.QuoteIdentifier(importSchema),
+	)); err != nil {
+		return fmt.Errorf("create import schema: %w", err)
+	}
+	// Always clean the staging schema up — on success it's empty after the moves,
+	// on failure it holds partial imports we don't want to leak.
+	defer func() {
+		_, _ = db.ExecContext(ctx, fmt.Sprintf(
+			`DROP SCHEMA IF EXISTS %s CASCADE`, pq.QuoteIdentifier(importSchema)))
+	}()
+
 	// IMPORT FOREIGN SCHEMA operates per remote schema. Group the selected
 	// "schema.table" names by their remote schema; bare names default to
-	// "public". All groups import INTO the single flat finalSchema, matching
-	// the file/sqlite path's flat-table-namespace-per-project convention.
+	// "public". All groups import INTO the staging schema, then move INTO the
+	// single flat finalSchema, matching the file/sqlite flat-table-namespace
+	// convention.
 	bySchema := map[string][]string{}
 	for _, t := range tables {
 		remoteSchema, name := "public", t
@@ -98,10 +129,67 @@ func SetupForeignSchema(ctx context.Context, db *sql.DB, dsID, finalSchema strin
 			pq.QuoteIdentifier(remoteSchema),
 			strings.Join(quoted, ", "),
 			pq.QuoteIdentifier(serverName),
-			pq.QuoteIdentifier(finalSchema),
+			pq.QuoteIdentifier(importSchema),
 		)); err != nil {
 			return fmt.Errorf("import foreign schema %q: %w", remoteSchema, err)
 		}
 	}
+
+	// Move each imported foreign table into finalSchema under its collision-free
+	// name (renameMap[orig] → final). A different source resolves to a suffixed
+	// name; an idempotent re-confirm of THIS source resolves back to its own
+	// name, so we DROP any same-(final-)named table first to replace cleanly.
+	imported, err := listForeignTables(ctx, db, importSchema)
+	if err != nil {
+		return fmt.Errorf("list imported foreign tables: %w", err)
+	}
+	for _, orig := range imported {
+		final := orig
+		if v, ok := renameMap[orig]; ok && v != "" {
+			final = v
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`DROP FOREIGN TABLE IF EXISTS %s.%s CASCADE`,
+			pq.QuoteIdentifier(finalSchema), pq.QuoteIdentifier(final),
+		)); err != nil {
+			return fmt.Errorf("drop conflicting foreign table %s.%s: %w", finalSchema, final, err)
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER FOREIGN TABLE %s.%s SET SCHEMA %s`,
+			pq.QuoteIdentifier(importSchema), pq.QuoteIdentifier(orig),
+			pq.QuoteIdentifier(finalSchema),
+		)); err != nil {
+			return fmt.Errorf("move foreign table %s.%s → %s: %w", importSchema, orig, finalSchema, err)
+		}
+		if final != orig {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf(
+				`ALTER FOREIGN TABLE %s.%s RENAME TO %s`,
+				pq.QuoteIdentifier(finalSchema), pq.QuoteIdentifier(orig),
+				pq.QuoteIdentifier(final),
+			)); err != nil {
+				return fmt.Errorf("rename foreign table %s.%s → %s: %w", finalSchema, orig, final, err)
+			}
+		}
+	}
 	return nil
+}
+
+// listForeignTables returns the foreign-table names in a schema.
+func listForeignTables(ctx context.Context, db *sql.DB, schema string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT foreign_table_name FROM information_schema.foreign_tables
+		WHERE foreign_table_schema = $1 ORDER BY foreign_table_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }

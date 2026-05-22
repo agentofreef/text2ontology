@@ -23,9 +23,12 @@ package pbix
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,9 +40,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
 	"github.com/lakehouse2ontology/services/collector-server/job"
 )
+
+// errCancelled is the in-flight sentinel for a user-cancelled extract job: it
+// unwinds the project-locked load closure without marking the data_source
+// failed (the worker's rep.Cancelled() path sets the terminal status).
+var errCancelled = errors.New("pbix: cancelled by user")
+
+// dupErr signals that an upload's content already exists in the project, so the
+// handler should answer 409 instead of 500.
+type dupErr struct{ existingID string }
+
+func (e *dupErr) Error() string { return "duplicate content (data_source " + e.existingID + ")" }
 
 // pbixSlots is a counting semaphore bounding concurrent pbix extractions. The
 // decode is RAM/CPU heavy, so parallelism is capped here (NOT by request rate
@@ -107,8 +122,9 @@ type pbixPayload struct {
 }
 
 // handleUpload — POST /api/connector/pbix/upload (multipart).
-// Saves the .pbix, inserts data_source(status=syncing), enqueues the extract
-// job, and returns immediately. The heavy work happens on the worker pool.
+// Streams the .pbix to disk while hashing it, then under the per-project lock
+// rejects byte-identical re-uploads (409), inserts data_source(status=syncing),
+// and enqueues the extract job. Heavy decode happens later on the worker pool.
 func handleUpload(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
@@ -137,6 +153,13 @@ func handleUpload(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// IDOR guard: the auth middleware only gates ?projectId= in the query
+		// string; this route carries project_id in the multipart body, so verify
+		// the bearer caller can access it (writes 401/403 on failure).
+		if !authmw.EnforceProjectAccess(w, r, db, projectID) {
+			return
+		}
+
 		file, hdr, err := r.FormFile("file")
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing file"})
@@ -153,52 +176,83 @@ func handleUpload(db *sql.DB) http.HandlerFunc {
 		if label == "" {
 			label = hdr.Filename
 		}
-		cfg, _ := json.Marshal(map[string]any{"filename": hdr.Filename, "size": hdr.Size, "ext": ".pbix"})
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO data_source (id, project_id, type, label, config_json, status)
-			VALUES ($1, $2, 'pbi', $3, $4, 'syncing')
-		`, dsID, projectID, label, cfg); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db insert: " + err.Error()})
-			return
-		}
 
+		// Stream to disk while computing the content hash (used for dedup below).
 		dir := filepath.Join(uploadRoot(), dsID)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			failDS(ctx, db, dsID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
 		diskPath := filepath.Join(dir, "source.pbix")
 		out, err := os.Create(diskPath)
 		if err != nil {
-			failDS(ctx, db, dsID)
+			os.RemoveAll(dir)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		written, copyErr := io.Copy(out, io.LimitReader(file, maxBytes()+1))
+		hasher := sha256.New()
+		written, copyErr := io.Copy(io.MultiWriter(out, hasher), io.LimitReader(file, maxBytes()+1))
 		out.Close()
 		if copyErr != nil {
-			os.Remove(diskPath)
-			failDS(ctx, db, dsID)
+			os.RemoveAll(dir)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": copyErr.Error()})
 			return
 		}
 		if written > maxBytes() {
-			os.Remove(diskPath)
-			failDS(ctx, db, dsID)
+			os.RemoveAll(dir)
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "file exceeds size limit"})
 			return
 		}
+		contentHash := hex.EncodeToString(hasher.Sum(nil))
 
-		jobID, err := job.Enqueue(ctx, db, job.EnqueueArgs{
-			DataSourceID: &dsID,
-			ProjectID:    projectID,
-			Kind:         job.KindPbixExtract,
-			Payload:      pbixPayload{DiskPath: diskPath, Filename: hdr.Filename},
+		// Dedup + register atomically under the per-project lock, so two
+		// byte-identical concurrent uploads cannot both pass the check.
+		var jobID string
+		lockErr := pbit.WithProjectLock(ctx, db, projectID, func(ctx context.Context) error {
+			var existingID string
+			err := db.QueryRowContext(ctx, `
+				SELECT id FROM data_source
+				WHERE project_id = $1 AND content_hash = $2 AND status <> 'failed'
+				LIMIT 1`, projectID, contentHash).Scan(&existingID)
+			if err == nil {
+				return &dupErr{existingID: existingID}
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("dedup check: %w", err)
+			}
+
+			cfg, _ := json.Marshal(map[string]any{"filename": hdr.Filename, "size": hdr.Size, "ext": ".pbix"})
+			if _, err := db.ExecContext(ctx, `
+				INSERT INTO data_source (id, project_id, type, label, config_json, status, content_hash)
+				VALUES ($1, $2, 'pbi', $3, $4, 'syncing', $5)
+			`, dsID, projectID, label, cfg, contentHash); err != nil {
+				return fmt.Errorf("db insert: %w", err)
+			}
+
+			jid, err := job.Enqueue(ctx, db, job.EnqueueArgs{
+				DataSourceID: &dsID,
+				ProjectID:    projectID,
+				Kind:         job.KindPbixExtract,
+				Payload:      pbixPayload{DiskPath: diskPath, Filename: hdr.Filename},
+			})
+			if err != nil {
+				_, _ = db.ExecContext(ctx, `DELETE FROM data_source WHERE id = $1`, dsID)
+				return fmt.Errorf("enqueue: %w", err)
+			}
+			jobID = jid
+			return nil
 		})
-		if err != nil {
-			failDS(ctx, db, dsID)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "enqueue: " + err.Error()})
+		if lockErr != nil {
+			os.RemoveAll(dir)
+			var de *dupErr
+			if errors.As(lockErr, &de) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":      "identical content already imported in this project; delete the existing source to re-upload",
+					"existingId": de.existingID,
+				})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": lockErr.Error()})
 			return
 		}
 
@@ -270,6 +324,27 @@ func splitCard(c string) (from, to string) {
 	return "", ""
 }
 
+// decollideSchema rewrites the parsed schema's table names — and the table
+// endpoints of every relationship — using the raw→final map produced by
+// pbit.ResolveCollisionFreeNames, so the ont_object_type names PopulateOntology
+// generates match the physical tables actually created (and links still resolve).
+func decollideSchema(s *pbit.PbitSchema, nameMap map[string]string) *pbit.PbitSchema {
+	mapName := func(n string) string {
+		if v, ok := nameMap[n]; ok {
+			return v
+		}
+		return n
+	}
+	for i := range s.Tables {
+		s.Tables[i].Name = mapName(s.Tables[i].Name)
+	}
+	for i := range s.Relationships {
+		s.Relationships[i].FromTable = mapName(s.Relationships[i].FromTable)
+		s.Relationships[i].ToTable = mapName(s.Relationships[i].ToTable)
+	}
+	return s
+}
+
 // HandlePbixExtractJob is registered with job.Runner under KindPbixExtract.
 // Bounded by the pbixSlots semaphore + a per-job timeout; runs pbix_to_csv.py,
 // loads each table CSV into the project lakehouse schema, then populates the
@@ -338,66 +413,82 @@ func HandlePbixExtractJob(ctx context.Context, db *sql.DB, j *job.Job, rep *job.
 	// created as text (robust under COPY); the typed ontology comes from
 	// PopulateOntology below — mirrors the existing file-upload staging model.
 	finalSchema := pbit.SanitizeSchemaName(projectID)
-	if err := pbit.CreateStagingSchema(db, finalSchema); err != nil {
-		failDS(ctx, db, dsID)
-		return fmt.Errorf("create lakehouse schema: %w", err)
-	}
-
-	total := len(meta.Tables)
-	for i, t := range meta.Tables {
-		if rep.Cancelled() {
-			return nil
-		}
-		header, rowIter, closeFn, oerr := openCSV(filepath.Join(outDir, t.CSVFile))
-		if oerr != nil {
-			failDS(ctx, db, dsID)
-			return fmt.Errorf("open csv %q: %w", t.CSVFile, oerr)
+	lockErr := pbit.WithProjectLock(ctx, db, projectID, func(ctx context.Context) error {
+		if err := pbit.CreateStagingSchema(db, finalSchema); err != nil {
+			return fmt.Errorf("create lakehouse schema: %w", err)
 		}
 
-		cols := make([]pbit.PbitColumn, 0, len(header))
-		for _, h := range header {
-			cols = append(cols, pbit.PbitColumn{Name: h, DataType: "string"})
+		// Map raw table names → names unique within the project (across all data
+		// sources). Same-source retries reuse the original names.
+		rawNames := make([]string, 0, len(meta.Tables))
+		for _, t := range meta.Tables {
+			rawNames = append(rawNames, t.Name)
 		}
-		if err := pbit.CreateLakehouseTable(db, finalSchema, t.Name, cols); err != nil {
-			closeFn()
-			failDS(ctx, db, dsID)
-			return fmt.Errorf("create table %q: %w", t.Name, err)
+		nameMap, err := pbit.ResolveCollisionFreeNames(db, finalSchema, projectID, dsID, p.Filename, rawNames)
+		if err != nil {
+			return fmt.Errorf("resolve collision-free table names: %w", err)
 		}
-		if len(header) > 0 {
-			if _, err := pbit.CopyRowsInto(db, finalSchema, t.Name, header, rowIter); err != nil {
-				closeFn()
-				failDS(ctx, db, dsID)
-				return fmt.Errorf("copy into %q: %w", t.Name, err)
+
+		total := len(meta.Tables)
+		for i, t := range meta.Tables {
+			if rep.Cancelled() {
+				return errCancelled
 			}
+			tableName := nameMap[t.Name]
+			header, rowIter, closeFn, oerr := openCSV(filepath.Join(outDir, t.CSVFile))
+			if oerr != nil {
+				return fmt.Errorf("open csv %q: %w", t.CSVFile, oerr)
+			}
+
+			cols := make([]pbit.PbitColumn, 0, len(header))
+			for _, h := range header {
+				cols = append(cols, pbit.PbitColumn{Name: h, DataType: "string"})
+			}
+			if err := pbit.CreateLakehouseTable(db, finalSchema, tableName, cols); err != nil {
+				closeFn()
+				return fmt.Errorf("create table %q: %w", tableName, err)
+			}
+			if len(header) > 0 {
+				if _, err := pbit.CopyRowsInto(db, finalSchema, tableName, header, rowIter); err != nil {
+					closeFn()
+					return fmt.Errorf("copy into %q: %w", tableName, err)
+				}
+			}
+			closeFn()
+
+			pct := 10 + int(float64(i+1)/float64(total)*80)
+			rep.Update("loading", pct, int64(i+1), int64(total), 0, fmt.Sprintf("加载表 %s", tableName))
 		}
-		closeFn()
 
-		pct := 10 + int(float64(i+1)/float64(total)*80)
-		rep.Update("loading", pct, int64(i+1), int64(total), 0, fmt.Sprintf("加载表 %s", t.Name))
-	}
+		// Ontology rows (typed from metadata, table names de-collided) in one
+		// terminal transaction.
+		rep.Update("ontology", 92, 0, 0, 0, "生成本体")
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin ontology tx: %w", err)
+		}
+		if _, err := pbit.PopulateOntology(tx, projectID, finalSchema, decollideSchema(toPbitSchema(&meta), nameMap), nil, dsID); err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("populate ontology: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit ontology tx: %w", err)
+		}
 
-	// Ontology rows (typed from metadata) in one terminal transaction.
-	rep.Update("ontology", 92, 0, 0, 0, "生成本体")
-	tx, err := db.Begin()
-	if err != nil {
+		if _, err := db.ExecContext(ctx, `
+			UPDATE data_source SET status='ready', staging_schema=$1, last_sync_at=now(), updated_at=now()
+			WHERE id=$2
+		`, finalSchema, dsID); err != nil {
+			return fmt.Errorf("mark data_source ready: %w", err)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		if errors.Is(lockErr, errCancelled) {
+			return nil // worker sets the cancelled terminal status via rep.Cancelled()
+		}
 		failDS(ctx, db, dsID)
-		return fmt.Errorf("begin ontology tx: %w", err)
-	}
-	if _, err := pbit.PopulateOntology(tx, projectID, finalSchema, toPbitSchema(&meta), nil, dsID); err != nil {
-		tx.Rollback() //nolint:errcheck
-		failDS(ctx, db, dsID)
-		return fmt.Errorf("populate ontology: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		failDS(ctx, db, dsID)
-		return fmt.Errorf("commit ontology tx: %w", err)
-	}
-
-	if _, err := db.ExecContext(ctx, `
-		UPDATE data_source SET status='ready', staging_schema=$1, last_sync_at=now(), updated_at=now()
-		WHERE id=$2
-	`, finalSchema, dsID); err != nil {
-		return fmt.Errorf("mark data_source ready: %w", err)
+		return lockErr
 	}
 
 	// Best-effort: drop the extracted CSVs (keep source.pbix for re-runs).

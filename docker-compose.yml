@@ -215,8 +215,11 @@ services:
 
   collector-server:
     image: ghcr.io/agentofreef/text2ontology-collector-server:${IMAGE_TAG:-latest}
-    mem_limit: 1g
-    cpus: '1.0'
+    # PBIX/PBIT decode is a Python subprocess (~7s, ~235MB peak per file). Job
+    # worker count and the pbix decode semaphore are kept equal so workers never
+    # block idle on the semaphore; mem/cpu are sized for that concurrency.
+    mem_limit: ${COLLECTOR_MEM_LIMIT:-3g}
+    cpus: '${COLLECTOR_CPUS:-8.0}'
     pids_limit: 512
     command: ["-port", "8096"]
     environment:
@@ -226,6 +229,12 @@ services:
       PBIT_STAGING_ROOT: /data/pbit-staging
       PBIX_SCRIPTS_DIR: /app/scripts
       FILE_UPLOAD_ROOT: /data/uploads
+      # Parallel PBIX decode slots + job workers (kept equal). Each decode peaks
+      # ~235MB; 8 × ~235MB ≈ 1.9G fits the 3g limit. Load-tested: 16/16/5g
+      # saturates CPU+RAM and starves the upload path — 8 is the balanced default.
+      # Raise these three together (CONCURRENCY/MEM_LIMIT/CPUS) for more throughput.
+      COLLECTOR_PBIX_CONCURRENCY: "${COLLECTOR_PBIX_CONCURRENCY:-8}"
+      COLLECTOR_JOB_WORKERS: "${COLLECTOR_JOB_WORKERS:-8}"
     volumes:
     - collector-staging:/data/pbit-staging
     - collector-uploads:/data/uploads

@@ -2,6 +2,9 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +19,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lakehouse2ontology/authmw"
 	"github.com/lakehouse2ontology/contracts"
+	"github.com/lakehouse2ontology/services/collector-server/ingest/pbit"
 	"github.com/lakehouse2ontology/services/collector-server/job"
 )
 
@@ -176,6 +181,12 @@ func (s *Service) HandleURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// IDOR guard: project_id arrives in the JSON body, which the auth
+	// middleware does NOT gate (it only gates ?projectId=). Verify access.
+	if !authmw.EnforceProjectAccess(w, r, s.DB, req.ProjectID) {
+		return
+	}
+
 	allowHTTP := os.Getenv("COLLECTOR_ALLOW_HTTP") == "true"
 	parsedURL, ips, err := validateURL(req.URL, allowHTTP)
 	if err != nil {
@@ -258,7 +269,6 @@ func (s *Service) HandleURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create data_source row.
 	dsID := uuid.New().String()
 	label := req.Label
 	if label == "" {
@@ -273,16 +283,8 @@ func (s *Service) HandleURL(w http.ResponseWriter, r *http.Request) {
 		"scheme": parsedURL.Scheme,
 	}
 	cfgRaw, _ := json.Marshal(configJSON)
-	_, err = s.DB.ExecContext(ctx, `
-		INSERT INTO data_source (id, project_id, type, label, config_json, status)
-		VALUES ($1, $2, 'file', $3, $4, 'syncing')
-	`, dsID, req.ProjectID, label, cfgRaw)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", err.Error())
-		return
-	}
 
-	// Write to disk with size limit.
+	// Write to disk with size limit while computing the content hash (dedup).
 	dirPath := filepath.Join(s.UploadRoot, dsID)
 	if mkErr := os.MkdirAll(dirPath, 0755); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "MKDIR_FAILED", mkErr.Error())
@@ -296,64 +298,93 @@ func (s *Service) HandleURL(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(diskPath)
 	if err != nil {
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
 		return
 	}
-	written, copyErr := io.Copy(out, io.LimitReader(resp.Body, s.MaxBytes+1))
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(out, hasher), io.LimitReader(resp.Body, s.MaxBytes+1))
 	out.Close()
 
 	if copyErr != nil {
-		os.Remove(diskPath)
-		_, _ = s.DB.ExecContext(ctx, `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusBadGateway, "DOWNLOAD_FAILED", copyErr.Error())
 		return
 	}
 	if written > s.MaxBytes {
-		os.Remove(diskPath)
-		_, _ = s.DB.ExecContext(ctx, `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE",
 			fmt.Sprintf("downloaded %d bytes > limit %d", written, s.MaxBytes))
 		return
 	}
+	contentHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Parse headers — supports multi-sheet xlsx.
 	ext := strings.ToLower(filepath.Ext(base))
 	sheets, parseErr := parseHeaders(diskPath, ext)
 	if parseErr != nil {
-		_, _ = s.DB.ExecContext(ctx, `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "PARSE_FAILED", parseErr.Error())
 		return
 	}
 	if len(sheets) == 0 {
-		_, _ = s.DB.ExecContext(ctx, `UPDATE data_source SET status='failed', updated_at=now() WHERE id=$1`, dsID)
+		os.RemoveAll(dirPath)
 		writeError(w, http.StatusUnprocessableEntity, "EMPTY_FILE", "no readable sheets / headers found")
 		return
 	}
 
-	// Persist staging_schema then enqueue async COPY job. Browser sees
-	// catalog instantly while the worker pool drains rows in background.
 	stagingSchema := "collector_" + strings.ReplaceAll(dsID, "-", "_")
-	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE data_source SET staging_schema=$1, updated_at=now() WHERE id=$2`,
-		stagingSchema, dsID); err != nil {
-		s.failDataSource(ctx, dsID)
-		writeError(w, http.StatusInternalServerError, "DB_UPDATE_FAILED", err.Error())
-		return
-	}
-	jobID, err := job.Enqueue(ctx, s.DB, job.EnqueueArgs{
-		DataSourceID: &dsID,
-		ProjectID:    req.ProjectID,
-		Kind:         job.KindFileUpload,
-		Payload: fileUploadPayload{
-			DiskPath:      diskPath,
-			Ext:           ext,
-			StagingSchema: stagingSchema,
-			Filename:      base,
-		},
+
+	// Dedup + register atomically under the per-project lock. Browser sees
+	// catalog instantly while the worker pool drains rows in background.
+	var jobID string
+	lockErr := pbit.WithProjectLock(ctx, s.DB, req.ProjectID, func(lctx context.Context) error {
+		var existingID string
+		dErr := s.DB.QueryRowContext(lctx, `
+			SELECT id FROM data_source
+			WHERE project_id = $1 AND content_hash = $2 AND status <> 'failed'
+			LIMIT 1`, req.ProjectID, contentHash).Scan(&existingID)
+		if dErr == nil {
+			return &dupErr{existingID: existingID}
+		}
+		if !errors.Is(dErr, sql.ErrNoRows) {
+			return fmt.Errorf("dedup check: %w", dErr)
+		}
+
+		if _, err := s.DB.ExecContext(lctx, `
+			INSERT INTO data_source (id, project_id, type, label, config_json, status, staging_schema, content_hash)
+			VALUES ($1, $2, 'file', $3, $4, 'syncing', $5, $6)
+		`, dsID, req.ProjectID, label, cfgRaw, stagingSchema, contentHash); err != nil {
+			return fmt.Errorf("db insert: %w", err)
+		}
+
+		jid, err := job.Enqueue(lctx, s.DB, job.EnqueueArgs{
+			DataSourceID: &dsID,
+			ProjectID:    req.ProjectID,
+			Kind:         job.KindFileUpload,
+			Payload: fileUploadPayload{
+				DiskPath:      diskPath,
+				Ext:           ext,
+				StagingSchema: stagingSchema,
+				Filename:      base,
+			},
+		})
+		if err != nil {
+			_, _ = s.DB.ExecContext(lctx, `DELETE FROM data_source WHERE id = $1`, dsID)
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		jobID = jid
+		return nil
 	})
-	if err != nil {
-		s.failDataSource(ctx, dsID)
-		writeError(w, http.StatusInternalServerError, "JOB_ENQUEUE_FAILED", err.Error())
+	if lockErr != nil {
+		os.RemoveAll(dirPath)
+		var de *dupErr
+		if errors.As(lockErr, &de) {
+			writeError(w, http.StatusConflict, "DUPLICATE_CONTENT",
+				"identical content already imported in this project; delete the existing source to re-upload")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DB_INSERT_FAILED", lockErr.Error())
 		return
 	}
 

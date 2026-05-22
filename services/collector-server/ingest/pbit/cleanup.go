@@ -88,6 +88,85 @@ func MergeStagingIntoFinal(tx *sql.Tx, stagingSchema, finalSchema string) error 
 	return nil
 }
 
+// MergeStagingIntoFinalWithNames is MergeStagingIntoFinal plus per-table
+// renaming: each staging table is moved into finalSchema under the name given
+// by nameMap[stagingTable] (falling back to the staging name when absent). It
+// is the de-collision-aware merge used by the wizard path (file/sqlite), where
+// two data sources can ship identically-named raw tables into the SAME
+// proj_<hex> schema — the rename keeps the second source from clobbering the
+// first. Must run inside an open transaction (caller commits/rolls back).
+func MergeStagingIntoFinalWithNames(tx *sql.Tx, stagingSchema, finalSchema string, nameMap map[string]string) error {
+	if err := pgschema.CreateSchemaWithGrants(context.Background(), tx, finalSchema); err != nil {
+		return fmt.Errorf("MergeStagingIntoFinalWithNames: ensure final schema %q: %w", finalSchema, err)
+	}
+
+	rows, err := tx.Query(
+		`SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename`,
+		stagingSchema,
+	)
+	if err != nil {
+		return fmt.Errorf("MergeStagingIntoFinalWithNames: list staging tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return fmt.Errorf("MergeStagingIntoFinalWithNames: scan table name: %w", err)
+		}
+		tables = append(tables, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("MergeStagingIntoFinalWithNames: iterate staging tables: %w", err)
+	}
+
+	for _, t := range tables {
+		final := t
+		if v, ok := nameMap[t]; ok && v != "" {
+			final = v
+		}
+		// Drop any existing same-(final-)named table in the final schema. With a
+		// correct nameMap this only fires on an idempotent re-import of the SAME
+		// source (final == an existing table owned by this source); a different
+		// source resolves to a suffixed name and never lands here.
+		if _, err := tx.Exec(fmt.Sprintf(
+			`DROP TABLE IF EXISTS %s.%s CASCADE`,
+			pq.QuoteIdentifier(finalSchema),
+			pq.QuoteIdentifier(final),
+		)); err != nil {
+			return fmt.Errorf("MergeStagingIntoFinalWithNames: drop conflicting %s.%s: %w", finalSchema, final, err)
+		}
+		// Move the staging table into the final schema, renaming if needed.
+		if _, err := tx.Exec(fmt.Sprintf(
+			`ALTER TABLE %s.%s SET SCHEMA %s`,
+			pq.QuoteIdentifier(stagingSchema),
+			pq.QuoteIdentifier(t),
+			pq.QuoteIdentifier(finalSchema),
+		)); err != nil {
+			return fmt.Errorf("MergeStagingIntoFinalWithNames: move %s.%s → %s: %w", stagingSchema, t, finalSchema, err)
+		}
+		if final != t {
+			if _, err := tx.Exec(fmt.Sprintf(
+				`ALTER TABLE %s.%s RENAME TO %s`,
+				pq.QuoteIdentifier(finalSchema),
+				pq.QuoteIdentifier(t),
+				pq.QuoteIdentifier(final),
+			)); err != nil {
+				return fmt.Errorf("MergeStagingIntoFinalWithNames: rename %s.%s → %s: %w", finalSchema, t, final, err)
+			}
+		}
+	}
+
+	if _, err := tx.Exec(fmt.Sprintf(
+		`DROP SCHEMA %s CASCADE`,
+		pq.QuoteIdentifier(stagingSchema),
+	)); err != nil {
+		return fmt.Errorf("MergeStagingIntoFinalWithNames: drop staging schema %q: %w", stagingSchema, err)
+	}
+	return nil
+}
+
 // CleanOntologyByTableNames deletes ont_object_type rows (and their CASCADE
 // dependents: ont_property, lakehouse_keyword, ont_link_type) for the specific
 // table names being re-imported. This makes import idempotent on projects that
