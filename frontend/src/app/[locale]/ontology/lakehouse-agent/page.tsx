@@ -1270,32 +1270,13 @@ function LakehouseAgentChat() {
           </>
           )}
 
-          {/* 任务 tab — the mission ledger (任务可达器) plus the current question's
-              分词, surfaced live from the ledger as the agent runs (no manual
-              trigger). The 分词 is its own section under the ledger. */}
+          {/* 任务 tab — the mission ledger (任务可达器). The current question's 分词
+              is rendered inside the mission card, directly under the question
+              (passed as `tokens`), surfaced live from the ledger as the agent
+              runs — no manual trigger. */}
           {panelTab === 'mission' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-              <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
-              {currentTurnTokens.length > 0 && (
-                <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2">
-                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-                    {tw('diag_tokens_label')}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {currentTurnTokens.map(tk => (
-                      <span
-                        key={tk.token}
-                        title={tk.strongHit ? 'STRONG' : 'WEAK'}
-                        className={`rounded-md border px-2 py-0.5 font-mono text-xs ${
-                          tk.strongHit ? 'border-ink bg-white text-ink' : 'border-border bg-canvas-alt text-ink-muted'
-                        }`}
-                      >
-                        {tk.token}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <MissionLedger missions={missions} tokens={currentTurnTokens} onRefresh={() => refetchMissions(threadId)} />
             </div>
           )}
         </div>

@@ -254,7 +254,7 @@ function MissionSummary({ mission, onOpen }: { mission: Mission; onOpen: () => v
 // 任务可达器 verdict + decomposition, capability gap, the sub-question task
 // list, and the synthesis answer. Shared by the inline panel view and the
 // history modal so the two never drift.
-function MissionDetailBody({ mission }: { mission: Mission }) {
+function MissionDetailBody({ mission, tokens }: { mission: Mission; tokens?: QuestionToken[] }) {
   const tasks = mission.tasks || []
   return (
     <div className="space-y-3">
@@ -262,6 +262,25 @@ function MissionDetailBody({ mission }: { mission: Mission }) {
         <div className="text-[9px] font-mono font-semibold text-gray-400 uppercase tracking-[0.15em] mb-1">问题</div>
         <div className="text-[13px] text-gray-800 leading-relaxed">{mission.question}</div>
       </div>
+      {/* 分词 — the LLM's tokenization of this question, shown right under it. */}
+      {tokens && tokens.length > 0 && (
+        <div>
+          <div className="text-[9px] font-mono font-semibold text-gray-400 uppercase tracking-[0.15em] mb-1">分词</div>
+          <div className="flex flex-wrap gap-1">
+            {tokens.map((tk, i) => (
+              <span
+                key={i}
+                title={tk.strongHit ? 'STRONG' : 'WEAK'}
+                className={`rounded-sm border px-1.5 py-0.5 font-mono text-[11px] ${
+                  tk.strongHit ? 'border-gray-700 bg-gray-700 text-white' : 'border-gray-300 bg-gray-50 text-gray-600'
+                }`}
+              >
+                {tk.token}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {mission.reachability && <ReachabilityBlock v={mission.reachability} />}
       {mission.blocked_root && <CapabilityGapBanner reason={mission.blocked_root} />}
       {tasks.length > 0 && (
@@ -328,16 +347,26 @@ function MissionModal({ mission, onClose }: { mission: Mission; onClose: () => v
 
 // ─── Public component ────────────────────────────────────────────────────────
 
+// QuestionToken is the current question's 分词 (tokenization), shown under the
+// question inside the live mission card. strongHit mirrors the recall ledger.
+export interface QuestionToken {
+  token: string
+  strongHit?: boolean
+}
+
 interface MissionLedgerProps {
   missions: Mission[]
   loading?: boolean
+  // The current question's tokenization, rendered under the question of the
+  // newest (inline) mission. Optional — history missions don't carry it.
+  tokens?: QuestionToken[]
   // Called when the user clicks a mission to open the modal — gives the
   // parent a chance to refetch so the modal sees the freshest reachability /
   // synthesis instead of the snapshot taken at threadId-mount time.
   onRefresh?: () => void | Promise<void>
 }
 
-export function MissionLedger({ missions, loading, onRefresh }: MissionLedgerProps) {
+export function MissionLedger({ missions, loading, tokens, onRefresh }: MissionLedgerProps) {
   const [collapsed, setCollapsed] = useState(false)
   // Track by id, not object, so the modal sees the freshest mission
   // version each render (the parent refetches as the turn progresses).
@@ -378,7 +407,7 @@ export function MissionLedger({ missions, loading, onRefresh }: MissionLedgerPro
               {/* Current mission — full detail inline. */}
               {current && (
                 <div className="bg-white border border-gray-200 rounded-sm p-2.5 shadow-sm">
-                  <MissionDetailBody mission={current} />
+                  <MissionDetailBody mission={current} tokens={tokens} />
                 </div>
               )}
               {/* History — compact rows, click to open the modal. */}

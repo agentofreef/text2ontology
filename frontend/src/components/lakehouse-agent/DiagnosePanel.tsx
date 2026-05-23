@@ -9,7 +9,7 @@
 // standalone Token-Recall page; (3) one-click jumps to the two fix levers
 // (触发词/分词 and 本体). It calls NO new backend endpoint.
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { useMessage } from '@/lib/message'
 import { useStyleMode } from '@/lib/style-mode'
@@ -64,6 +64,18 @@ export function DiagnosePanel({
     } catch { msg.error(tw('diag_fail')) }
     finally { setLoading(false) }
   }
+
+  // Auto-diagnose when the AI is asked a new question — the 分词 / 召回 result
+  // shows automatically, no manual click. Runs once per distinct question; the
+  // button below stays as a manual re-run (e.g. after editing a fix lever).
+  const lastRunRef = useRef('')
+  useEffect(() => {
+    const q = question.trim()
+    if (!q || q === lastRunRef.current) return
+    lastRunRef.current = q
+    void runDiagnose()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [question])
 
   if (!question.trim()) {
     return (
