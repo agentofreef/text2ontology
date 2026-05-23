@@ -1436,7 +1436,30 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// USE_MISSION_ACT is on AND agentType is "lakehouse" (builder has no
 		// recall Intents to gate against).
 		if missionActEnabled && agentType == "lakehouse" {
-			infeasibleAnswer, dims := runReachabilityJudge(ctx, db, projectID, shadowM, userQuestion, recallResult)
+			// Prior-turn history for the judge: the conversation the frontend
+			// sent, minus the latest message (that's the current question). Its
+			// assistant content is the FINAL answer text, never tool I/O — so
+			// this is exactly "user question + AI final answer" with no tool
+			// plumbing. Cap to the most recent judgeHistoryMaxTurns turns.
+			var judgeHistory []judgeHistoryTurn
+			if len(bodyMessages) > 1 {
+				prior := bodyMessages[:len(bodyMessages)-1]
+				if len(prior) > judgeHistoryMaxTurns {
+					prior = prior[len(prior)-judgeHistoryMaxTurns:]
+				}
+				for _, m := range prior {
+					judgeHistory = append(judgeHistory, judgeHistoryTurn{Role: m.Role, Content: m.Content})
+				}
+			}
+			// Accumulated (ledger) intents — unioned with the current recall so a
+			// follow-up reusing an earlier turn's metric isn't refused for "no
+			// metric". threadLedger is nil on branch threads; AccumulatedMetricIntents
+			// is nil-safe.
+			var accumulatedIntents []recall.MetricIntent
+			if threadLedger != nil {
+				accumulatedIntents = threadLedger.AccumulatedMetricIntents()
+			}
+			infeasibleAnswer, dims := runReachabilityJudge(ctx, db, projectID, shadowM, userQuestion, recallResult, judgeHistory, accumulatedIntents, len(bodyMessages) > 1)
 			requiredDims = dims
 			if infeasibleAnswer != "" {
 				// Infeasible — stream the machine-templated answer and stop.

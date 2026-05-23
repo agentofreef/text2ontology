@@ -2,12 +2,107 @@ package handler
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/lakehouse2ontology/mission"
 	"github.com/lakehouse2ontology/services/agent-server/recall"
 
 	. "github.com/lakehouse2ontology/httputil"
 )
+
+// TestBuildDecomposeUserPrompt_HistorySection verifies the 对话历史 section is
+// rendered before the latest question when prior-turn history is passed, and
+// omitted entirely when the history is empty. This is the context-aware
+// decompose contract — the LLM must see prior questions + AI final answers so
+// it can complete a bare follow-up before decomposing it.
+func TestBuildDecomposeUserPrompt_HistorySection(t *testing.T) {
+	intents := []recall.MetricIntent{{Name: "SALES.REVENUE"}}
+
+	// With history: the section header, both turns, and the role labels appear,
+	// and the history block precedes the 用户问题 block.
+	history := []judgeHistoryTurn{
+		{Role: "user", Content: "各产品的营收是多少"},
+		{Role: "assistant", Content: "AP 产品营收为 100，BP 产品营收为 200。"},
+	}
+	withHist := buildDecomposeUserPrompt("那 CP 呢？", intents, nil, nil, history)
+	if !strings.Contains(withHist, "## 对话历史（仅历史提问与 AI 最终回答）") {
+		t.Fatalf("expected 对话历史 section header in prompt, got:\n%s", withHist)
+	}
+	if !strings.Contains(withHist, "用户: 各产品的营收是多少") || !strings.Contains(withHist, "助手: AP 产品营收为 100") {
+		t.Fatalf("expected rendered history turns, got:\n%s", withHist)
+	}
+	if strings.Index(withHist, "## 对话历史") > strings.Index(withHist, "## 用户问题") {
+		t.Fatalf("history section must precede 用户问题 section, got:\n%s", withHist)
+	}
+
+	// Without history: no section header at all.
+	noHist := buildDecomposeUserPrompt("各产品的营收是多少", intents, nil, nil, nil)
+	if strings.Contains(noHist, "## 对话历史") {
+		t.Fatalf("history section must be omitted when history is empty, got:\n%s", noHist)
+	}
+}
+
+// TestUnionMetricIntents_FollowUpReusesAccumulated verifies the union path: a
+// follow-up whose CURRENT recall surfaced NO metric must still see the prior
+// turn's accumulated metric, so the metric-only gate does NOT fire. This is
+// the false-refusal fix for bare follow-ups like "那 AP 呢?".
+func TestUnionMetricIntents_FollowUpReusesAccumulated(t *testing.T) {
+	// Current turn recalled nothing (bare follow-up); the ledger accumulated a
+	// metric from an earlier turn.
+	var currentRecall []recall.MetricIntent
+	accumulated := []recall.MetricIntent{{Name: "SALES.REVENUE"}}
+
+	union := unionMetricIntents(currentRecall, accumulated)
+	if len(union) != 1 || union[0].Name != "SALES.REVENUE" {
+		t.Fatalf("expected union to carry the accumulated metric, got %+v", union)
+	}
+
+	// The union feeds buildVerdictFromLLMHints as `intents`. With a non-empty
+	// union the metric-only gate must NOT trip even though the filter is uncovered.
+	hints := []llmRequirementHint{
+		{Kind: "metric", Name: "营收"},
+		{Kind: "filter", Name: "产品", Value: "AP", Covered: boolPtr(false)},
+	}
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, union, nil, nil)
+	if !verdict.Feasible {
+		t.Fatalf("follow-up reusing an accumulated metric must not trip the metric-only gate, got %+v", verdict)
+	}
+
+	// Dedupe by Name: current-turn copy wins on collision, no duplicates.
+	dupCurrent := []recall.MetricIntent{{Name: "SALES.REVENUE"}}
+	if got := unionMetricIntents(dupCurrent, accumulated); len(got) != 1 {
+		t.Fatalf("expected dedupe by Name, got %+v", got)
+	}
+}
+
+// TestReachabilityAnswer_FollowUpAdvisory verifies the core follow-up rule: an
+// infeasible verdict on a follow-up turn (isFollowUp=true) yields "" — the
+// gate is advisory only, so the caller proceeds into the ReAct loop. The SAME
+// verdict on the first turn (isFollowUp=false) yields the hard refusal string.
+func TestReachabilityAnswer_FollowUpAdvisory(t *testing.T) {
+	infeasible := mission.ReachabilityVerdict{
+		Feasible: false,
+		Kind:     "gap",
+		Reason:   "不可行：未召回到任何可用于度量的指标。",
+	}
+
+	// Follow-up: advisory → proceed (empty answer).
+	if got := reachabilityAnswer(infeasible, true); got != "" {
+		t.Fatalf("follow-up + infeasible must return \"\" (advisory), got %q", got)
+	}
+
+	// First turn: same verdict → hard refusal (non-empty).
+	if got := reachabilityAnswer(infeasible, false); got == "" {
+		t.Fatalf("first-turn + infeasible must return a refusal string, got empty")
+	}
+
+	// Feasible always proceeds, regardless of follow-up flag.
+	feasible := mission.ReachabilityVerdict{Feasible: true}
+	if got := reachabilityAnswer(feasible, false); got != "" {
+		t.Fatalf("feasible verdict must return \"\", got %q", got)
+	}
+}
 
 // boolPtr returns a *bool — llmRequirementHint.Covered is *bool so we can
 // distinguish "LLM didn't decide" from "explicit false".

@@ -305,6 +305,49 @@ func requiredDimsFromRecall(hints []llmRequirementHint, rr recall.RecallResult) 
 	return out
 }
 
+// judgeHistoryTurn is one prior conversation turn fed to the reachability
+// judge. By contract it carries ONLY the user's prior QUESTION and the AI's
+// FINAL ANSWER text — never tool inputs/outputs (smartquery args/results,
+// lookup, …). The handler builds these from bodyMessages, whose assistant
+// content is the final answer, so no tool plumbing leaks in.
+type judgeHistoryTurn struct {
+	Role    string // "user" | "assistant"
+	Content string
+}
+
+// judgeHistoryMaxTurns caps the prior-turn history threaded into the judge —
+// only the most recent few turns are needed to complete a follow-up.
+const judgeHistoryMaxTurns = 3
+
+// judgeHistoryAnswerCap truncates any single assistant answer in the history
+// so a long prior reply can't blow the decompose prompt.
+const judgeHistoryAnswerCap = 600
+
+// unionMetricIntents merges the current turn's recalled intents with the
+// ledger-accumulated intents, deduped by Name (current turn wins on
+// collision so the freshest copy of an intent's schema is kept). This lets a
+// follow-up that reuses a prior turn's metric ("那 AP 呢?") pass the
+// metric-only gate even when the bare follow-up recalled no metric itself.
+func unionMetricIntents(current, accumulated []recall.MetricIntent) []recall.MetricIntent {
+	seen := map[string]bool{}
+	out := make([]recall.MetricIntent, 0, len(current)+len(accumulated))
+	for _, mi := range current {
+		if mi.Name == "" || seen[mi.Name] {
+			continue
+		}
+		seen[mi.Name] = true
+		out = append(out, mi)
+	}
+	for _, mi := range accumulated {
+		if mi.Name == "" || seen[mi.Name] {
+			continue
+		}
+		seen[mi.Name] = true
+		out = append(out, mi)
+	}
+	return out
+}
+
 // runReachabilityJudge is the single hook call made by
 // handleAgentStreamLakehouse. It returns the machine-templated infeasibility
 // answer (non-empty) when the gate fires, or "" to proceed normally, plus the
@@ -313,6 +356,17 @@ func requiredDimsFromRecall(hints []llmRequirementHint, rr recall.RecallResult) 
 //
 // db and intents are passed in rather than derived here so the function does
 // not depend on any handler-level state beyond what the call site already has.
+//
+// Follow-up handling:
+//   - history carries the prior-turn user questions + AI final answers so the
+//     decompose LLM can complete a bare follow-up before decomposing it.
+//   - accumulatedIntents are the ledger's cross-turn intents; unioned with the
+//     current recall so a follow-up reusing an earlier metric isn't refused.
+//   - isFollowUp (caller passes len(bodyMessages) > 1): when true and the
+//     verdict is infeasible, the gate is ADVISORY only — the verdict is still
+//     recorded (panel shows it) but "" is returned so the ReAct loop runs with
+//     full conversation history + its own downstream gates. The hard refusal
+//     therefore only fires on the FIRST turn.
 func runReachabilityJudge(
 	ctx context.Context,
 	db *sql.DB,
@@ -320,16 +374,21 @@ func runReachabilityJudge(
 	sm *shadowMission,
 	question string,
 	rr recall.RecallResult,
+	history []judgeHistoryTurn,
+	accumulatedIntents []recall.MetricIntent,
+	isFollowUp bool,
 ) (string, []string) {
 	if !missionActEnabled {
 		return "", nil
 	}
 
 	// Ground the judge in the project's tokenizer + recall (the system's single
-	// entry point). The recalled Intents are the metric set; the per-token recall
-	// resolution (roles + resolvedTokens) stops the decompose LLM from
+	// entry point). The metric set is the UNION of this turn's recall and the
+	// ledger's accumulated intents — a follow-up reusing an earlier metric must
+	// not be refused for "no metric". The per-token recall resolution (roles +
+	// resolvedTokens) stays current-turn: it stops the decompose LLM from
 	// re-segmenting the question and refusing on fragments recall already matched.
-	intents := rr.MetricIntents
+	intents := unionMetricIntents(rr.MetricIntents, accumulatedIntents)
 	roles, resolvedTokens := summarizeRecallResolution(rr)
 
 	// Load the data-driven shape vocabulary once per gate invocation. Empty
@@ -338,7 +397,7 @@ func runReachabilityJudge(
 	vocab := loadShapeVocab(ctx, db)
 
 	// ── LLM call: decomposition + shape-aware coverage in one pass ───────────
-	res, err := decomposeQuestion(ctx, db, question, intents, vocab, roles)
+	res, err := decomposeQuestion(ctx, db, question, intents, vocab, roles, history)
 	if err != nil {
 		log.Printf("MISSION-ACT: reachability decompose skipped (fail-open): %v", err)
 		return "", nil
@@ -348,8 +407,9 @@ func runReachabilityJudge(
 	}
 
 	// Resolve the required GROUP-BY dimensions from recall (grounded in the
-	// decompose hints). Surfaced to the caller so the executed query's groupBy
-	// can be forced to include them — this is the completeness contract.
+	// decompose hints). Keyed on the CURRENT turn's recall (rr) so dimension
+	// grounding stays current-turn. Surfaced to the caller so the executed
+	// query's groupBy can be forced to include them — the completeness contract.
 	reqDims := requiredDimsFromRecall(res.Requirements, rr)
 
 	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
@@ -367,15 +427,32 @@ func runReachabilityJudge(
 		sm.seedTasksFromSubQuestions(ctx, res.SubQuestions)
 	}
 
+	return reachabilityAnswer(verdict, isFollowUp), reqDims
+}
+
+// reachabilityAnswer turns a finalised verdict into the gate's answer string
+// (or "" to proceed into the ReAct loop). Pure so the follow-up advisory
+// branch is unit-testable without an LLM round-trip:
+//   - Feasible → "" (proceed).
+//   - Follow-up (isFollowUp) → "" even when infeasible: the gate is advisory
+//     on follow-ups (verdict already recorded by the caller); the ReAct loop
+//     runs with full conversation history + its own downstream gates. The hard
+//     refusal therefore fires only on the FIRST turn.
+//   - First-turn clarify → ask the user to disambiguate.
+//   - First-turn gap/hole-2/metric-absent → machine-templated refusal.
+func reachabilityAnswer(verdict mission.ReachabilityVerdict, isFollowUp bool) string {
 	if verdict.Feasible {
-		return "", reqDims
+		return ""
+	}
+	if isFollowUp {
+		return ""
 	}
 	if verdict.Kind == "clarify" {
 		// Ambiguous filter value(s) — answerable once the user disambiguates.
 		// Ask rather than refuse outright.
-		return "〔需要你先澄清一下〕\n\n" + verdict.Reason, reqDims
+		return "〔需要你先澄清一下〕\n\n" + verdict.Reason
 	}
-	return buildInfeasibilityAnswer(verdict), reqDims
+	return buildInfeasibilityAnswer(verdict)
 }
 
 // buildVerdictFromLLMHints turns the LLM's per-item judgement into a
@@ -659,6 +736,7 @@ func decomposeQuestion(
 	intents []recall.MetricIntent,
 	vocab []shapeCap,
 	roles []tokenRole,
+	history []judgeHistoryTurn,
 ) (decomposeResult, error) {
 	var zero decomposeResult
 	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
@@ -671,6 +749,8 @@ func decomposeQuestion(
 第一件：把用户这一句里包含的「独立子问题」分出来。一句话里可能并列了多个问题（例如"上海的总营收是多少？外卖占比是多少？"是两个子问题）。每个子问题用一句自然语言描述。如果只有一个问题，就只返回一个。
 第二件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
 第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个指标真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
+
+**追问承接**：最新一句可能是**追问**（省略了指标/维度/筛选，靠上文承接）。先结合上述历史把最新问题**补全成完整问题**，再按补全后的完整问题拆解 metric/dimension/filter。例如历史问的是"上海各产品的营收"，最新一句"那 AP 呢？"应补全为"AP 产品的营收"，沿用上文的指标（营收）和维度（产品）。
 
 **铁律**：分词与识别一律以下方「召回已解析」小节为准，**禁止你自己重新分词或拆开多词 token**。凡命中 指标/取值/列 的 token 一律 covered=true（本体中确实存在）；只有召回完全没命中、而用户又明显想用作筛选/分组的词，才允许 covered=false。
 
@@ -703,7 +783,7 @@ requirements 字段规则：
 - 如果问题只是通用查询（无特定筛选），requirements 只返回 metric 项。
 - requirements 元素不超过 8 个。`
 
-	userPrompt := buildDecomposeUserPrompt(question, intents, vocab, roles)
+	userPrompt := buildDecomposeUserPrompt(question, intents, vocab, roles, history)
 
 	llmMessages := []map[string]interface{}{
 		{"role": "system", "content": systemPrompt},
@@ -729,8 +809,17 @@ requirements 字段规则：
 // the LLM can shape-match — name match alone is not enough to judge whether
 // a question's "year range" filter can really be served by a "starts-with
 // YYYY-MM" parameter.
-func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vocab []shapeCap, roles []tokenRole) string {
+func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vocab []shapeCap, roles []tokenRole, history []judgeHistoryTurn) string {
 	var sb strings.Builder
+	// Prior-turn history goes FIRST so the LLM can complete a bare follow-up
+	// before reading the latest question. Only the user's prior questions and
+	// the AI's final answers — no tool I/O (the handler already guarantees this
+	// by sourcing from bodyMessages). Rendered only when non-empty.
+	if rendered := renderJudgeHistory(history); rendered != "" {
+		sb.WriteString("## 对话历史（仅历史提问与 AI 最终回答）\n")
+		sb.WriteString(rendered)
+		sb.WriteString("\n")
+	}
 	sb.WriteString("## 用户问题\n")
 	sb.WriteString(question)
 	if len(roles) > 0 {
@@ -796,6 +885,51 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vo
 	}
 	sb.WriteString("\n请输出 JSON 对象。")
 	return sb.String()
+}
+
+// renderJudgeHistory formats the prior-turn history block for the decompose
+// prompt. It keeps only the most recent judgeHistoryMaxTurns turns, labels
+// roles as 用户 / 助手, truncates each assistant answer to
+// judgeHistoryAnswerCap runes, and skips blank entries. Returns "" when there
+// is no usable history so the caller omits the section entirely.
+func renderJudgeHistory(history []judgeHistoryTurn) string {
+	if len(history) == 0 {
+		return ""
+	}
+	// Keep the most recent N turns (history is in chronological order).
+	if len(history) > judgeHistoryMaxTurns {
+		history = history[len(history)-judgeHistoryMaxTurns:]
+	}
+	var sb strings.Builder
+	for _, h := range history {
+		content := strings.TrimSpace(h.Content)
+		if content == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(h.Role)) {
+		case "assistant":
+			sb.WriteString("助手: ")
+			sb.WriteString(truncateRunes(content, judgeHistoryAnswerCap))
+		case "user":
+			sb.WriteString("用户: ")
+			sb.WriteString(content)
+		default:
+			continue
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// truncateRunes truncates s to at most max runes (not bytes), appending an
+// ellipsis when it cut. Rune-safe so multi-byte CJK answers aren't sliced
+// mid-character.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // reqItemJSON is one requirement entry as the LLM emits it. `covered` is
