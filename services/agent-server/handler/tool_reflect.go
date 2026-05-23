@@ -46,6 +46,13 @@ import (
 var reflectEnabled = envFlagDefaultOn("USE_REFLECT")
 var reRecallEnabled = envFlagDefaultOn("USE_RE_RECALL")
 
+// metricFirstEnabled steers the lakehouse system prompt toward Mode B (度量优先,
+// 自由组合) — pick the metric's canonical_metric and write groupBy/filters
+// directly, reserving Mode A (intent preset) for cases that genuinely need the
+// preset's pivot. Default on; set USE_METRIC_FIRST to a falsey value to keep
+// the legacy prompt. Mode A is never hard-disabled — pivot still needs it.
+var metricFirstEnabled = envFlagDefaultOn("USE_METRIC_FIRST")
+
 // envFlagDefaultOn returns false only for an explicit falsey value; unset or
 // anything else is treated as enabled.
 func envFlagDefaultOn(name string) bool {
@@ -137,7 +144,7 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 		if status, _ := resp["execution_status"].(string); status == "success" {
 			return M{
 				"verdict":            "match",
-				"reasoning":          "composite Intent (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
+				"reasoning":          "composite 指标 (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
 				"missing_dimensions": []string{},
 				"suggested_action":   "answer",
 				"source":             "plan",
@@ -865,6 +872,21 @@ func autoInvokeReflect(
 	// reflect is advisory-only now, and skippable for A/B (debug-infra ⑤).
 	// When disabled we still synthesized above, so answers stay clean.
 	if !reflectEnabled {
+		return synthMsg
+	}
+
+	// Deterministic-contract short-circuit: a smartquery result now carries a
+	// structured dimension contract (required_dims, and when incomplete
+	// missing_required_dims + dim_warning, set by annotateRequiredDims). When the
+	// result HAS rows (guaranteed by the total_rows>0 early-returns above) AND the
+	// contract is satisfied (no missing_required_dims, or empty), the LLM-based
+	// reflect "guess missing dims → re_recall" loop is redundant and prone to
+	// FALSE positives (e.g. "groupBy为空" when dims are clearly present). Go
+	// straight to synthesize→answer and skip reflect/re_recall entirely. This is
+	// general — it keys off the structured contract fields, not any question/column.
+	// Only fall through to reflect when the contract reports missing dims (rows==0
+	// already returned above).
+	if len(stringSliceFromAny(smartqueryResult["missing_required_dims"])) == 0 {
 		return synthMsg
 	}
 

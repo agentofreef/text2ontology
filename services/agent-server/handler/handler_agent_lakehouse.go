@@ -48,25 +48,26 @@ const lookupToolDescription = `查询本体定义 + 业务关键词。
 
 // smartqueryToolDescription is the LLM-facing description for the
 // `smartquery` tool in **strict mode**. The contract is intentionally tiny:
-// LLM picks an Intent by name and fills its declared params. The server
+// LLM picks a metric (指标) by name and fills its declared params. The server
 // owns metric / groupBy / orderBy / limit / canonical filters / SQL gen.
 // LLM never builds spec — that path is closed.
 const smartqueryToolDescription = `执行数据查询，返回表格结果。两种用法，二选一：
 
-【Mode A · 预设】命中现成 Intent 时——把口径交给人工策展好的 Intent。
-  形式：{"intent":"Intent名","params":{...}}
-  intent — 从 context 顶部「🎯 查询意图（Metric Intent）」小节里选一个 name。
-  params — 按该 Intent 的 parameters schema 填；用户没提的省略走默认。
+【Mode A · 预设】命中现成指标时——把口径交给人工策展好的指标。
+  形式：{"intent":"指标名","params":{...}}
+  intent — 从 context 顶部「🎯 查询指标（Metric）」小节里选一个 name。
+  params — 按该指标的 parameters schema 填；用户没提的省略走默认。
            未声明的 key → PARAM_UNKNOWN；类型不符 → PARAM_TYPE_ERROR。
   例："Top 5 摇滚乐手" → {"intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
       "各 Geo 订单分布" → {"intent":"Order.Quantity.Distribution","params":{}}
-  Mode A 下不要再填 odName/metric/filters/groupBy —— 这些由 Intent 提供（填了会被忽略）。
+  Mode A 下不要再填 odName/metric/filters/groupBy —— 这些由指标提供（填了会被忽略）。
 
-【Mode B · 自由组合】没有现成 Intent 完全匹配时——自己从目录 token 拼一次查询。
+【Mode B · 自由组合】没有现成指标完全匹配时——自己从目录 token 拼一次查询。
   形式：{"odName":"主OD","metric":"sum(列)","filters":[...],"groupBy":[...],"orderBy":[...],"limit":N}
   odName — 主 OD 名（单个，必填）。
   metric — func(arg)，func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。
            ⚠ 不接受 count(*)（JOIN 下双重计数），用 count(<id列>)。
+           ⚠ 纯指标：arg 必须是某个已授权指标（🎯 小节）用到的度量列。否则别拼无背书的聚合——改用已有指标，或调用 declare_capability_gap。
   filters/groupBy — property 必须是 OD 已有列；跨 OD 用 "OD.Property"（如 PRODUCT.GEN）。
   op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between。
   失败返回 COMPOSE_FAILED + 具体原因（哪个 token 不存在 / op 不允许）。
@@ -75,7 +76,7 @@ const smartqueryToolDescription = `执行数据查询，返回表格结果。两
          "filters":[{"property":"PRODUCT.GEN","op":"=","value":"X11"}],
          "groupBy":["GEO","FISCAL_YEAR"],"orderBy":[{"label":"FISCAL_YEAR","dir":"ASC"}]}
 
-策略：先看 🎯 小节有没有合适 Intent，有就走 Mode A；没有就直接走 Mode B（不要因为没现成 Intent 就回"无法处理"）。
+策略：先看 🎯 小节有没有合适指标，有就走 Mode A；没有就直接走 Mode B（不要因为没现成指标就回"无法处理"）。
 任一模式都不写 SQL —— 只从已策展的目录里挑/拼。Mode B 限制：暂不支持把 metric 跨 OD（聚合列必须在主 OD 上）。`
 
 // smartqueryExecutor is the cross-service surface of lakehouse.RemoteClient.
@@ -637,20 +638,20 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 </function_call>
 
 ### smartquery — 执行数据查询（严格模式）
-{"intent":"Intent 名","params":{...}}
+{"intent":"指标名","params":{...}}
 
-intent  从 context 顶部「🎯 查询意图（Metric Intent）」里挑一个 name；未匹配则该查询不在覆盖范围
-params  按 Intent 的 parameters schema 填，常见 key：
+intent  从 context 顶部「🎯 查询指标（Metric）」里挑一个 name；未匹配则该查询不在覆盖范围
+params  按指标的 parameters schema 填，常见 key：
         n        Top N（用户说"Top 5"填 5）
         genre    流派/类别（用户提到具体值时填）
         country  国家/地区（用户提到具体值时填）
-        其它请看 🎯 小节里 Intent 自带的 parameters 列表
+        其它请看 🎯 小节里指标自带的 parameters 列表
 
 例：
 "Top 5 摇滚乐手"  → {"intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
 "卖得最好的国家" → {"intent":"Sales.ByCountry","params":{}}
 
-不要填 metric/groupBy/filters/orderBy/limit —— 由 Intent 决定，多填会被拒绝。
+不要填 metric/groupBy/filters/orderBy/limit —— 由指标决定，多填会被拒绝。
 
 ### lookup — 查本体定义 / 业务关键词（context 不足或确认值映射时）
 {"ontology_name":["Od/Ok 名"], "keyword":["业务术语"]}
@@ -698,8 +699,8 @@ FULLY_LOADED_ODS_PLACEHOLDER
 ## 查询工具策略
 
 查询只有 smartquery 一个工具，两种模式（调用契约见工具自带说明）：
-- **命中 Intent** → 带 intent 字段（从 context 顶部「🎯 查询意图」小节挑），套用策展好的口径（Mode A）。
-- **没有合适 Intent** → 不填 intent，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成 Intent 就回"无法处理"。
+- **命中指标** → 带 intent 字段（从 context 顶部「🎯 查询指标」小节挑），套用策展好的口径（Mode A）。
+- **没有合适指标** → 不填 intent，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成指标就回"无法处理"。
 - 只有当问题要测的指标在目录里**完全找不到对应 OD/度量**时，才告知用户"当前查询超出已配置范围"。
 - **筛选值必须来自 OD Catalog 里该属性的值域**（property 后大括号里列出的那些值）。用户的筛选概念找不到对应字段、映射到多个字段无法确定、或值不在该属性值域内时——**不要臆造映射**（不要把"TBD"硬塞成"Not ready"，也不要在 4 个 readiness 里随便挑一个），改用 declare_capability_gap 声明，或向用户澄清。
 
@@ -818,6 +819,18 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 - 最近6个月: ` + time.Now().AddDate(0, -6, 0).Format("2006-01-02") + ` ~ ` + time.Now().Format("2006-01-02") + `
 ` + dataCoverageLine
 
+		// ── Metric-first steering (USE_METRIC_FIRST) ──
+		// Prefer Mode B (自由组合): take the metric's canonical_metric and write
+		// groupBy/filters yourself, so required dimensions are not silently
+		// dropped by a preset's fixed config. Mode A (带 intent) is still kept
+		// for genuine pivot needs — this only changes the default steering.
+		if metricFirstEnabled {
+			systemPrompt = strings.Replace(systemPrompt,
+				"- **命中指标** → 带 intent 字段",
+				"- **默认走 Mode B(自由组合)**：从 🎯 小节取该指标的**度量(canonical_metric)**填到 metric，自己写 groupBy/filters；只有确实需要模板自带的 pivot 透视时才用 Mode A(带 intent)。\n- **命中指标** → 带 intent 字段",
+				1)
+		}
+
 		// ── Override system prompt for branch (clarification) threads ──
 		// Branch threads get a distilled seed prompt with only the original question
 		// and candidate list. No project-wide context, no main system rules.
@@ -882,11 +895,11 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 						// Mode A — curated preset: pass intent (+params).
 						"intent": M{
 							"type":        "string",
-							"description": "可选。命中 context 顶部「🎯 查询意图」小节的 Intent name 时填它，套用策展好的口径（metric/分组/pivot）。例：Sales.ByArtist / Order.Quantity.Distribution。不填则进入自由组合模式（见下）。",
+							"description": "可选。命中 context 顶部「🎯 查询指标」小节的指标 name 时填它，套用策展好的口径（metric/分组/pivot）。例：Sales.ByArtist / Order.Quantity.Distribution。不填则进入自由组合模式（见下）。",
 						},
 						"params": M{
 							"type":                 "object",
-							"description":          "Mode A 用：按 Intent 的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。Intent 没声明的 key 会被拒绝。",
+							"description":          "Mode A 用：按指标的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。指标没声明的 key 会被拒绝。",
 							"additionalProperties": true,
 						},
 						// Mode B — catalog-bound composition (no intent).
@@ -1146,6 +1159,14 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 			"declare_capability_gap": missionActEnabled,
 		}
 
+		// requiredDims is the set of GROUP-BY dimensions the question implies
+		// (resolved from recall by the reachability judge below). Declared
+		// BEFORE the dispatchTool closure so the closure captures it by
+		// reference — it is populated at the runReachabilityJudge call site and
+		// then read inside the smartquery dispatch to force the executed query's
+		// groupBy to include these dims (the completeness contract).
+		var requiredDims []string
+
 		dispatchTool := func(name string, args map[string]interface{}) M {
 			if agentType == "builder" {
 				if !builderToolNames[name] {
@@ -1331,7 +1352,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				// gives the LLM clear self-correction signals.
 				_ = lastSmartqueryFilterProps
 				_ = lastSmartqueryWasEmpty
-				return lakehouseToolSmartQuery(ctx, db, projectID, userQuestion, args)
+				return lakehouseToolSmartQuery(ctx, db, projectID, userQuestion, args, requiredDims)
 			case "synthesize":
 				return runSynthesizeTool(db, args)
 			case "reflect_query_result":
@@ -1402,7 +1423,9 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// USE_MISSION_ACT is on AND agentType is "lakehouse" (builder has no
 		// recall Intents to gate against).
 		if missionActEnabled && agentType == "lakehouse" {
-			if infeasibleAnswer := runReachabilityJudge(ctx, db, projectID, shadowM, userQuestion, recallResult.MetricIntents); infeasibleAnswer != "" {
+			infeasibleAnswer, dims := runReachabilityJudge(ctx, db, projectID, shadowM, userQuestion, recallResult)
+			requiredDims = dims
+			if infeasibleAnswer != "" {
 				// Infeasible — stream the machine-templated answer and stop.
 				sendSSE("token", infeasibleAnswer)
 				// Persist as a zero-round assistant step so the turn is not blank.
@@ -2363,7 +2386,7 @@ func loadFullLakehouseOd(db *sql.DB, projectID string, odName string) *recall.Od
 // and Intent dry-run save validation (backend-api). It guarantees the LLM
 // can only produce one of three outcomes: correct SQL, INTENT_NOT_FOUND, or
 // PARAM_*_ERROR / SPEC_VALIDATION_FAILED — never silently wrong SQL.
-func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}) M {
+func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}, requiredDims []string) M {
 	// Unified query tool: `intent` is OPTIONAL.
 	//   - intent present → curated-preset path (this function continues below):
 	//     OD / metric / filters / groupBy / pivot all come from the Intent;
@@ -2378,14 +2401,14 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	intentName, _ := args["intent"].(string)
 	intentName = strings.TrimSpace(intentName)
 	if intentName == "" {
-		return runComposeQueryTool(ctx, db, projectID, userQuestion, args)
+		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
 	}
 
 	hint, objectNames, intentParams, planJSON, notFound := lookupIntentByName(db, projectID, intentName)
 	if notFound {
 		return M{
 			"error": fmt.Sprintf(
-				"INTENT_NOT_FOUND: 未找到名为 %q 的 Metric Intent (project_id=%s)。可用 Intent 名见 context 顶部 🎯 小节；如该查询场景未配置 Intent，请告知用户当前不支持。",
+				"INTENT_NOT_FOUND: 未找到名为 %q 的指标 (project_id=%s)。可用指标名见 context 顶部 🎯 小节；如该查询场景未配置指标，请告知用户当前不支持。",
 				intentName, projectID),
 			"code": "INTENT_NOT_FOUND",
 		}
@@ -2463,6 +2486,31 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		Objects:     objectNames,
 		IntentHint:  hint,
 		DisplayMode: "table",
+	}
+
+	// Completeness contract (Mode A): merge the question's required GROUP-BY
+	// dimensions into the Intent's AutoGroupBy so the executed query keeps them
+	// even if the curated preset didn't list them. Best-effort, server-side
+	// merge (ReplaceGroupBy=false) — dedupe on the normalized form so a dim the
+	// preset already groups by is not added twice. hint is a pointer, so the
+	// mutation rides on spec.IntentHint.
+	if len(requiredDims) > 0 && hint != nil {
+		// Dedupe on the bare property name (case-insensitive) so a required dim
+		// already covered by AutoGroupBy in EITHER form (bare "Prop" or qualified
+		// "OD.Prop") is not appended again — a bare+qualified pair of one column
+		// is a duplicate groupBy that the engine treats as two columns → 0 rows.
+		existing := map[string]bool{}
+		for _, g := range hint.AutoGroupBy {
+			existing[bareDimKey(g)] = true
+		}
+		for _, d := range requiredDims {
+			if n := bareDimKey(d); n != "" && !existing[n] {
+				existing[n] = true
+				hint.AutoGroupBy = append(hint.AutoGroupBy, d)
+			}
+		}
+		hint.ReplaceGroupBy = false
+		spec.IntentHint = hint
 	}
 
 	// Type-validated parameter binding (defense line 1).
@@ -2777,8 +2825,8 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		spec.Metric != "" && suspiciousAllZero(resultJSON, spec.GroupBy) {
 		resp["suspicious_zero_hint"] = "查询成功返回了维度行，但所有指标列在每一行都是 0/NULL。" +
 			"这通常是跨 OD 的 JOIN 一行没匹配上——极可能某个 filter 的【值】不存在" +
-			"（日期格式写错、枚举名拼错），而不是 Intent 选错。请先核对 filter 的 value" +
-			"（尤其日期/期间是否为 YYYY-MM），不要急着 re_recall 换 Intent。"
+			"（日期格式写错、枚举名拼错），而不是指标选错。请先核对 filter 的 value" +
+			"（尤其日期/期间是否为 YYYY-MM），不要急着 re_recall 换指标。"
 	}
 	// Expose spec/intent metadata to the agent loop so it can build synth args.
 	resp["_spec_metric"] = spec.Metric
@@ -2788,6 +2836,9 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		specFiltersOut = append(specFiltersOut, M{"prop": f.Prop, "op": f.Op, "value": f.Value})
 	}
 	resp["_spec_filters"] = specFiltersOut
+	// Completeness backstop (P1d): flag any required dimension missing from the
+	// executed result's dim columns. Phase 1 surfaces a warning only — no rerun.
+	annotateRequiredDims(resp, requiredDims)
 	return resp
 }
 

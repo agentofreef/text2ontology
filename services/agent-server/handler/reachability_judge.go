@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/lakehouse2ontology/llmclient"
@@ -98,6 +99,99 @@ func loadShapeVocab(ctx context.Context, db *sql.DB) []shapeCap {
 	return out
 }
 
+// tokenRole is one token's recall classification — the ground truth the judge
+// builds on instead of re-parsing the raw question.
+type tokenRole struct {
+	Token   string
+	Role    string   // "指标" | "取值" | "列"
+	Field   string   // "Table.Field" for 取值/列 (empty for 指标)
+	Intents []string // matched intent names for 指标
+}
+
+// summarizeRecallResolution derives, from the recall result, what the project's
+// tokenizer + recall pipeline already resolved each token to. This grounds the
+// reachability judge in the system's single entry point (tokenize → recall)
+// rather than letting the decompose LLM re-segment the question. Returns the
+// per-token roles (for the decompose prompt) and a normalized set of every
+// token recall matched to anything (metric / value / column) — used by the
+// deterministic coverage guard so a recalled value like "Legion7 15ASH11" is
+// never refused as "not found", even if the LLM re-split it into fragments.
+func summarizeRecallResolution(rr recall.RecallResult) ([]tokenRole, map[string]bool) {
+	resolved := map[string]bool{}
+	roleByTok := map[string]tokenRole{}
+	var order []string
+	remember := func(tok string, r tokenRole) {
+		if _, ok := roleByTok[tok]; !ok {
+			order = append(order, tok)
+		}
+		roleByTok[tok] = r
+		if n := normForDomain(tok); n != "" {
+			resolved[n] = true
+		}
+	}
+	// Metric tokens take precedence (a metric trigger word is a metric, not a
+	// filter — this is what stops "early" being pulled out of "early order").
+	metricNames := map[string][]string{}
+	for _, mi := range rr.MetricIntents {
+		for _, t := range mi.MatchedTokens {
+			metricNames[t] = append(metricNames[t], mi.Name)
+		}
+	}
+	for tok, names := range metricNames {
+		remember(tok, tokenRole{Token: tok, Role: "指标", Intents: names})
+	}
+	// Value / column tokens from per-token keyword hits.
+	for tok, hits := range rr.TokenDetails {
+		if _, ok := roleByTok[tok]; ok {
+			continue // already classified as a metric token
+		}
+		var valField, colField string
+		for _, h := range hits {
+			f := strings.Trim(strings.TrimSpace(h.MappedTable)+"."+strings.TrimSpace(h.MappedField), ".")
+			if h.IsColumnRef {
+				if colField == "" {
+					colField = f
+				}
+			} else if valField == "" {
+				valField = f
+			}
+		}
+		switch {
+		case valField != "":
+			remember(tok, tokenRole{Token: tok, Role: "取值", Field: valField})
+		case colField != "":
+			remember(tok, tokenRole{Token: tok, Role: "列", Field: colField})
+		}
+	}
+	sort.Strings(order)
+	roles := make([]tokenRole, 0, len(order))
+	for _, t := range order {
+		roles = append(roles, roleByTok[t])
+	}
+	return roles, resolved
+}
+
+// recallResolves reports whether the tokenizer + recall pipeline already
+// resolved this requirement's value/name to a real ontology token (metric /
+// value / column). Containment (either direction, on the space/underscore-
+// insensitive form) absorbs the case where the decompose LLM re-split a
+// multi-word token into fragments — each fragment still matches the whole
+// resolved token, so the requirement is correctly treated as covered.
+func recallResolves(h llmRequirementHint, resolved map[string]bool) bool {
+	for _, raw := range []string{h.Value, h.Name} {
+		n := normForDomain(raw)
+		if len(n) < 2 {
+			continue
+		}
+		for r := range resolved {
+			if r == n || strings.Contains(r, n) || strings.Contains(n, r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // llmRequirementHint is what the LLM returns per decomposed item — both the
 // decomposition itself and its shape-aware coverage verdict against the
 // candidate Intent parameter table. The verdict half (Covered / CoveredBy /
@@ -122,9 +216,100 @@ type decomposeResult struct {
 	Requirements []llmRequirementHint
 }
 
+// requiredDimsFromRecall resolves the question's required GROUP-BY dimensions to
+// OD property refs, grounded in recall: a decompose requirement of kind
+// "dimension" counts only when recall matched its token to an actual COLUMN
+// (IsColumnRef=true), which yields the real property to group by. Returns deduped
+// "ODName.PropName" refs.
+func requiredDimsFromRecall(hints []llmRequirementHint, rr recall.RecallResult) []string {
+	// Index every recalled COLUMN reference: a property is a group-by candidate
+	// only when at least one of its keyword hits is a column ref (IsColumnRef).
+	// Map several normalized surface forms (prop name, display name, each
+	// column-ref matched token) → the canonical "OD.Prop" group-by ref.
+	colIndex := map[string]string{}
+	for _, ob := range rr.OdBlocks {
+		for _, mp := range ob.MatchedProps {
+			hasCol := false
+			for _, kw := range mp.Keywords {
+				if kw.IsColumnRef {
+					hasCol = true
+					break
+				}
+			}
+			if !hasCol {
+				continue
+			}
+			ref := ob.Name + "." + mp.Name
+			for _, surface := range []string{mp.Name, mp.DisplayName} {
+				if n := normForDomain(surface); n != "" {
+					if _, ok := colIndex[n]; !ok {
+						colIndex[n] = ref
+					}
+				}
+			}
+			for _, kw := range mp.Keywords {
+				if !kw.IsColumnRef {
+					continue
+				}
+				if n := normForDomain(kw.MatchedToken); n != "" {
+					if _, ok := colIndex[n]; !ok {
+						colIndex[n] = ref
+					}
+				}
+			}
+		}
+	}
+	if len(colIndex) == 0 {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	add := func(ref string) {
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	// lookup tries exact match then containment (either direction) on the
+	// normalized form against the recalled column index.
+	lookup := func(n string) (string, bool) {
+		if n == "" {
+			return "", false
+		}
+		if ref, ok := colIndex[n]; ok {
+			return ref, true
+		}
+		for k, ref := range colIndex {
+			if k == n || strings.Contains(k, n) || strings.Contains(n, k) {
+				return ref, true
+			}
+		}
+		return "", false
+	}
+
+	for _, h := range hints {
+		if h.Kind != "dimension" {
+			continue
+		}
+		if ref, ok := lookup(normForDomain(h.Name)); ok {
+			add(ref)
+			continue
+		}
+		if ref, ok := lookup(normForDomain(h.Value)); ok {
+			add(ref)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // runReachabilityJudge is the single hook call made by
 // handleAgentStreamLakehouse. It returns the machine-templated infeasibility
-// answer (non-empty) when the gate fires, or "" to proceed normally.
+// answer (non-empty) when the gate fires, or "" to proceed normally, plus the
+// required GROUP-BY dimensions resolved from recall (used by the caller to
+// force the executed query's groupBy to include them).
 //
 // db and intents are passed in rather than derived here so the function does
 // not depend on any handler-level state beyond what the call site already has.
@@ -134,11 +319,18 @@ func runReachabilityJudge(
 	projectID string,
 	sm *shadowMission,
 	question string,
-	intents []recall.MetricIntent,
-) string {
+	rr recall.RecallResult,
+) (string, []string) {
 	if !missionActEnabled {
-		return ""
+		return "", nil
 	}
+
+	// Ground the judge in the project's tokenizer + recall (the system's single
+	// entry point). The recalled Intents are the metric set; the per-token recall
+	// resolution (roles + resolvedTokens) stops the decompose LLM from
+	// re-segmenting the question and refusing on fragments recall already matched.
+	intents := rr.MetricIntents
+	roles, resolvedTokens := summarizeRecallResolution(rr)
 
 	// Load the data-driven shape vocabulary once per gate invocation. Empty
 	// or error → vocab is nil → all downstream code degrades to legacy
@@ -146,17 +338,22 @@ func runReachabilityJudge(
 	vocab := loadShapeVocab(ctx, db)
 
 	// ── LLM call: decomposition + shape-aware coverage in one pass ───────────
-	res, err := decomposeQuestion(ctx, db, question, intents, vocab)
+	res, err := decomposeQuestion(ctx, db, question, intents, vocab, roles)
 	if err != nil {
 		log.Printf("MISSION-ACT: reachability decompose skipped (fail-open): %v", err)
-		return ""
+		return "", nil
 	}
 	if len(res.Requirements) == 0 {
-		return ""
+		return "", nil
 	}
 
+	// Resolve the required GROUP-BY dimensions from recall (grounded in the
+	// decompose hints). Surfaced to the caller so the executed query's groupBy
+	// can be forced to include them — this is the completeness contract.
+	reqDims := requiredDimsFromRecall(res.Requirements, rr)
+
 	// ── Build verdict from LLM hints; deterministic guard rails ──────────────
-	verdict := buildVerdictFromLLMHints(ctx, db, projectID, res.Requirements, intents, vocab)
+	verdict := buildVerdictFromLLMHints(ctx, db, projectID, res.Requirements, intents, vocab, resolvedTokens)
 
 	// ── Persist (best-effort) ────────────────────────────────────────────────
 	sm.recordReachability(ctx, verdict)
@@ -171,14 +368,14 @@ func runReachabilityJudge(
 	}
 
 	if verdict.Feasible {
-		return ""
+		return "", reqDims
 	}
 	if verdict.Kind == "clarify" {
 		// Ambiguous filter value(s) — answerable once the user disambiguates.
 		// Ask rather than refuse outright.
-		return "〔需要你先澄清一下〕\n\n" + verdict.Reason
+		return "〔需要你先澄清一下〕\n\n" + verdict.Reason, reqDims
 	}
-	return buildInfeasibilityAnswer(verdict)
+	return buildInfeasibilityAnswer(verdict), reqDims
 }
 
 // buildVerdictFromLLMHints turns the LLM's per-item judgement into a
@@ -195,7 +392,7 @@ func runReachabilityJudge(
 //     does NOT gate: the ReAct loop resolves dimensions/filters via OD
 //     property recall + SmartQuery (groupBy/filter + ont_link joins), so
 //     refusing on their absence only produced false negatives.
-func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string, hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap) mission.ReachabilityVerdict {
+func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string, hints []llmRequirementHint, intents []recall.MetricIntent, vocab []shapeCap, resolvedTokens map[string]bool) mission.ReachabilityVerdict {
 	realIntentNames := map[string]bool{}
 	for _, mi := range intents {
 		realIntentNames[mi.Name] = true
@@ -241,6 +438,21 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 			continue
 		}
 
+		// Recall-grounding guard: if the tokenizer + recall pipeline already
+		// resolved this filter's value (or this dimension's column) to a real
+		// ontology token, it is covered by construction — the value EXISTS. This
+		// overrides the LLM, which may have re-split a multi-word token into
+		// fragments that no longer match a stored value (the "YGPro7 15ASH11" →
+		// "YGPro7" + "15ASH11" bug). Only tokens recall did NOT resolve fall
+		// through to the shape / value-domain gates below, where a genuine gap
+		// (e.g. "TBD") can still be raised.
+		if recallResolves(h, resolvedTokens) {
+			rc.Covered = true
+			rc.CoveredBy = []string{"召回已解析"}
+			v.Requirements = append(v.Requirements, rc)
+			continue
+		}
+
 		// Sanitise covered_by against real intent names.
 		var realCoveredBy []string
 		for _, n := range h.CoveredBy {
@@ -260,9 +472,9 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 			// the vocab, so an unpopulated vocab never gates.
 			if vocabKnown[h.Shape] && !anyCitedIntentServesShape(realCoveredBy, h.Shape, intents, satisfies) {
 				rc.MissingNote = fmt.Sprintf(
-					"已授权 Intent (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
+					"已授权指标 (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
 					strings.Join(realCoveredBy, "、"), h.Shape)
-				blockers = append(blockers, fmt.Sprintf("「%s」需要 %s 形态，但已召回 Intent 的参数无法服务", h.Name, h.Shape))
+				blockers = append(blockers, fmt.Sprintf("「%s」需要 %s 形态，但已召回指标的参数无法服务", h.Name, h.Shape))
 				v.Requirements = append(v.Requirements, rc)
 				continue
 			}
@@ -283,7 +495,7 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 			if h.UncoveredReason != "" {
 				rc.MissingNote = h.UncoveredReason
 			} else {
-				rc.MissingNote = fmt.Sprintf("无已授权 Intent 以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
+				rc.MissingNote = fmt.Sprintf("无已授权指标以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
 			}
 		}
 
@@ -312,7 +524,7 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 	// Metric-only gate: refuse the turn only when recall surfaced NO Intent at
 	// all — there is nothing to measure. (See blockers comment above.)
 	if len(intents) == 0 {
-		blockers = append(blockers, "未召回到任何可用于度量的 Intent —— 当前本体没有与该指标相关的已授权口径")
+		blockers = append(blockers, "未召回到任何可用于度量的指标 —— 当前本体没有与该指标相关的已授权口径")
 	}
 
 	v.Feasible = len(blockers) == 0 && len(clarifyMsgs) == 0
@@ -405,9 +617,9 @@ func buildVerdictReason(v mission.ReachabilityVerdict, blockers []string) string
 	var sb strings.Builder
 	sb.WriteString("可行")
 	if len(covered) > 0 {
-		sb.WriteString(fmt.Sprintf("：维度（%s）已被已授权 Intent 覆盖", strings.Join(collectNames(covered), "、")))
+		sb.WriteString(fmt.Sprintf("：维度（%s）已被已授权指标覆盖", strings.Join(collectNames(covered), "、")))
 	} else {
-		sb.WriteString("：已召回相关 Intent")
+		sb.WriteString("：已召回相关指标")
 	}
 	if len(willResolve) > 0 {
 		sb.WriteString(fmt.Sprintf("；筛选/维度（%s）将在执行阶段按 OD 属性 / SmartQuery 解析", strings.Join(collectNames(willResolve), "、")))
@@ -446,6 +658,7 @@ func decomposeQuestion(
 	question string,
 	intents []recall.MetricIntent,
 	vocab []shapeCap,
+	roles []tokenRole,
 ) (decomposeResult, error) {
 	var zero decomposeResult
 	baseURL, apiKey, modelName, _, _, vendor := llmclient.GetConfigForRole(db, "agent")
@@ -453,14 +666,16 @@ func decomposeQuestion(
 		return zero, fmt.Errorf("no agent LLM config available")
 	}
 
-	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的 Intent 参数表，做三件事：
+	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的指标参数表，做三件事：
 
 第一件：把用户这一句里包含的「独立子问题」分出来。一句话里可能并列了多个问题（例如"上海的总营收是多少？外卖占比是多少？"是两个子问题）。每个子问题用一句自然语言描述。如果只有一个问题，就只返回一个。
 第二件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
-第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个 Intent 真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
+第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个指标真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
+
+**铁律**：分词与识别一律以下方「召回已解析」小节为准，**禁止你自己重新分词或拆开多词 token**。凡命中 指标/取值/列 的 token 一律 covered=true（本体中确实存在）；只有召回完全没命中、而用户又明显想用作筛选/分组的词，才允许 covered=false。
 
 只输出一个 JSON 对象，不要包裹 markdown 代码块，不要输出任何其他文字：
-{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","value":"...","shape":"...","why":"...","covered":true|false,"covered_by":["intent_a"],"uncovered_reason":"..."}]}
+{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","value":"...","shape":"...","why":"...","covered":true|false,"covered_by":["指标a"],"uncovered_reason":"..."}]}
 
 sub_questions 规则：
 - 每个元素是一句完整的自然语言子问题，尽量保留用户原话里的关键词。
@@ -479,16 +694,16 @@ requirements 字段规则：
   - filter 用具体形态："等值"/"单值"/"前缀匹配"/"区间"/"年范围"/"月范围"/"日期范围"/"枚举集合" 等。**形态必须精确**，不要笼统写"范围"。
 - why：一句话说明问题为什么需要这个要素。
 - covered（仅 dimension/filter 需要；metric 可省略，等同 true）：
-  - true 仅当存在某个 Intent 的参数同时满足：(a) property 与 name 一致；(b) op/type/描述 表明它能支撑这个 shape。
+  - true 仅当存在某个指标的参数同时满足：(a) property 与 name 一致；(b) op/type/描述 表明它能支撑这个 shape。
   - 例如 shape="年范围" 但参数 op="starts with" 且 描述="YYYY-MM" → 单月前缀，无法直接覆盖年范围 → covered=false。
   - 例如 shape="等值" 且参数 op="=" → 覆盖。
   - 例如 shape="枚举集合" 且参数 type="enum_ref" 且 op="=" → 单次只能选一个枚举值 → 仍是 covered=false（除非问题就是单值）。
-- covered_by：covered=true 时，列出真正满足形态的 Intent 名（必须出现在参数表里）。
+- covered_by：covered=true 时，列出真正满足形态的指标名（必须出现在参数表里）。
 - uncovered_reason：covered=false 时，一句话说明为什么形态对不上（例如"参数仅支持 YYYY-MM 单月前缀，不直接支持 2024-2025 年范围"）。
 - 如果问题只是通用查询（无特定筛选），requirements 只返回 metric 项。
 - requirements 元素不超过 8 个。`
 
-	userPrompt := buildDecomposeUserPrompt(question, intents, vocab)
+	userPrompt := buildDecomposeUserPrompt(question, intents, vocab, roles)
 
 	llmMessages := []map[string]interface{}{
 		{"role": "system", "content": systemPrompt},
@@ -514,16 +729,31 @@ requirements 字段规则：
 // the LLM can shape-match — name match alone is not enough to judge whether
 // a question's "year range" filter can really be served by a "starts-with
 // YYYY-MM" parameter.
-func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vocab []shapeCap) string {
+func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vocab []shapeCap, roles []tokenRole) string {
 	var sb strings.Builder
 	sb.WriteString("## 用户问题\n")
 	sb.WriteString(question)
-	sb.WriteString("\n\n## 可用 Intent 参数表（按形态判断可达性时必须以此为准）\n")
+	if len(roles) > 0 {
+		sb.WriteString("\n\n## 召回已解析（分词器+召回的权威结果 —— 必须以此为准，禁止重新分词）\n")
+		sb.WriteString("下列 token 由系统分词器切分、召回引擎解析。**严禁把多词 token 拆开**，也不要把指标里的词单独抽出来当筛选：\n")
+		for _, r := range roles {
+			switch r.Role {
+			case "指标":
+				sb.WriteString(fmt.Sprintf("- 「%s」→ 指标（命中：%s）\n", r.Token, strings.Join(r.Intents, "、")))
+			case "取值":
+				sb.WriteString(fmt.Sprintf("- 「%s」→ 取值（字段 %s）\n", r.Token, r.Field))
+			case "列":
+				sb.WriteString(fmt.Sprintf("- 「%s」→ 列/维度（字段 %s）\n", r.Token, r.Field))
+			}
+		}
+		sb.WriteString("角色为 指标/取值/列 的 token 一律 covered=true —— 它们在本体中确实存在。只有用户明显想筛/分组、却在上面**完全没出现**的词，才标 covered=false。\n")
+	}
+	sb.WriteString("\n\n## 可用指标参数表（按形态判断可达性时必须以此为准）\n")
 	if len(intents) == 0 {
-		sb.WriteString("（无已召回 Intent）\n")
+		sb.WriteString("（无已召回指标）\n")
 	} else {
 		for _, mi := range intents {
-			sb.WriteString(fmt.Sprintf("### Intent: %s\n", mi.Name))
+			sb.WriteString(fmt.Sprintf("### 指标: %s\n", mi.Name))
 			if len(mi.Parameters) == 0 {
 				sb.WriteString("（无参数）\n")
 				continue
@@ -562,7 +792,7 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vo
 			}
 			sb.WriteString("\n")
 		}
-		sb.WriteString("\n仅当某 Intent 的某个参数声明了 shape_capability 等于该要素 shape 时，才算形态对得上；否则即便 property 名字一致，也要把 covered 置为 false。\n")
+		sb.WriteString("\n仅当某指标的某个参数声明了 shape_capability 等于该要素 shape 时，才算形态对得上；否则即便 property 名字一致，也要把 covered 置为 false。\n")
 	}
 	sb.WriteString("\n请输出 JSON 对象。")
 	return sb.String()

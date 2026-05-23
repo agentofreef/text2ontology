@@ -85,6 +85,11 @@ var allowedAggregators = map[string]bool{
 	"distinctcount":  true,
 }
 
+// pureMetricEnabled gates the Path A "纯指标" measure check (col-family): a
+// Mode B compose may only aggregate a column already used by an authorized
+// 指标 on the OD. Default on; set USE_PURE_METRIC=0 to disable (A/B / debug).
+var pureMetricEnabled = envFlagDefaultOn("USE_PURE_METRIC")
+
 // composeError builds the common error payload shape so the LLM can
 // pattern-match on err.code. Mirrors strict-mode smartquery's error format.
 func composeError(detail string, hint string) M {
@@ -98,10 +103,78 @@ func composeError(detail string, hint string) M {
 	return out
 }
 
+// metricColumnAuthorized reports whether the aggregated column `col` is covered
+// by at least one authorized (mark=true) 指标 on the OD — i.e. some
+// metric_intent's canonical_metric aggregates the same column. The aggregation
+// FUNCTION may differ (col-family gate). Returns (false, authorizedCols) when no
+// 指标 backs the column; authorizedCols lists the columns that ARE authorized,
+// for a corrective hint. Fail-open (true) on nil DB / lookup error so infra
+// failure never blocks a query.
+func metricColumnAuthorized(ctx context.Context, db *sql.DB, projectID, odID, col string) (bool, []string) {
+	if db == nil || strings.TrimSpace(col) == "" {
+		return true, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT canonical_metric FROM lakehouse_metric_intent
+		WHERE project_id=$1 AND object_id=$2 AND mark=true
+		  AND COALESCE(canonical_metric,'') <> ''`,
+		projectID, odID)
+	if err != nil {
+		return true, nil // fail-open
+	}
+	defer rows.Close()
+	target := normMetricColName(col)
+	seen := map[string]bool{}
+	var authed []string
+	for rows.Next() {
+		var cm string
+		if rows.Scan(&cm) != nil {
+			continue
+		}
+		c := metricColFromExpr(cm)
+		if c == "" {
+			continue
+		}
+		nc := normMetricColName(c)
+		if !seen[nc] {
+			seen[nc] = true
+			authed = append(authed, c)
+		}
+		if nc == target {
+			return true, nil
+		}
+	}
+	if rows.Err() != nil {
+		return true, nil // fail-open on iteration error
+	}
+	return false, authed
+}
+
+// metricColFromExpr extracts the aggregated column from a canonical_metric
+// expression like "sum(ORDER_QUANTITY)" or "count(ORDER.ORDER_ID)" — returning
+// the bare column (OD prefix + granularity suffix stripped), or "" if it can't
+// be parsed.
+func metricColFromExpr(expr string) string {
+	m := metricExprRE.FindStringSubmatch(expr)
+	if m == nil {
+		return ""
+	}
+	arg := stripGranularitySuffix(strings.TrimSpace(m[2]))
+	if i := strings.LastIndex(arg, "."); i >= 0 {
+		arg = arg[i+1:]
+	}
+	return strings.TrimSpace(arg)
+}
+
+// normMetricColName normalizes a column name for case-insensitive comparison.
+func normMetricColName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // runComposeQueryTool is the dispatchTool handler for compose_query.
 // Validates input, builds smartquery.QuerySpec without an IntentHint, and
 // dispatches to the same SQL engine strict-mode uses.
-func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}) M {
+func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}, requiredDims []string) M {
 	odName := strings.TrimSpace(StrVal(args, "odName"))
 	if odName == "" {
 		return composeError("odName is required", "请填写主 OD 名（如 \"SALE\"）")
@@ -257,6 +330,29 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			"available: "+strings.Join(sortedKeys(primary), ", "))
 	}
 
+	// Path A — pure-metric gate (col-family, USE_PURE_METRIC). The aggregated
+	// column must be a measure that at least one authorized 指标 (metric_intent)
+	// on this OD already uses in its canonical_metric. This forbids an ad-hoc
+	// bare aggregate that no 指标 backs ("无指标裸测度"), so the agent never
+	// invents an unauthorized computation — every number traces to a curated
+	// 指标 (consistent with cite-only). The aggregation FUNCTION may differ
+	// (sum vs avg); only the column must be authorized. Fail-open on nil DB /
+	// lookup error so infra never blocks a query.
+	if pureMetricEnabled {
+		if ok, authed := metricColumnAuthorized(ctx, db, projectID, odID, metricArg); !ok {
+			hint := "纯指标模式：度量列必须来自某个已授权指标。请改用 🎯 小节里已有的指标，" +
+				"或调用 declare_capability_gap 声明缺口——不要拼一个没有指标背书的聚合。"
+			if len(authed) > 0 {
+				hint += " 本 OD 已授权指标覆盖的度量列：" + strings.Join(authed, " / ")
+			}
+			return M{
+				"error": fmt.Sprintf("NO_AUTHORIZED_METRIC: 度量列「%s」没有任何已授权指标背书", metricArg),
+				"code":  "NO_AUTHORIZED_METRIC",
+				"hint":  hint,
+			}
+		}
+	}
+
 	// Build QuerySpec. IntentHint stays nil — that's how the engine knows
 	// this is composed (no auto group_by / canonical_filters merging).
 	// spec.Objects starts with primary; cross-OD references will be appended
@@ -283,6 +379,35 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			}
 			spec.GroupBy = append(spec.GroupBy, ref)
 		}
+	}
+
+	// Completeness contract (Mode B): force the executed query's groupBy to
+	// include the question's required dimensions (resolved from recall by the
+	// reachability judge). For each reqDim not already in groupBy, resolve it
+	// via the same property pipeline; on resolve failure SKIP it (do not fail
+	// the whole query — we just can't inject that one dim). resolveQualifiedProperty
+	// already records the dim OD into referencedDimODs on success.
+	for _, reqDim := range requiredDims {
+		// Dedupe on the bare property name (case-insensitive) so a bare prop and
+		// its OD-qualified form ("OD.Prop" vs "Prop") count as the SAME column.
+		// This stops a duplicate groupBy (e.g. bare + qualified of one column)
+		// that the dense-SQL resolver treats as two columns → 0 rows.
+		nd := bareDimKey(reqDim)
+		already := false
+		for _, g := range spec.GroupBy {
+			if bareDimKey(g) == nd {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		ref, _, errM := resolveQualifiedProperty(reqDim, "requiredDim")
+		if errM != nil {
+			continue // can't inject this dim; leave the query as-is
+		}
+		spec.GroupBy = append(spec.GroupBy, ref)
 	}
 
 	// Validate + assemble filters. Same OD.Prop semantics as groupBy.
@@ -413,7 +538,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		execStatus = "success"
 	}
 
-	return M{
+	resp := M{
 		"composed":          true,
 		"odName":            odName,
 		"metric":            metric,
@@ -428,6 +553,29 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		"total_rows":        totalRows,
 		// matched_intent / bound_spec stay nil — composed queries are not
 		// intent-bound. Reflect's downstream code tolerates these absent.
+	}
+	// Compose queries report their resolved groupBy as dim_columns inside
+	// row_summary so the completeness check has a consistent surface to read.
+	if len(spec.GroupBy) > 0 {
+		resp["row_summary"] = M{"dim_columns": append([]string{}, spec.GroupBy...)}
+	}
+	annotateRequiredDims(resp, requiredDims)
+	return resp
+}
+
+// annotateRequiredDims is the deterministic completeness backstop (P1d). When
+// requiredDims is non-empty it always records them on the result, and when any
+// is absent from the result's dim columns it adds the missing list plus a
+// human-readable warning the answer layer must surface. It does NOT auto-rerun.
+func annotateRequiredDims(resp M, requiredDims []string) {
+	if len(requiredDims) == 0 {
+		return
+	}
+	resp["required_dims"] = requiredDims
+	if missing := missingRequiredDims(resp, requiredDims); len(missing) > 0 {
+		resp["missing_required_dims"] = missing
+		resp["dim_warning"] = "结果缺少必需维度: " + strings.Join(missing, ", ") +
+			" —— 该结果不完整，回答时必须说明，或补上这些 groupBy 重查。"
 	}
 }
 
@@ -494,6 +642,16 @@ func bareFilterPropName(rawRef string) string {
 	return strings.TrimSpace(s)
 }
 
+// bareDimKey is the case-insensitive bare-property identity used to dedupe
+// GROUP-BY dimensions: an OD-qualified ref ("OD.Prop") and the bare prop
+// ("Prop") collapse to the same key, so a required dim already present in
+// EITHER form is not injected twice (a bare+qualified pair of one column is a
+// duplicate groupBy the engine treats as two columns → 0 rows). General rule —
+// no specific property/OD names.
+func bareDimKey(rawRef string) string {
+	return strings.ToLower(bareFilterPropName(rawRef))
+}
+
 // splitFilterValues splits an in/not_in comma list into individual values;
 // other ops yield the single trimmed value.
 func splitFilterValues(value, op string) []string {
@@ -514,6 +672,65 @@ func normForDomain(s string) string {
 	s = strings.ReplaceAll(s, " ", "")
 	s = strings.ReplaceAll(s, "_", "")
 	return s
+}
+
+// missingRequiredDims returns required dims not present among the result's dim
+// columns. It reads resultM["row_summary"].dim_columns (the resolved groupBy
+// column labels) and, for each reqDim, reports it missing when none of the dim
+// columns matches under normForDomain containment (either direction). A reqDim
+// may be an "OD.Prop" ref, so the bare prop after the last "." is also tried.
+// Deterministic backstop — never auto-reruns.
+func missingRequiredDims(resultM M, requiredDims []string) []string {
+	if len(requiredDims) == 0 {
+		return nil
+	}
+	// Extract dim_columns from row_summary (an M with a []string or []any).
+	var dimCols []string
+	if rs, ok := resultM["row_summary"].(M); ok {
+		switch dc := rs["dim_columns"].(type) {
+		case []string:
+			dimCols = dc
+		case []interface{}:
+			for _, v := range dc {
+				if s, ok := v.(string); ok {
+					dimCols = append(dimCols, s)
+				}
+			}
+		}
+	}
+	normCols := make([]string, 0, len(dimCols))
+	for _, c := range dimCols {
+		if n := normForDomain(c); n != "" {
+			normCols = append(normCols, n)
+		}
+	}
+
+	covered := func(reqDim string) bool {
+		candidates := []string{reqDim}
+		if i := strings.LastIndex(reqDim, "."); i >= 0 {
+			candidates = append(candidates, reqDim[i+1:])
+		}
+		for _, cand := range candidates {
+			n := normForDomain(cand)
+			if n == "" {
+				continue
+			}
+			for _, c := range normCols {
+				if c == n || strings.Contains(c, n) || strings.Contains(n, c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var missing []string
+	for _, reqDim := range requiredDims {
+		if !covered(reqDim) {
+			missing = append(missing, reqDim)
+		}
+	}
+	return missing
 }
 
 // valueInDomain reports whether v matches any domain member (normalised).

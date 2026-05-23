@@ -32,16 +32,19 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 	recalledOds := collectRecalledOds(result)
 
 	if len(result.MetricIntents) > 0 {
-		sb.WriteString("### 🎯 查询意图（Metric Intent）\n\n")
-		sb.WriteString("严格模式：smartquery 只接受 `{intent, params}`。从下面挑一个 Intent name 填到 `intent`，按其 parameters 列表填 `params`：\n\n")
+		sb.WriteString("### 🎯 查询指标（Metric）\n\n")
+		sb.WriteString("以下指标已匹配到用户问题。**默认走 Mode B（自由组合）**：取指标的口径在 smartquery **顶层**自己拼一次查询；只有确实需要指标模板自带的 pivot 透视时，才用 intent 走 Mode A。\n\n")
 		for _, mi := range result.MetricIntents {
 			formatMetricIntent(&sb, mi, recalledOds)
 		}
-		sb.WriteString("**调用规则**：\n")
-		sb.WriteString("- `intent` 必填 = 上面任一 Intent name（如 `Sales.ByArtist`）\n")
-		sb.WriteString("- `params` 可选 = 仅填用户在问题里**明确表达**的参数；用户没提到的省略走 Intent 默认值\n")
-		sb.WriteString("- 不要填 metric/groupBy/filters/orderBy/limit —— Intent 已包含这些，多填会被 TOOL_ARGS_INVALID 拒绝\n")
-		sb.WriteString("- 回复时套用 response_template\n\n")
+		sb.WriteString("**组合规则（Mode B，默认）**：\n")
+		sb.WriteString("- 把这些字段写在 smartquery **顶层**（odName/metric/filters/groupBy），**不要**放进 `params`\n")
+		sb.WriteString("- metric = 指标的 canonical_metric（函数名一字不差照抄，**严禁**替换为其它聚合）\n")
+		sb.WriteString("- filters = 指标的 canonical_filters **+** 用户提到的其它筛选条件\n")
+		sb.WriteString("- groupBy = 指标的 auto_group_by **+** 用户提到的其它分组维度（auto_group_by 不可省略）\n")
+		sb.WriteString("- objects 见上方指标块里给出的成品列表，不要自行删减\n")
+		sb.WriteString("- 回复时套用 response_template\n")
+		sb.WriteString("**仅当需要模板内置 pivot 时走 Mode A**：填 `intent` = 指标 name，按其 parameters 列表填 `params`；此时不要再在顶层写 metric/filters/groupBy（指标已包含）。\n\n")
 	}
 
 	// ── Od blocks (keyword → property → Od) ──
@@ -194,7 +197,7 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 		sb.WriteString("**filters 与 groupBy 不互斥，请同时返回**：\n")
 		sb.WriteString("- `filters` — 承载上文「筛选值」所有行（`prop`、`op`、`dbValue`），用于 WHERE 定位具体记录\n")
 		sb.WriteString("- `groupBy` — 承载上文「列引用」所有列 + `filters` 中命中的同一 prop（即使该 prop 已被 filter，也要列入 groupBy，保证结果里出现该维度列，便于用户读出语义和做对比）\n")
-		sb.WriteString("- 例：用户问「NA地区在所有GEO中的占比」→ `filters:[{prop:GEO,op:=,value:\"N.A.\"}]` **且** `groupBy:[\"GEO\", ...]`，全局分母由 Intent 的 `pivot_percent_scope=global` 处理\n")
+		sb.WriteString("- 例：用户问「NA地区在所有GEO中的占比」→ `filters:[{prop:GEO,op:=,value:\"N.A.\"}]` **且** `groupBy:[\"GEO\", ...]`，全局分母由指标的 `pivot_percent_scope=global` 处理\n")
 		sb.WriteString("- 仅当用户问题**完全不涉及**某类维度时（如纯粹「共有多少订单」无任何切片意图），才省略 groupBy\n\n")
 	}
 
@@ -321,7 +324,7 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, _ []string) {
 	if title == "" {
 		title = mi.Name
 	}
-	sb.WriteString(fmt.Sprintf("#### `Intent:%s` %s\n", mi.Name, title))
+	sb.WriteString(fmt.Sprintf("#### `指标:%s` %s\n", mi.Name, title))
 	if mi.Description != "" {
 		sb.WriteString(fmt.Sprintf("> %s\n\n", strings.Join(strings.Fields(mi.Description), " ")))
 	}

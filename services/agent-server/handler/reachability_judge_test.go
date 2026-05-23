@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/lakehouse2ontology/services/agent-server/recall"
+
+	. "github.com/lakehouse2ontology/httputil"
 )
 
 // boolPtr returns a *bool — llmRequirementHint.Covered is *bool so we can
@@ -48,7 +50,7 @@ func TestBuildVerdictFromLLMHints_HoleTwoFix(t *testing.T) {
 		{Name: "year_range", Description: "spans an entire year"},
 	}
 
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab, nil)
 	if verdict.Feasible {
 		t.Fatalf("hole-2 guard failed: gate let through a wrong-shape coverage claim (verdict=%+v)", verdict)
 	}
@@ -81,7 +83,7 @@ func TestBuildVerdictFromLLMHints_ShapeMatchAccepts(t *testing.T) {
 	}}
 	vocab := []shapeCap{{Name: "year_range", Description: "spans an entire year"}}
 
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab, nil)
 	if !verdict.Feasible {
 		t.Fatalf("happy path regressed: %+v", verdict)
 	}
@@ -115,7 +117,7 @@ func TestBuildVerdictFromLLMHints_EmptyVocabKeepsLegacy(t *testing.T) {
 	}}
 
 	// vocab nil → legacy path, LLM verdict is trusted.
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil, nil)
 	if !verdict.Feasible {
 		t.Fatalf("legacy path regressed with empty vocab: %+v", verdict)
 	}
@@ -144,7 +146,7 @@ func TestBuildVerdictFromLLMHints_UnknownShapeKeepsLegacy(t *testing.T) {
 	}}
 	vocab := []shapeCap{{Name: "single_month_prefix", Description: "YYYY-MM prefix"}}
 
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab, nil)
 	if !verdict.Feasible {
 		t.Fatalf("guard fired on a shape not in vocab: %+v", verdict)
 	}
@@ -219,7 +221,7 @@ func TestBuildVerdictFromLLMHints_SubsumptionAccepts(t *testing.T) {
 		{Name: "multi_period_range", Satisfies: []string{"single_period_prefix"}},
 	}
 
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, vocab, nil)
 	if !verdict.Feasible {
 		t.Fatalf("subsumption acceptance failed: a range param should cover a single-period requirement (%+v)", verdict)
 	}
@@ -243,7 +245,7 @@ func TestBuildVerdictFromLLMHints_UndeclaredFilterDoesNotGate(t *testing.T) {
 		{Kind: "filter", Name: "X11", Shape: "等值", Covered: boolPtr(false), UncoveredReason: "参数表中无任何Intent"},
 		{Kind: "dimension", Name: "年度", Shape: "分组", Covered: boolPtr(false)},
 	}
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil)
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil, nil)
 	if !verdict.Feasible {
 		t.Fatalf("metric-only gate regressed: an undeclared filter/dimension must not gate when an Intent was recalled (%+v)", verdict)
 	}
@@ -267,7 +269,7 @@ func TestBuildVerdictFromLLMHints_NoIntentsInfeasible(t *testing.T) {
 		{Kind: "metric", Name: "early order"},
 		{Kind: "filter", Name: "X11", Covered: boolPtr(false)},
 	}
-	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, nil, nil) // no intents recalled
+	verdict := buildVerdictFromLLMHints(context.Background(), nil, "", hints, nil, nil, nil) // no intents recalled
 	if verdict.Feasible {
 		t.Fatalf("expected infeasible when no Intent was recalled, got %+v", verdict)
 	}
@@ -301,8 +303,195 @@ func TestResolveFilterValue_NilDBFailsOpen(t *testing.T) {
 		{Kind: "metric", Name: "x"},
 		{Kind: "filter", Name: "开发测试状态", Value: "TBD", Covered: boolPtr(false)},
 	}
-	v := buildVerdictFromLLMHints(context.Background(), nil, "", hints, []recall.MetricIntent{{Name: "m"}}, nil)
+	v := buildVerdictFromLLMHints(context.Background(), nil, "", hints, []recall.MetricIntent{{Name: "m"}}, nil, nil)
 	if !v.Feasible {
 		t.Fatalf("nil-DB value gate must not refuse, got %+v", v)
+	}
+}
+
+// Recall-grounding — the judge must trust the tokenizer + recall pipeline and
+// never refuse on a token recall already resolved.
+
+func TestSummarizeRecallResolution(t *testing.T) {
+	rr := recall.RecallResult{
+		MetricIntents: []recall.MetricIntent{
+			{Name: "Order.Quantity", MatchedTokens: []string{"early order"}},
+		},
+		TokenDetails: map[string][]recall.KeywordHit{
+			"YGPro7 15ASH11": {{Keyword: "Legion7 15ASH11", MappedTable: "PRODUCT", MappedField: "MTM", IsColumnRef: false}},
+			"按月":             {{Keyword: "month", MappedTable: "EARLY_ORDER", MappedField: "ORDER_DATE", IsColumnRef: true}},
+		},
+	}
+	roles, resolved := summarizeRecallResolution(rr)
+	for _, want := range []string{"earlyorder", "ygpro715ash11", "按月"} {
+		if !resolved[want] {
+			t.Errorf("expected resolved token %q, got set %v", want, resolved)
+		}
+	}
+	var sawMetric, sawValue, sawCol bool
+	for _, r := range roles {
+		switch r.Role {
+		case "指标":
+			sawMetric = true
+		case "取值":
+			sawValue = true
+		case "列":
+			sawCol = true
+		}
+	}
+	if !sawMetric || !sawValue || !sawCol {
+		t.Fatalf("expected metric+value+column roles, got %+v", roles)
+	}
+}
+
+func TestRecallResolves_AbsorbsFragmentSplit(t *testing.T) {
+	// recall matched the whole product token; the LLM re-split it into fragments.
+	resolved := map[string]bool{"ygpro715ash11": true, "earlyorder": true}
+	for _, frag := range []string{"YGPro7", "15ASH11", "YGPro7 15ASH11", "early"} {
+		if !recallResolves(llmRequirementHint{Kind: "filter", Value: frag}, resolved) {
+			t.Errorf("fragment %q of a recalled token must be treated as resolved", frag)
+		}
+	}
+	if recallResolves(llmRequirementHint{Kind: "filter", Value: "TBD"}, resolved) {
+		t.Error("TBD is not in recall — must not be treated as resolved")
+	}
+}
+
+// requiredDimsFromRecall — the completeness contract's extraction step.
+
+// TestRequiredDimsFromRecall_ColumnGroundedDimension verifies that a decompose
+// "dimension" hint whose token recall matched as a COLUMN (IsColumnRef=true)
+// yields the real "OD.Prop" group-by ref, while a filter-VALUE hint and an
+// ungrounded dimension hint do NOT.
+func TestRequiredDimsFromRecall_ColumnGroundedDimension(t *testing.T) {
+	rr := recall.RecallResult{
+		OdBlocks: []recall.OdBlock{{
+			Name: "SALE",
+			MatchedProps: []recall.PropertyMatch{
+				{
+					Name:        "GEO",
+					DisplayName: "地区",
+					Keywords: []recall.KeywordHit{
+						{MatchedToken: "GEO", IsColumnRef: true},
+					},
+				},
+				{
+					// A value-only property (recall matched a data VALUE, not a
+					// column) — must NOT become a group-by candidate.
+					Name:        "Status",
+					DisplayName: "状态",
+					Keywords: []recall.KeywordHit{
+						{MatchedToken: "Beverages", IsColumnRef: false},
+					},
+				},
+			},
+		}},
+	}
+	hints := []llmRequirementHint{
+		{Kind: "dimension", Name: "GEO"},        // column-grounded → resolved
+		{Kind: "filter", Name: "Beverages"},     // a filter value → not a dim
+		{Kind: "dimension", Name: "渠道"},          // ungrounded dim → not resolved
+		{Kind: "metric", Name: "销售额"},           // metric → never a dim
+	}
+	got := requiredDimsFromRecall(hints, rr)
+	if len(got) != 1 || got[0] != "SALE.GEO" {
+		t.Fatalf("expected [SALE.GEO], got %v", got)
+	}
+}
+
+// TestRequiredDimsFromRecall_MatchesDisplayName confirms the dimension hint can
+// resolve via the property DisplayName (not just Name), and dedupes.
+func TestRequiredDimsFromRecall_MatchesDisplayName(t *testing.T) {
+	rr := recall.RecallResult{
+		OdBlocks: []recall.OdBlock{{
+			Name: "ORDER",
+			MatchedProps: []recall.PropertyMatch{{
+				Name:        "ORDER_DATE",
+				DisplayName: "年度",
+				Keywords:    []recall.KeywordHit{{MatchedToken: "按年", IsColumnRef: true}},
+			}},
+		}},
+	}
+	hints := []llmRequirementHint{
+		{Kind: "dimension", Name: "年度"}, // matches DisplayName
+		{Kind: "dimension", Name: "按年"}, // matches the column-ref token → same ref
+	}
+	got := requiredDimsFromRecall(hints, rr)
+	if len(got) != 1 || got[0] != "ORDER.ORDER_DATE" {
+		t.Fatalf("expected deduped [ORDER.ORDER_DATE], got %v", got)
+	}
+}
+
+// TestRequiredDimsFromRecall_NoColumnRefsEmpty verifies that when recall has no
+// column references at all, no required dims are produced.
+func TestRequiredDimsFromRecall_NoColumnRefsEmpty(t *testing.T) {
+	rr := recall.RecallResult{
+		OdBlocks: []recall.OdBlock{{
+			Name: "SALE",
+			MatchedProps: []recall.PropertyMatch{{
+				Name:     "GEO",
+				Keywords: []recall.KeywordHit{{MatchedToken: "GEO", IsColumnRef: false}},
+			}},
+		}},
+	}
+	hints := []llmRequirementHint{{Kind: "dimension", Name: "GEO"}}
+	if got := requiredDimsFromRecall(hints, rr); len(got) != 0 {
+		t.Fatalf("expected no dims (no column refs), got %v", got)
+	}
+}
+
+// missingRequiredDims — the deterministic completeness backstop.
+
+// TestMissingRequiredDims_CoveringVsMissing verifies the dim_columns coverage
+// check: a required dim present in dim_columns (by bare prop, containment) is
+// covered; an absent one is reported missing.
+func TestMissingRequiredDims_CoveringVsMissing(t *testing.T) {
+	resultM := M{"row_summary": M{"dim_columns": []string{"GEO", "Order_Date"}}}
+	requiredDims := []string{"SALE.GEO", "SALE.Channel"}
+	got := missingRequiredDims(resultM, requiredDims)
+	if len(got) != 1 || got[0] != "SALE.Channel" {
+		t.Fatalf("expected [SALE.Channel] missing, got %v", got)
+	}
+}
+
+// TestMissingRequiredDims_AllCovered verifies no warning when every required
+// dim is present (including the []interface{} dim_columns shape).
+func TestMissingRequiredDims_AllCovered(t *testing.T) {
+	resultM := M{"row_summary": M{"dim_columns": []interface{}{"GEO", "年度"}}}
+	requiredDims := []string{"SALE.GEO", "ORDER.年度"}
+	if got := missingRequiredDims(resultM, requiredDims); len(got) != 0 {
+		t.Fatalf("expected nothing missing, got %v", got)
+	}
+}
+
+// TestMissingRequiredDims_NoRowSummary verifies that when dim_columns is absent,
+// all required dims are reported missing (the backstop's safe direction).
+func TestMissingRequiredDims_NoRowSummary(t *testing.T) {
+	got := missingRequiredDims(M{}, []string{"SALE.GEO"})
+	if len(got) != 1 || got[0] != "SALE.GEO" {
+		t.Fatalf("expected [SALE.GEO] missing with no row_summary, got %v", got)
+	}
+}
+
+func TestBuildVerdictFromLLMHints_RecallResolvedDoesNotGate(t *testing.T) {
+	// Regression: "YGPro7 15ASH11 有多少 early order" — the decompose LLM re-split
+	// the product into two filters and pulled "early" out of the metric, then the
+	// value-domain gate refused. With recall grounding, every fragment maps back
+	// to a recall-resolved token → feasible, and the filters show as covered.
+	intents := []recall.MetricIntent{{Name: "Order.Quantity"}}
+	hints := []llmRequirementHint{
+		{Kind: "metric", Name: "early order"},
+		{Kind: "filter", Name: "product", Value: "YGPro7", Covered: boolPtr(false), UncoveredReason: "本体里找不到"},
+		{Kind: "filter", Name: "spec", Value: "15ASH11", Covered: boolPtr(false)},
+	}
+	resolved := map[string]bool{"ygpro715ash11": true, "earlyorder": true}
+	v := buildVerdictFromLLMHints(context.Background(), nil, "", hints, intents, nil, resolved)
+	if !v.Feasible {
+		t.Fatalf("recall-resolved fragments must not gate, got %+v", v)
+	}
+	for _, r := range v.Requirements {
+		if r.Kind == "filter" && !r.Covered {
+			t.Errorf("filter %q should be covered via recall grounding, got %+v", r.Dimension, r)
+		}
 	}
 }
