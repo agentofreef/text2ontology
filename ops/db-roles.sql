@@ -95,6 +95,11 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE', ARRAY[
   ], 'backend_api_user');
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT',
   ARRAY['ont_agent_thread', 'ont_agent_step', 'ont_vector_entry', 'ont_agent_annotation'], 'backend_api_user');
+-- app_setting: admin settings upsert (allow_registration) via PUT /api/admin/settings.
+SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE', ARRAY['app_setting'], 'backend_api_user');
+-- ingest_job: GET /api/jobs lists status + cancel sets cancel_requested (UPDATE); rows
+-- are created/written by collector_server_user, so backend-api only needs SELECT + UPDATE.
+SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, UPDATE', ARRAY['ingest_job'], 'backend_api_user');
 -- Explicit REVOKE on UPDATE of thread_state to enforce P4.
 SELECT pg_temp.grant_if_exists('REVOKE', 'UPDATE', ARRAY['ont_agent_thread'], 'backend_api_user');
 SELECT pg_temp.grant_if_exists('REVOKE', 'INSERT, DELETE', ARRAY['ont_agent_thread'], 'backend_api_user');
