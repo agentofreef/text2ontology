@@ -45,6 +45,11 @@ type ReachabilityVerdict struct {
 	Feasible     bool                  `json:"feasible"`
 	Requirements []RequirementCoverage `json:"requirements"`
 	Reason       string                `json:"reason"`
+	// Kind classifies an infeasible verdict for answer rendering: "gap"
+	// (cannot be answered — a required field/value/metric is absent) or
+	// "clarify" (a filter value is ambiguous across several fields — ask the
+	// user which). Empty when feasible.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Judge produces the reachability verdict. Pure + deterministic.

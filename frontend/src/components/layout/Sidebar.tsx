@@ -7,7 +7,7 @@ import {
   Tag, Search, MessageSquare, History,
   ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Cpu, Plus, Database,
   Box, BarChart3, Tags, Trash2, Filter,
-  Network, Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
+  Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useProject } from '@/lib/project'
@@ -61,8 +61,10 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
         // are meant to take — the raw ER view duplicates what they'd see in
         // any DB GUI and adds little value here.
         // { href: '/ontology/er-diagram',        label: t('er_diagram'),      icon: Network  },
-        { href: '/ontology/lakehouse-objects', label: 'Ontology',           icon: Box      },
-        { href: '/ontology/lakehouse-graph',   label: t('property_graph'),  icon: Network  },
+        // Ontology: the object list + property graph were merged into one
+        // split-view page at /ontology/lakehouse-objects. /ontology/lakehouse-graph
+        // now redirects there, so the single nav entry covers both.
+        { href: '/ontology/lakehouse-objects', label: t('ontology'),        icon: Box      },
       ],
     },
     {

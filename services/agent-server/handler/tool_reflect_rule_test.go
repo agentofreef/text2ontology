@@ -16,7 +16,7 @@ import (
 //
 // Post-fix: extractBreakdownDim("...哪些客户") → "客户". Result columns
 // {EmployeeID, Total_NetAmount} contain no Customer synonym → mismatch with
-// suggested_action=compose_query.
+// suggested_action=smartquery (compose mode — no intent).
 func TestRuleBasedVerdict_DimMismatch_AndrewFuller(t *testing.T) {
 	resp := M{
 		"total_rows":       9,
@@ -34,8 +34,13 @@ func TestRuleBasedVerdict_DimMismatch_AndrewFuller(t *testing.T) {
 	if v.Verdict != "mismatch" {
 		t.Fatalf("expected verdict=mismatch, got %q (reasoning=%s)", v.Verdict, v.Reasoning)
 	}
-	if v.SuggestedAction != "compose_query" {
-		t.Fatalf("expected suggested_action=compose_query, got %q", v.SuggestedAction)
+	if v.SuggestedAction != "smartquery" {
+		t.Fatalf("expected suggested_action=smartquery, got %q", v.SuggestedAction)
+	}
+	// debug-infra ②: the rule must self-identify so the loop-trace can attribute
+	// the verdict to a deterministic rule (vs an LLM verdict).
+	if v.RuleName != "dim_mismatch" {
+		t.Fatalf("expected rule_name=dim_mismatch, got %q", v.RuleName)
 	}
 	foundCustomerHint := false
 	for _, h := range v.MissingDimensions {

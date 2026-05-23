@@ -426,7 +426,7 @@ function IntentVisualizer({ token, intents, selectedIntentId, onSelectIntent }: 
     <div className="ml-6 mt-2 space-y-2">
       <select value={selectedIntentId} onChange={e => onSelectIntent(e.target.value)}
         className="w-full border border-border bg-white px-2 py-1.5 text-xs text-ink outline-none focus:border-ink">
-        <option value="">— Intent —</option>
+        <option value="">— Metric —</option>
         {intents.map(intent => <option key={intent.id} value={intent.id}>{intent.name}{intent.objectName ? ` (${intent.objectName})` : ''}</option>)}
       </select>
       {!selectedIntent ? (

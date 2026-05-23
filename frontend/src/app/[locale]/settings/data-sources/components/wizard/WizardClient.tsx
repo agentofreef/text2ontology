@@ -26,10 +26,12 @@ interface DetectedLink {
 
 interface DataSourceMeta {
   id: string
+  project_id?: string
   type: string
   label: string
   status: string
   config_json?: string
+  staging_schema?: string
   created_at?: string
 }
 
@@ -99,7 +101,7 @@ export function WizardClient() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const dsId = searchParams.get('id') ?? ''
-  const { currentProject } = useProject()
+  const { currentProject, projects, switchProject } = useProject()
   const msg = useMessage()
 
   const [source, setSource] = useState<DataSourceMeta | null>(null)
@@ -108,9 +110,19 @@ export function WizardClient() {
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  // PBIX sources are decoded + loaded straight into the lakehouse (no wizard
+  // confirm step), so this view becomes a read-only "already imported" summary.
+  const [imported, setImported] = useState(false)
 
   // suppress unused-warning while keeping useProject side effects
   void currentProject
+
+  // Switch the active project to the source's, then open a lakehouse view.
+  const goView = (path: string) => {
+    const proj = projects.find((p) => p.id === source?.project_id)
+    if (proj) switchProject(proj)
+    router.push(path)
+  }
 
   const authHeaders = useCallback((): Record<string, string> => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('lakehouse2ontology_token') : null
@@ -136,6 +148,37 @@ export function WizardClient() {
       }
       const src = (await srcRes.json()) as DataSourceMeta
       setSource(src)
+
+      // 1b. PBIX is decoded by a Python subprocess and loaded directly into the
+      // project lakehouse — it never goes through the wizard's confirm step, and
+      // it has no PBIT catalog. Detect it via config_json.ext (set by the pbix
+      // importer) and show the tables it already produced instead of the empty
+      // PBIT catalog (which is what made this page read "0 tables detected").
+      let cfg: Record<string, unknown> = {}
+      try { cfg = JSON.parse(src.config_json || '{}') as Record<string, unknown> } catch { /* ignore */ }
+      if (String(cfg.ext ?? '').toLowerCase() === '.pbix') {
+        setImported(true)
+        if (src.project_id) {
+          const sres = await fetch(
+            `${getApiBase()}/lakehouse-sql/schema?projectId=${encodeURIComponent(src.project_id)}`,
+            { headers: authHeaders() },
+          )
+          if (sres.ok) {
+            const d = await sres.json()
+            const arr = (d.data ?? (Array.isArray(d) ? d : [])) as {
+              name: string
+              columns?: { name: string; type?: string }[]
+            }[]
+            setCatalog(
+              arr.map((tb) => ({
+                name: tb.name,
+                columns: (tb.columns ?? []).map((c) => ({ name: c.name, data_type: c.type })),
+              })),
+            )
+          }
+        }
+        return
+      }
 
       // 2. catalog (按 type 分发)
       const srcType = String(src.type || '').toLowerCase()
@@ -272,9 +315,9 @@ export function WizardClient() {
           <ChevronLeft size={12} aria-hidden="true" />
           {t('back_to_list')}
         </button>
-        <h1 className="text-lg font-semibold text-ink">{t('confirm_import_title')}</h1>
+        <h1 className="text-lg font-semibold text-ink">{imported ? t('imported_title') : t('confirm_import_title')}</h1>
         <p className="mt-1 text-sm text-ink-muted">
-          {t('confirm_import_hint')}
+          {imported ? t('imported_hint') : t('confirm_import_hint')}
         </p>
       </div>
 
@@ -311,7 +354,7 @@ export function WizardClient() {
       {/* Tables list */}
       <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-white">
         <div className="flex flex-shrink-0 items-center justify-between border-b border-border-light px-4 py-2.5">
-          <span className="text-sm font-medium text-ink">{t('detected_tables')}</span>
+          <span className="text-sm font-medium text-ink">{imported ? t('imported_tables') : t('detected_tables')}</span>
           <span className="font-mono text-xs tabular-nums text-ink-ghost">
             {t('table_col_count', { tables: catalog.length, columns: totalColumns })}
           </span>
@@ -344,15 +387,23 @@ export function WizardClient() {
         <div className="rounded-md border border-danger/30 bg-danger/5 p-3 text-sm text-danger">{error}</div>
       )}
 
-      {source?.status === 'completed' ? (
-        <div className="flex flex-shrink-0 items-center justify-between gap-3 rounded-md border border-success/30 bg-success/5 px-3 py-3">
+      {imported || source?.status === 'completed' ? (
+        <div className="flex flex-shrink-0 flex-col gap-3 rounded-md border border-success/30 bg-success/5 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2 text-sm text-success">
             <CheckCircle2 size={16} aria-hidden="true" />
-            {t('already_imported')}
+            {imported ? t('imported_ok', { count: catalog.length }) : t('already_imported')}
           </div>
-          <Button variant="primary" onClick={() => router.push('/settings/data-sources')}>
-            {t('back_to_list')}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => router.push('/settings/data-sources')}>
+              {t('back_to_list')}
+            </Button>
+            <Button variant="ghost" onClick={() => goView('/ontology/lakehouse-sql')}>
+              {t('view_in_sql')}
+            </Button>
+            <Button variant="primary" onClick={() => goView('/ontology/lakehouse')}>
+              {t('view_in_lakehouse')}
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-border-light pt-4">

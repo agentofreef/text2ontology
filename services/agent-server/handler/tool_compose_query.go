@@ -50,26 +50,10 @@ import (
 	. "github.com/lakehouse2ontology/httputil"
 )
 
-const composeQueryToolDescription = `自由组合一次查询（catalog 受限版本）。
-当 strict 模式 smartquery 没有完美匹配的 intent，且 reflect 已经判定 verdict=mismatch 时使用。
-你不能写 SQL — 只能从已有 OD 的 property / 聚合函数白名单里挑组合。
-
-入参：
-  odName   string   主 OD 名（必填，**单个**）
-  metric   string   聚合表达式，例 "sum(NetAmount)" / "count(id)" / "avg(UnitPrice)"
-                    支持函数：sum / avg / min / max / count / distinct_count
-                    ⚠ count 必须带 property 名（例 count(id)）；count(*) 不被引擎接受
-                    （会造成 JOIN 双重计数，引擎选择强制显式 count(<id 列>) 而非 *）
-  filters  array    过滤项 [{property, op, value}]，每个 property 必须是 odName 的一个 property
-                    op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between
-  groupBy  array    分组列 ["property1","property2"]，必须是 odName 的 property
-  orderBy  array    [{label,dir}] 可选；label 是结果列名（如 "Total_NetAmount"），dir = "ASC"|"DESC"
-  limit    int      可选，>=1
-
-返回：和 smartquery 一致的 result（execution_status / generated_sql / total_rows / execution_result / 等）。
-失败时 error.code = COMPOSE_FAILED + 详细原因（哪个 token 不存在 / 哪个 op 不允许）。
-
-MVP 限制：暂不支持跨 OD JOIN（v2 才加 1 跳）。所有 filter/groupBy 必须是主 OD 已有的 property。`
+// NOTE: the LLM-facing description for composition lives in
+// smartqueryToolDescription (Mode B) — compose is now the no-intent branch of
+// the unified `smartquery` tool, not a separate tool. runComposeQueryTool below
+// remains the implementation that path delegates to.
 
 // metricExprRE matches "func(arg)" where arg is a property name.
 // Examples: sum(NetAmount), count(id), avg(UnitPrice), distinct_count(CustomerID).
@@ -101,6 +85,11 @@ var allowedAggregators = map[string]bool{
 	"distinctcount":  true,
 }
 
+// pureMetricEnabled gates the Path A "纯指标" measure check (col-family): a
+// Mode B compose may only aggregate a column already used by an authorized
+// 指标 on the OD. Default on; set USE_PURE_METRIC=0 to disable (A/B / debug).
+var pureMetricEnabled = envFlagDefaultOn("USE_PURE_METRIC")
+
 // composeError builds the common error payload shape so the LLM can
 // pattern-match on err.code. Mirrors strict-mode smartquery's error format.
 func composeError(detail string, hint string) M {
@@ -114,10 +103,78 @@ func composeError(detail string, hint string) M {
 	return out
 }
 
+// metricColumnAuthorized reports whether the aggregated column `col` is covered
+// by at least one authorized (mark=true) 指标 on the OD — i.e. some
+// metric_intent's canonical_metric aggregates the same column. The aggregation
+// FUNCTION may differ (col-family gate). Returns (false, authorizedCols) when no
+// 指标 backs the column; authorizedCols lists the columns that ARE authorized,
+// for a corrective hint. Fail-open (true) on nil DB / lookup error so infra
+// failure never blocks a query.
+func metricColumnAuthorized(ctx context.Context, db *sql.DB, projectID, odID, col string) (bool, []string) {
+	if db == nil || strings.TrimSpace(col) == "" {
+		return true, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT canonical_metric FROM lakehouse_metric_intent
+		WHERE project_id=$1 AND object_id=$2 AND mark=true
+		  AND COALESCE(canonical_metric,'') <> ''`,
+		projectID, odID)
+	if err != nil {
+		return true, nil // fail-open
+	}
+	defer rows.Close()
+	target := normMetricColName(col)
+	seen := map[string]bool{}
+	var authed []string
+	for rows.Next() {
+		var cm string
+		if rows.Scan(&cm) != nil {
+			continue
+		}
+		c := metricColFromExpr(cm)
+		if c == "" {
+			continue
+		}
+		nc := normMetricColName(c)
+		if !seen[nc] {
+			seen[nc] = true
+			authed = append(authed, c)
+		}
+		if nc == target {
+			return true, nil
+		}
+	}
+	if rows.Err() != nil {
+		return true, nil // fail-open on iteration error
+	}
+	return false, authed
+}
+
+// metricColFromExpr extracts the aggregated column from a canonical_metric
+// expression like "sum(ORDER_QUANTITY)" or "count(ORDER.ORDER_ID)" — returning
+// the bare column (OD prefix + granularity suffix stripped), or "" if it can't
+// be parsed.
+func metricColFromExpr(expr string) string {
+	m := metricExprRE.FindStringSubmatch(expr)
+	if m == nil {
+		return ""
+	}
+	arg := stripGranularitySuffix(strings.TrimSpace(m[2]))
+	if i := strings.LastIndex(arg, "."); i >= 0 {
+		arg = arg[i+1:]
+	}
+	return strings.TrimSpace(arg)
+}
+
+// normMetricColName normalizes a column name for case-insensitive comparison.
+func normMetricColName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // runComposeQueryTool is the dispatchTool handler for compose_query.
 // Validates input, builds smartquery.QuerySpec without an IntentHint, and
 // dispatches to the same SQL engine strict-mode uses.
-func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}) M {
+func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}, requiredDims []string) M {
 	odName := strings.TrimSpace(StrVal(args, "odName"))
 	if odName == "" {
 		return composeError("odName is required", "请填写主 OD 名（如 \"SALE\"）")
@@ -273,6 +330,29 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			"available: "+strings.Join(sortedKeys(primary), ", "))
 	}
 
+	// Path A — pure-metric gate (col-family, USE_PURE_METRIC). The aggregated
+	// column must be a measure that at least one authorized 指标 (metric_intent)
+	// on this OD already uses in its canonical_metric. This forbids an ad-hoc
+	// bare aggregate that no 指标 backs ("无指标裸测度"), so the agent never
+	// invents an unauthorized computation — every number traces to a curated
+	// 指标 (consistent with cite-only). The aggregation FUNCTION may differ
+	// (sum vs avg); only the column must be authorized. Fail-open on nil DB /
+	// lookup error so infra never blocks a query.
+	if pureMetricEnabled {
+		if ok, authed := metricColumnAuthorized(ctx, db, projectID, odID, metricArg); !ok {
+			hint := "纯指标模式：度量列必须来自某个已授权指标。请改用 🎯 小节里已有的指标，" +
+				"或调用 declare_capability_gap 声明缺口——不要拼一个没有指标背书的聚合。"
+			if len(authed) > 0 {
+				hint += " 本 OD 已授权指标覆盖的度量列：" + strings.Join(authed, " / ")
+			}
+			return M{
+				"error": fmt.Sprintf("NO_AUTHORIZED_METRIC: 度量列「%s」没有任何已授权指标背书", metricArg),
+				"code":  "NO_AUTHORIZED_METRIC",
+				"hint":  hint,
+			}
+		}
+	}
+
 	// Build QuerySpec. IntentHint stays nil — that's how the engine knows
 	// this is composed (no auto group_by / canonical_filters merging).
 	// spec.Objects starts with primary; cross-OD references will be appended
@@ -301,6 +381,35 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		}
 	}
 
+	// Completeness contract (Mode B): force the executed query's groupBy to
+	// include the question's required dimensions (resolved from recall by the
+	// reachability judge). For each reqDim not already in groupBy, resolve it
+	// via the same property pipeline; on resolve failure SKIP it (do not fail
+	// the whole query — we just can't inject that one dim). resolveQualifiedProperty
+	// already records the dim OD into referencedDimODs on success.
+	for _, reqDim := range requiredDims {
+		// Dedupe on the bare property name (case-insensitive) so a bare prop and
+		// its OD-qualified form ("OD.Prop" vs "Prop") count as the SAME column.
+		// This stops a duplicate groupBy (e.g. bare + qualified of one column)
+		// that the dense-SQL resolver treats as two columns → 0 rows.
+		nd := bareDimKey(reqDim)
+		already := false
+		for _, g := range spec.GroupBy {
+			if bareDimKey(g) == nd {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		ref, _, errM := resolveQualifiedProperty(reqDim, "requiredDim")
+		if errM != nil {
+			continue // can't inject this dim; leave the query as-is
+		}
+		spec.GroupBy = append(spec.GroupBy, ref)
+	}
+
 	// Validate + assemble filters. Same OD.Prop semantics as groupBy.
 	if rawFilters, ok := args["filters"].([]interface{}); ok {
 		for i, raw := range rawFilters {
@@ -308,7 +417,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			if !ok {
 				return composeError(fmt.Sprintf("filters[%d] must be an object", i), "")
 			}
-			ref, _, errM := resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
+			ref, dimOD, errM := resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
 			if errM != nil {
 				return errM
 			}
@@ -321,6 +430,30 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 				return composeError(
 					fmt.Sprintf("filters[%d].op=%q not allowed", i, op),
 					"whitelist: =, !=, >, <, >=, <=, in, not_in, like, between")
+			}
+			// Stage A — value-domain guard (defense-in-depth). For equality-type
+			// filters on a LOW-cardinality categorical property, reject a value
+			// that isn't in the property's known domain (from lakehouse_keyword),
+			// so the LLM can't silently run a fabricated value (e.g. "TBD" on a
+			// {Ready, Not ready} field). Range/like ops and high-cardinality
+			// props are skipped (domain unknown/too large → fail-open).
+			if value != "" && (op == "=" || op == "!=" || op == "in" || op == "not_in") {
+				owningOD := odName
+				if dimOD != "" {
+					owningOD = dimOD
+				}
+				if odID := odIDByName[owningOD]; odID != "" {
+					if domain, known := lowCardValueDomain(ctx, db, odID, bareFilterPropName(StrVal(fm, "property"))); known {
+						for _, v := range splitFilterValues(value, op) {
+							if v != "" && !valueInDomain(v, domain) {
+								return composeError(
+									fmt.Sprintf("filters[%d]: 值 %q 不在属性 %q 的已知值域内", i, v, bareFilterPropName(StrVal(fm, "property"))),
+									"该属性值域: "+strings.Join(domain, " | ")+
+										" —— 若用户的说法不在其中，请勿臆造映射；向用户澄清，或换一个属性/值。")
+							}
+						}
+					}
+				}
 			}
 			spec.Filters = append(spec.Filters, smartquery.FilterItem{
 				Prop:  ref,
@@ -405,7 +538,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		execStatus = "success"
 	}
 
-	return M{
+	resp := M{
 		"composed":          true,
 		"odName":            odName,
 		"metric":            metric,
@@ -420,6 +553,29 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		"total_rows":        totalRows,
 		// matched_intent / bound_spec stay nil — composed queries are not
 		// intent-bound. Reflect's downstream code tolerates these absent.
+	}
+	// Compose queries report their resolved groupBy as dim_columns inside
+	// row_summary so the completeness check has a consistent surface to read.
+	if len(spec.GroupBy) > 0 {
+		resp["row_summary"] = M{"dim_columns": append([]string{}, spec.GroupBy...)}
+	}
+	annotateRequiredDims(resp, requiredDims)
+	return resp
+}
+
+// annotateRequiredDims is the deterministic completeness backstop (P1d). When
+// requiredDims is non-empty it always records them on the result, and when any
+// is absent from the result's dim columns it adds the missing list plus a
+// human-readable warning the answer layer must surface. It does NOT auto-rerun.
+func annotateRequiredDims(resp M, requiredDims []string) {
+	if len(requiredDims) == 0 {
+		return
+	}
+	resp["required_dims"] = requiredDims
+	if missing := missingRequiredDims(resp, requiredDims); len(missing) > 0 {
+		resp["missing_required_dims"] = missing
+		resp["dim_warning"] = "结果缺少必需维度: " + strings.Join(missing, ", ") +
+			" —— 该结果不完整，回答时必须说明，或补上这些 groupBy 重查。"
 	}
 }
 
@@ -467,4 +623,162 @@ func sortedKeys(m map[string]bool) []string {
 		}
 	}
 	return out
+}
+
+// ── Stage A: value-domain guard helpers ──────────────────────────────────────
+
+// valueDomainCap bounds how many distinct value-keywords a property may have to
+// be treated as a LOW-cardinality categorical domain. Above this we cannot
+// reliably enumerate the domain, so the guard skips validation (fail-open).
+const valueDomainCap = 40
+
+// bareFilterPropName extracts the property name from a filter reference,
+// dropping a granularity suffix (e.g. "(月)") and an "OD." qualifier.
+func bareFilterPropName(rawRef string) string {
+	s := stripGranularitySuffix(strings.TrimSpace(rawRef))
+	if idx := strings.LastIndex(s, "."); idx >= 0 {
+		s = s[idx+1:]
+	}
+	return strings.TrimSpace(s)
+}
+
+// bareDimKey is the case-insensitive bare-property identity used to dedupe
+// GROUP-BY dimensions: an OD-qualified ref ("OD.Prop") and the bare prop
+// ("Prop") collapse to the same key, so a required dim already present in
+// EITHER form is not injected twice (a bare+qualified pair of one column is a
+// duplicate groupBy the engine treats as two columns → 0 rows). General rule —
+// no specific property/OD names.
+func bareDimKey(rawRef string) string {
+	return strings.ToLower(bareFilterPropName(rawRef))
+}
+
+// splitFilterValues splits an in/not_in comma list into individual values;
+// other ops yield the single trimmed value.
+func splitFilterValues(value, op string) []string {
+	if op == "in" || op == "not_in" {
+		parts := strings.Split(value, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+	return []string{strings.TrimSpace(value)}
+}
+
+// normForDomain lowercases and strips spaces/underscores so domain membership
+// matches recall's surface-form normalization ("Not ready" ≈ "notready").
+func normForDomain(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "_", "")
+	return s
+}
+
+// missingRequiredDims returns required dims not present among the result's dim
+// columns. It reads resultM["row_summary"].dim_columns (the resolved groupBy
+// column labels) and, for each reqDim, reports it missing when none of the dim
+// columns matches under normForDomain containment (either direction). A reqDim
+// may be an "OD.Prop" ref, so the bare prop after the last "." is also tried.
+// Deterministic backstop — never auto-reruns.
+func missingRequiredDims(resultM M, requiredDims []string) []string {
+	if len(requiredDims) == 0 {
+		return nil
+	}
+	// Extract dim_columns from row_summary (an M with a []string or []any).
+	var dimCols []string
+	if rs, ok := resultM["row_summary"].(M); ok {
+		switch dc := rs["dim_columns"].(type) {
+		case []string:
+			dimCols = dc
+		case []interface{}:
+			for _, v := range dc {
+				if s, ok := v.(string); ok {
+					dimCols = append(dimCols, s)
+				}
+			}
+		}
+	}
+	normCols := make([]string, 0, len(dimCols))
+	for _, c := range dimCols {
+		if n := normForDomain(c); n != "" {
+			normCols = append(normCols, n)
+		}
+	}
+
+	covered := func(reqDim string) bool {
+		candidates := []string{reqDim}
+		if i := strings.LastIndex(reqDim, "."); i >= 0 {
+			candidates = append(candidates, reqDim[i+1:])
+		}
+		for _, cand := range candidates {
+			n := normForDomain(cand)
+			if n == "" {
+				continue
+			}
+			for _, c := range normCols {
+				if c == n || strings.Contains(c, n) || strings.Contains(n, c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var missing []string
+	for _, reqDim := range requiredDims {
+		if !covered(reqDim) {
+			missing = append(missing, reqDim)
+		}
+	}
+	return missing
+}
+
+// valueInDomain reports whether v matches any domain member (normalised).
+func valueInDomain(v string, domain []string) bool {
+	nv := normForDomain(v)
+	for _, d := range domain {
+		if normForDomain(d) == nv {
+			return true
+		}
+	}
+	return false
+}
+
+// lowCardValueDomain returns the distinct value-keywords for a property when it
+// is a low-cardinality categorical (≤ valueDomainCap distinct values). Returns
+// (domain, true) for a known low-card domain; (nil, false) when the property is
+// high-cardinality, has no value vocabulary, or on any error — fail-open, so the
+// guard never blocks a filter it cannot confidently validate.
+func lowCardValueDomain(ctx context.Context, db *sql.DB, odID, propName string) ([]string, bool) {
+	if db == nil || odID == "" || propName == "" {
+		return nil, false
+	}
+	var propID string
+	if err := db.QueryRowContext(ctx,
+		`SELECT id FROM ont_property WHERE object_type_id=$1 AND name=$2`,
+		odID, propName).Scan(&propID); err != nil {
+		return nil, false
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT keyword FROM lakehouse_keyword
+		WHERE property_id=$1
+		  AND COALESCE(is_column_name, false) = false
+		  AND COALESCE(is_stopword, false) = false
+		  AND COALESCE(is_machine_code, false) = false
+		LIMIT $2`, propID, valueDomainCap+1)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if rows.Scan(&k) == nil && strings.TrimSpace(k) != "" {
+			out = append(out, k)
+		}
+	}
+	if rows.Err() != nil || len(out) == 0 || len(out) > valueDomainCap {
+		return nil, false // error, no vocab, or high-cardinality → can't validate
+	}
+	return out, true
 }

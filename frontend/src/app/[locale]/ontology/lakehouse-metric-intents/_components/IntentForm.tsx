@@ -1,6 +1,6 @@
 'use client'
 
-// Shared form for "新建" and "编辑" Metric Intent. Pure presentational —
+// Shared form for "新建" and "编辑" 指标（Metric）. Pure presentational —
 // state lives in the route pages so they can wire submit/cancel to their
 // own router.push and api calls. Sections mirror the data model:
 //
@@ -133,7 +133,7 @@ export function IntentFormFields({ form, setForm, objects, gbInput, setGbInput }
             </select>
             <div className="mt-1 inline-flex items-start gap-1 text-[11px] text-ink-ghost">
               <AlertCircle size={10} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
-              <span>每个 Intent 仅可归属单个 Od（暂不支持多 Od 组合触发）</span>
+              <span>每个指标仅可归属单个 Od（暂不支持多 Od 组合触发）</span>
             </div>
           </div>
           <Input
@@ -152,7 +152,7 @@ export function IntentFormFields({ form, setForm, objects, gbInput, setGbInput }
             className="h-3.5 w-3.5 accent-ink"
           />
           <span className="text-sm text-ink">启用（mark）</span>
-          <span className="text-[11px] text-ink-ghost">— 关闭后 recall 会跳过此 Intent</span>
+          <span className="text-[11px] text-ink-ghost">— 关闭后 recall 会跳过此指标</span>
         </label>
       </Section>
 
@@ -240,7 +240,7 @@ export function IntentFormFields({ form, setForm, objects, gbInput, setGbInput }
           <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-ink-muted">
             <Layers size={11} aria-hidden="true" />
             Auto GroupBy
-            <span className="font-normal text-ink-ghost">— Intent 触发时强制注入这些列</span>
+            <span className="font-normal text-ink-ghost">— 指标触发时强制注入这些列</span>
           </label>
           <div className="mb-1.5 flex gap-1">
             <input

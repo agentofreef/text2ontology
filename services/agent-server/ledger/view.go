@@ -1,6 +1,10 @@
 package ledger
 
-import "github.com/lakehouse2ontology/services/agent-server/recall"
+import (
+	"sort"
+
+	"github.com/lakehouse2ontology/services/agent-server/recall"
+)
 
 // BuildCachedContext projects a Ledger into the read-only view that
 // recall.BuildLakehouseContextCached consumes. Called by the handler
@@ -55,4 +59,24 @@ func BuildCachedContext(l *Ledger) *recall.CachedContext {
 		c.OlEntries[id] = ol.OlEntry
 	}
 	return c
+}
+
+// AccumulatedMetricIntents returns every MetricIntent the thread has
+// surfaced across all turns so far (the ledger merges them via
+// mergeIntent on each turn's recall). The reachability judge unions
+// these with the CURRENT turn's recall so a follow-up that reuses an
+// earlier turn's metric ("那 AP 呢?") is not refused for "no metric".
+// Returns a stable, deterministic order (sorted by intent name) so the
+// decompose prompt is reproducible. Nil-safe: a nil/empty ledger
+// returns nil.
+func (l *Ledger) AccumulatedMetricIntents() []recall.MetricIntent {
+	if l == nil || len(l.Intents) == 0 {
+		return nil
+	}
+	out := make([]recall.MetricIntent, 0, len(l.Intents))
+	for _, mi := range l.Intents {
+		out = append(out, mi.MetricIntent)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

@@ -1,6 +1,6 @@
 'use client'
 
-// 新建查询意图（Metric Intent）— full-page form, replaces the old modal flow.
+// 新建指标（Metric）— full-page form, replaces the old modal flow.
 // Mirrors the SV Minimal layout convention: sticky header bar with back +
 // title + actions, scrollable body that owns its viewport (no <main> padding —
 // path is registered in app/layout.tsx fullHeightExactPaths).

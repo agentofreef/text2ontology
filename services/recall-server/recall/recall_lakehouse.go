@@ -346,7 +346,7 @@ func searchLakehouseKeywordFull(ctx context.Context, db *sql.DB, projectID, toke
 		        LOWER(lk.keyword) = LOWER($2)
 		     OR EXISTS (
 		          SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		          WHERE LOWER(a) = LOWER($2))
+		          WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))
 		      )
 		  AND COALESCE(o.mark, true) = true
 		LIMIT 10`, projectID, token)
@@ -414,7 +414,7 @@ func searchLakehouseKeywordFull(ctx context.Context, db *sql.DB, projectID, toke
 		  AND LOWER(lk.keyword) != LOWER($2)
 		  AND NOT EXISTS (
 		        SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		        WHERE LOWER(a) = LOWER($2))
+		        WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))
 		  AND COALESCE(o.mark, true) = true
 		LIMIT 10`, projectID, token)
 	if err == nil {
@@ -668,7 +668,7 @@ func searchLakehouseOdAlias(ctx context.Context, db *sql.DB, projectID, token st
 		        LOWER(lk.keyword) = LOWER($2)
 		     OR EXISTS (
 		          SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		          WHERE LOWER(a) = LOWER($2))
+		          WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))
 		      )
 		LIMIT 10`, projectID, token)
 	if err == nil {
@@ -723,7 +723,7 @@ func searchLakehouseOdAlias(ctx context.Context, db *sql.DB, projectID, token st
 		  AND LOWER(lk.keyword) != LOWER($2)
 		  AND NOT EXISTS (
 		        SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		        WHERE LOWER(a) = LOWER($2))
+		        WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))
 		LIMIT 10`, projectID, token)
 	if err == nil {
 		// Scoped so rows.Close() runs deterministically (incl. on panic) at the
@@ -1281,25 +1281,25 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 	var cond string
 	if exact {
 		cond = `(
-		           LOWER(lk.keyword) = LOWER($2)
+		           regexp_replace(LOWER(lk.keyword), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g')
 		        OR EXISTS (
 		             SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		             WHERE LOWER(a) = LOWER($2))
+		             WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))
 		        )`
 	} else {
 		// FUZZY excludes machine-code keyword rows (mirrors the property/Od
 		// FUZZY guards in searchLakehouseKeywordFull / searchLakehouseOdAlias).
 		cond = `(
-		           lk.keyword ILIKE '%'||$2||'%'
+		           regexp_replace(LOWER(lk.keyword), '[ _]', '', 'g') ILIKE '%'||regexp_replace(LOWER($2), '[ _]', '', 'g')||'%'
 		        OR EXISTS (
 		             SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		             WHERE a ILIKE '%'||$2||'%')
+		             WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') ILIKE '%'||regexp_replace(LOWER($2), '[ _]', '', 'g')||'%')
 		        )
 		        AND COALESCE(lk.is_machine_code, false) = false
-		        AND LOWER(lk.keyword) != LOWER($2)
+		        AND regexp_replace(LOWER(lk.keyword), '[ _]', '', 'g') != regexp_replace(LOWER($2), '[ _]', '', 'g')
 		        AND NOT EXISTS (
 		             SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
-		             WHERE LOWER(a) = LOWER($2))`
+		             WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))`
 	}
 	q := `
 		SELECT DISTINCT

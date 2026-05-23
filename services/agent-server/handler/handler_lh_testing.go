@@ -889,7 +889,9 @@ func runLakehouseTestCase(ctx context.Context, db *sql.DB, projectID, suiteID, c
 			// on the background path) so tool DB/LLM work is cancellable.
 			return lakehouseToolLookup(ctx, db, projectID, args)
 		case "smartquery":
-			return lakehouseToolSmartQuery(ctx, db, projectID, question, args)
+			// Dataset-testing path runs no reachability judge → no required
+			// dimensions to inject (nil is behavior-preserving).
+			return lakehouseToolSmartQuery(ctx, db, projectID, question, args, nil)
 		default:
 			return M{"error": "未知工具: " + name}
 		}

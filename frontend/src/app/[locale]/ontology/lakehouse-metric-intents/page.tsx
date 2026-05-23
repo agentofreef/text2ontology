@@ -873,7 +873,7 @@ export default function LakehouseMetricIntentsPage() {
           ) : (
             <>
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <ImpactRow label="Intent (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} primary />
+                <ImpactRow label="Metric (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} primary />
                 <ImpactRow label="Keyword (lakehouse_keyword)" value={bulkDeleteImpact.keywords} />
               </div>
               <div>

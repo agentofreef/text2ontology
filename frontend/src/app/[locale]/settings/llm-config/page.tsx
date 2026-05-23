@@ -679,7 +679,11 @@ export default function LLMConfigPage() {
   }
 
   const handleEdit = (config: LLMConfig) => setEditConfig(config)
-  const closeEditModal = () => setEditConfig(null)
+  // Close handler shared by both config modals. Must clear BOTH the open flags
+  // and the edit target: a modal opened via the "new" button has
+  // chatModalOpen/embeddingModalOpen=true (editConfig=null), so clearing only
+  // editConfig left the modal open — the X / backdrop / cancel did nothing.
+  const closeEditModal = () => { setEditConfig(null); setChatModalOpen(false); setEmbeddingModalOpen(false) }
   const handleConfigsChanged = () => { fetchConfigs(); fetchBindings() }
 
   return (

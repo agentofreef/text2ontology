@@ -78,7 +78,7 @@ func runDeclareCapabilityGap(
 				"error":            fmt.Sprintf("capability gap claim rejected: %v", err),
 				"gate_rejected":    true,
 				"missing_dimension": missingDim,
-				"hint": "该维度已有参数覆盖，请选择真正覆盖该维度的 Intent 并直接查询，不要重新声明能力缺口。",
+				"hint": "该维度已有参数覆盖，请选择真正覆盖该维度的指标并直接查询，不要重新声明能力缺口。",
 			}}
 		}
 	}
@@ -184,11 +184,11 @@ func capabilityGapPromptSection() string {
 	return `
 ## 能力缺口声明（USE_MISSION_ACT 已启用）
 
-当你发现问题需要的筛选维度（如 employee_id、region、channel）**任何** 已召回的 Intent 都没有对应参数时：
-1. 调用 ` + "`declare_capability_gap`" + `，列出你检查过的每个 Intent 和它为何不足。
+当你发现问题需要的筛选维度（如 employee_id、region、channel）**任何** 已召回的指标都没有对应参数时：
+1. 调用 ` + "`declare_capability_gap`" + `，列出你检查过的每个指标和它为何不足。
 2. **绝对不要**回答"技术限制 / 系统暂时无法处理 / 平台功能有限"等模糊措辞。
-3. 若收到 ` + "`gate_rejected`" + ` 错误，说明该维度确实有 Intent 能覆盖——改用那个 Intent 直接查询，不要重新声明缺口。
-4. 只有 ` + "`🎯 查询意图`" + ` 候选集**完全为空**时才允许告知用户"超出已配置范围"；非空则必须先尽力查询或声明定位缺口。`
+3. 若收到 ` + "`gate_rejected`" + ` 错误，说明该维度确实有指标能覆盖——改用那个指标直接查询，不要重新声明缺口。
+4. 只有 ` + "`🎯 查询指标`" + ` 候选集**完全为空**时才允许告知用户"超出已配置范围"；非空则必须先尽力查询或声明定位缺口。`
 }
 
 // declareCapabilityGapToolDef returns the llmclient.ToolDef for this tool.
@@ -200,12 +200,12 @@ func declareCapabilityGapToolDef() map[string]any {
 		"properties": map[string]any{
 			"missing_dimension": map[string]any{
 				"type":        "string",
-				"description": "问题需要但所有 Intent 都没有覆盖的维度/筛选条件，例如 \"employee_id\" 或 \"region\"",
+				"description": "问题需要但所有指标都没有覆盖的维度/筛选条件，例如 \"employee_id\" 或 \"region\"",
 			},
 			"gap_kind": map[string]any{
 				"type":        "string",
 				"enum":        []string{"no_param", "shape_unsupported", "no_data"},
-				"description": "no_param=任何 Intent 都没有该维度的参数；shape_unsupported=参数存在但形状不符（如只支持单值不支持范围）；no_data=参数存在但底层数据缺失",
+				"description": "no_param=任何指标都没有该维度的参数；shape_unsupported=参数存在但形状不符（如只支持单值不支持范围）；no_data=参数存在但底层数据缺失",
 			},
 			"candidates_checked": map[string]any{
 				"type": "array",
@@ -213,16 +213,16 @@ func declareCapabilityGapToolDef() map[string]any {
 					"type":     "object",
 					"required": []string{"intent_name", "why_insufficient"},
 					"properties": map[string]any{
-						"intent_name":      map[string]any{"type": "string", "description": "Intent 名称"},
-						"params_summary":   map[string]any{"type": "string", "description": "该 Intent 的参数列表摘要（一行）"},
-						"why_insufficient": map[string]any{"type": "string", "description": "为什么这个 Intent 不能覆盖该维度"},
+						"intent_name":      map[string]any{"type": "string", "description": "指标名称"},
+						"params_summary":   map[string]any{"type": "string", "description": "该指标的参数列表摘要（一行）"},
+						"why_insufficient": map[string]any{"type": "string", "description": "为什么这个指标不能覆盖该维度"},
 					},
 				},
-				"description": "已检查过的所有相关 Intent，需逐一说明为何不覆盖",
+				"description": "已检查过的所有相关指标，需逐一说明为何不覆盖",
 			},
 			"suggested_fix": map[string]any{
 				"type":        "string",
-				"description": "修复方向，例如：需要在本体授权层为 store_revenue Intent 添加 employee_id 参数",
+				"description": "修复方向，例如：需要在本体授权层为 store_revenue 指标添加 employee_id 参数",
 			},
 			"closest_reachable": map[string]any{
 				"type":        "string",

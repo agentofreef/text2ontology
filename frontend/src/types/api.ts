@@ -148,7 +148,7 @@ export interface OntLinkType {
   updatedAt: string
 }
 
-// Metric Intent — lakehouse "query intent shortcut" (Order.Total, Order.Real, ...).
+// Metric (指标) — lakehouse "query metric shortcut" (Order.Total, Order.Real, ...).
 // Maps natural-language trigger terms (via lakehouse_keyword) to a canonical
 // smartquery template so the LLM doesn't have to re-derive filter/groupBy.
 export interface OntMetricIntentFilter {

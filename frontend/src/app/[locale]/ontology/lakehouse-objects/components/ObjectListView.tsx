@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, type ElementType } from 'react'
 import { useTranslations } from 'next-intl'
 import { useRouter } from '@/i18n/navigation'
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react'
@@ -15,7 +15,7 @@ import { useStyleMode } from '@/lib/style-mode'
 import type { OntObjectType } from '@/types/api'
 import { Modal } from '@/components/ui/Modal'
 import { BulkActionButton, ImpactRow } from '@/components/ui/BulkActionButton'
-import { Pencil, Trash2, Database, Plus, Download, Upload, RefreshCw, FilePlus2, AlertTriangle } from 'lucide-react'
+import { Pencil, Trash2, Database, Plus, Download, Upload, RefreshCw, FilePlus2, AlertTriangle, MoreHorizontal, Search, Check, X } from 'lucide-react'
 
 type MarkFilter = 'all' | 'marked' | 'unmarked'
 type ImportMode = 'merge' | 'skip' | 'replace'
@@ -46,7 +46,18 @@ interface BulkCreateResult {
   errors: { index: number; name?: string; error: string }[]
 }
 
-export function ObjectListView() {
+interface ObjectListViewProps {
+  /** Narrow split-view rail layout (left column of the combined page). */
+  compact?: boolean
+  /** Currently selected object id (drives row highlight in compact mode). */
+  selectedId?: string
+  /** Row-click handler in compact mode — selects rather than navigates. */
+  onSelect?: (id: string) => void
+  /** Fired after any mutation so a parent can refresh sibling views (graph). */
+  onMutated?: () => void
+}
+
+export function ObjectListView({ compact, selectedId, onSelect, onMutated }: ObjectListViewProps = {}) {
   const t = useTranslations('objects')
   const industrial = useStyleMode().mode === 'industrial'
   const router = useRouter()
@@ -58,6 +69,12 @@ export function ObjectListView() {
   // Otherwise users land on a "0 active" empty page after builder-agent flows
   // and assume the proposal failed.
   const [markFilter, setMarkFilter] = useState<MarkFilter>('all')
+  // Compact-mode local search (the wide DataTable owns its own searchbox).
+  const [compactSearch, setCompactSearch] = useState('')
+  // Compact-mode multi-select for batch actions (set of object ids).
+  const [compactSelected, setCompactSelected] = useState<Set<string>>(new Set())
+  // Compact-mode overflow "⋯" menu open state.
+  const [overflowOpen, setOverflowOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm, setCreateForm] = useState({ name: '', kind: 'entity', description: '' })
 
@@ -104,11 +121,43 @@ export function ObjectListView() {
   const unmarkedCount = (objects?.length || 0) - markedCount
   const totalCount = objects?.length || 0
 
+  // Compact rail also applies a free-text search on top of the mark filter.
+  const compactObjects = useMemo(() => {
+    const q = compactSearch.trim().toLowerCase()
+    if (!q) return filteredObjects
+    return filteredObjects.filter(o =>
+      o.name.toLowerCase().includes(q) ||
+      (o.displayName || '').toLowerCase().includes(q) ||
+      (o.description || '').toLowerCase().includes(q)
+    )
+  }, [filteredObjects, compactSearch])
+
+  // Compact-mode multi-select helpers. The "select all" affordance operates on
+  // the currently-filtered+searched rows only (compactObjects).
+  const clearCompactSelection = () => setCompactSelected(new Set())
+  const toggleCompactSelected = (id: string) => {
+    setCompactSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const allCompactSelected = compactObjects.length > 0 && compactObjects.every(o => compactSelected.has(o.id))
+  const toggleSelectAllCompact = () => {
+    if (allCompactSelected) {
+      clearCompactSelection()
+    } else {
+      setCompactSelected(new Set(compactObjects.map(o => o.id)))
+    }
+  }
+
   const toggleMark = async (id: string, newValue: boolean) => {
     await api(`/ontology/objects/${id}/mark?projectId=${currentProject?.id}`, {
       method: 'PUT', body: { mark: newValue },
     })
     refetch()
+    onMutated?.()
   }
 
   const deleteObject = async (id: string) => {
@@ -116,6 +165,7 @@ export function ObjectListView() {
     await api(`/ontology/objects/${id}?projectId=${currentProject?.id}`, { method: 'DELETE' })
     msg.success(t('deleted'))
     refetch()
+    onMutated?.()
   }
 
   const handleCreate = async () => {
@@ -206,6 +256,7 @@ export function ObjectListView() {
       msg.success(t('bulk_mark_success', { action: mark ? t('bulk_mark_action_marked') : t('bulk_mark_action_unmarked'), count: res.updated }))
       clear()
       refetch()
+      onMutated?.()
     } catch (e) {
       msg.error(e instanceof Error ? e.message : t('bulk_mark_failed'))
     } finally {
@@ -244,6 +295,7 @@ export function ObjectListView() {
       setBulkEditTarget(null)
       clear()
       refetch()
+      onMutated?.()
     } catch (e) {
       msg.error(e instanceof Error ? e.message : t('bulk_edit_failed'))
     } finally {
@@ -286,6 +338,7 @@ export function ObjectListView() {
       setBulkDeleteTarget(null)
       clear()
       refetch()
+      onMutated?.()
     } catch (e) {
       msg.error(e instanceof Error ? e.message : t('bulk_delete_failed'))
     } finally {
@@ -394,6 +447,7 @@ export function ObjectListView() {
         msg.warning(t('bulk_create_partial', { created: res.created, failed: res.errors.length }))
       }
       refetch()
+      onMutated?.()
     } catch (e) {
       msg.error(e instanceof Error ? e.message : t('bulk_create_failed'))
     } finally {
@@ -424,6 +478,7 @@ export function ObjectListView() {
       setImportResult(res.summary)
       msg.success(t('import_success'))
       refetch()
+      onMutated?.()
     } catch (e) {
       msg.error(e instanceof Error ? e.message : t('import_failed'))
     } finally {
@@ -546,8 +601,214 @@ export function ObjectListView() {
   // ─────────────────────────────────────────────────────────────
   // SV Minimal · list-create-detail archetype
   // ─────────────────────────────────────────────────────────────
+  // ─── Compact rail (split-view left column) ─────────────────────
+  // Narrow alternative to the wide DataTable. Search + mark filter stay
+  // visible; all toolbar actions collapse into an overflow "⋯" menu. Rows
+  // SELECT (onSelect) rather than navigate; edit/create still navigate. The
+  // shared modals (declared once below) are reused via the same open/close
+  // state, triggered from the overflow menu.
+  const compactRail = (
+    <div className="flex h-full min-h-0 flex-col bg-canvas">
+      {/* Toolbar: select-all + search + overflow menu */}
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-2">
+        <button
+          type="button"
+          onClick={toggleSelectAllCompact}
+          aria-pressed={allCompactSelected}
+          aria-label={t('select_all')}
+          title={t('select_all')}
+          disabled={compactObjects.length === 0}
+          className={`flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ink disabled:cursor-not-allowed disabled:opacity-40 ${
+            allCompactSelected ? 'border-ink bg-ink text-white' : 'border-border bg-white text-transparent hover:border-ink'
+          }`}
+        >
+          <Check size={12} strokeWidth={3} aria-hidden="true" />
+        </button>
+        <div className="relative flex-1">
+          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" aria-hidden="true" />
+          <input
+            value={compactSearch}
+            onChange={e => setCompactSearch(e.target.value)}
+            placeholder={t('search_placeholder')}
+            aria-label={t('search_placeholder')}
+            className="w-full rounded-md border border-border bg-white py-1.5 pl-8 pr-2 text-sm text-ink outline-none placeholder:text-ink-ghost focus:border-ink focus:ring-1 focus:ring-ink/10"
+          />
+        </div>
+        <div className="relative flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => setOverflowOpen(v => !v)}
+            aria-label={t('more_actions')}
+            title={t('more_actions')}
+            aria-expanded={overflowOpen}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-white text-ink-muted outline-none hover:border-ink hover:text-ink focus-visible:ring-1 focus-visible:ring-ink"
+          >
+            <MoreHorizontal size={14} aria-hidden="true" />
+          </button>
+          <AnimatePresence>
+            {overflowOpen && (
+              <>
+                <button
+                  type="button"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  onClick={() => setOverflowOpen(false)}
+                  className="fixed inset-0 z-40 cursor-default"
+                />
+                <MotionFadeMenu>
+                  <OverflowItem icon={Plus} label={t('new_btn')} onClick={() => { setOverflowOpen(false); setCreateForm({ name: '', kind: 'entity', description: '' }); setCreateOpen(true) }} />
+                  <OverflowItem icon={FilePlus2} label={t('bulk_create_btn')} onClick={() => { setOverflowOpen(false); setCsvText(''); setCsvParsed([]); setCsvParseError(null); setCsvResult(null); setCsvOpen(true) }} />
+                  <OverflowItem icon={Upload} label={t('import_btn')} onClick={() => { setOverflowOpen(false); setImportFile(null); setImportPreview(null); setImportResult(null); setImportOpen(true) }} />
+                  <OverflowItem icon={Download} label={exporting ? t('exporting') : t('export_btn')} onClick={() => { setOverflowOpen(false); handleExport() }} disabled={exporting} />
+                  <div className="my-1 h-px bg-border-light" />
+                  <OverflowItem icon={RefreshCw} label={t('refresh_title')} onClick={() => { setOverflowOpen(false); refetch() }} disabled={loading} />
+                </MotionFadeMenu>
+              </>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+
+      {/* Mark filter */}
+      <div className="flex flex-shrink-0 items-center border-b border-border bg-white px-3 py-1.5">
+        <SegmentedFilter
+          value={markFilter}
+          onChange={setMarkFilter}
+          options={[
+            ['all', t('filter_all', { count: totalCount })],
+            ['marked', t('filter_marked', { count: markedCount })],
+            ['unmarked', t('filter_unmarked', { count: unmarkedCount })],
+          ]}
+        />
+      </div>
+
+      {/* Batch action bar — only when rows are selected */}
+      {compactSelected.size > 0 && (
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-canvas-alt px-3 py-2">
+          <span className="mr-auto text-[11px] font-medium tabular-nums text-ink">
+            {t('batch_selected', { count: compactSelected.size })}
+          </span>
+          <BulkActionButton
+            onClick={() => handleBulkMark([...compactSelected], true, clearCompactSelection)}
+            disabled={bulkBusy}
+            title={t('batch_mark')}
+          >
+            {t('batch_mark')}
+          </BulkActionButton>
+          <BulkActionButton
+            onClick={() => handleBulkMark([...compactSelected], false, clearCompactSelection)}
+            disabled={bulkBusy}
+            title={t('batch_unmark')}
+          >
+            {t('batch_unmark')}
+          </BulkActionButton>
+          <BulkActionButton
+            onClick={() => openBulkDelete([...compactSelected], clearCompactSelection)}
+            disabled={bulkBusy}
+            danger
+            title={t('batch_delete')}
+          >
+            <Trash2 size={11} aria-hidden="true" />
+            {t('batch_delete')}
+          </BulkActionButton>
+          <button
+            type="button"
+            onClick={clearCompactSelection}
+            aria-label={t('clear_selection')}
+            title={t('clear_selection')}
+            className="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center border border-border bg-white text-ink-ghost outline-none hover:border-ink hover:text-ink focus-visible:ring-1 focus-visible:ring-ink"
+          >
+            <X size={12} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      {/* Rows */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {loading && !objects ? (
+          <div className="flex h-full items-center justify-center">
+            <InlineLoader text={t('loading')} />
+          </div>
+        ) : compactObjects.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-4 text-center text-xs text-ink-ghost">
+            {t('empty_list')}
+          </div>
+        ) : (
+          <ul>
+            {compactObjects.map(row => {
+              const total = row.properties?.length || 0
+              const mapped = row.properties?.filter(p => p.sourceColumn).length || 0
+              const validated = !!row.validatedAt
+              const hasSql = !!row.semanticSql
+              const sqlCls = validated ? 'bg-success' : hasSql ? 'bg-ink-ghost' : 'bg-border'
+              const isSelected = !!selectedId && row.id === selectedId
+              const isChecked = compactSelected.has(row.id)
+              return (
+                <li key={row.id}>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onSelect?.(row.id)}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect?.(row.id) } }}
+                    className={`flex w-full cursor-pointer items-center gap-2 border-b border-l-2 border-border-light px-3 py-2 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ink ${
+                      isSelected ? 'border-l-ink bg-canvas-alt' : 'border-l-transparent hover:bg-canvas-alt'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); toggleCompactSelected(row.id) }}
+                      aria-pressed={isChecked}
+                      aria-label={isChecked ? t('clear_selection') : t('select_all')}
+                      className={`flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ink ${
+                        isChecked ? 'border-ink bg-ink text-white' : 'border-border bg-white text-transparent hover:border-ink'
+                      }`}
+                    >
+                      <Check size={12} strokeWidth={3} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); toggleMark(row.id, !row.mark) }}
+                      className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-1 focus-visible:ring-ink"
+                      aria-pressed={row.mark}
+                      aria-label={row.mark ? t('toggle_mark_off') : t('toggle_mark_on')}
+                      title={row.mark ? t('toggle_mark_off') : t('toggle_mark_on')}
+                    >
+                      <span className={`inline-block h-2 w-2 rounded-full transition-colors ${row.mark ? 'bg-ink' : 'bg-border'}`} />
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-ink">{row.name}</span>
+                        <span className={`inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full ${sqlCls}`} aria-hidden="true" />
+                      </div>
+                      {row.displayName && row.displayName !== row.name && (
+                        <div className="truncate text-[11px] text-ink-ghost">{row.displayName}</div>
+                      )}
+                    </div>
+                    <span className="flex-shrink-0 text-[10px] tabular-nums text-ink-ghost">{mapped}/{total}</span>
+                    <Badge className="flex-shrink-0">{row.kind}</Badge>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); router.push(`/ontology/lakehouse-objects/detail?id=${row.id}`) }}
+                      aria-label={t('edit_aria', { name: row.name })}
+                      title={t('edit_title')}
+                      className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-ink-ghost outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-ink"
+                    >
+                      <Pencil size={12} aria-hidden="true" />
+                    </button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
+      {compact ? compactRail : (
+      <>
       {/* Header — h-14 to align with Sidebar brand row; industrial uses 2px ink rule */}
       <motion.header
         initial={reduce ? undefined : { opacity: 0, y: -4 }}
@@ -697,6 +958,8 @@ export function ObjectListView() {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {/* Import Modal */}
       <Modal open={importOpen} onClose={() => !importing && setImportOpen(false)} title={t('import_modal_title')} width="640px">
@@ -979,7 +1242,7 @@ export function ObjectListView() {
                 <ImpactRow label={`${t('col_properties')} (ont_property)`} value={bulkDeleteImpact.properties} />
                 <ImpactRow label="Link (ont_link_type)" value={bulkDeleteImpact.links} />
                 <ImpactRow label="Keyword (lakehouse_keyword)" value={bulkDeleteImpact.keywords} />
-                <ImpactRow label="Intent (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} />
+                <ImpactRow label="Metric (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} />
               </div>
               {(bulkDeleteImpact.orphans.knowledge > 0 || bulkDeleteImpact.orphans.aliases > 0) && (
                 <div className="rounded-md border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed text-ink-muted">
@@ -1135,6 +1398,46 @@ export function ObjectListView() {
 // ─────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────
+
+/** Right-aligned overflow dropdown panel for the compact rail toolbar. */
+function MotionFadeMenu({ children }: { children: React.ReactNode }) {
+  const reduce = useReducedMotion()
+  return (
+    <motion.div
+      initial={reduce ? undefined : { opacity: 0, y: -4 }}
+      animate={reduce ? undefined : { opacity: 1, y: 0 }}
+      exit={reduce ? undefined : { opacity: 0, y: -4 }}
+      transition={{ duration: 0.12, ease: 'easeOut' }}
+      role="menu"
+      className="absolute right-0 z-50 mt-1 w-44 rounded-md border border-border bg-white py-1 shadow-sm"
+    >
+      {children}
+    </motion.div>
+  )
+}
+
+/** Single row inside the overflow menu. */
+function OverflowItem({
+  icon: Icon, label, onClick, disabled,
+}: {
+  icon: ElementType
+  label: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      disabled={disabled}
+      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-ink-muted outline-none transition-colors hover:bg-canvas-alt hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:bg-canvas-alt"
+    >
+      <Icon size={13} aria-hidden="true" className="flex-shrink-0 text-ink-ghost" />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
 
 /**
  * Segmented filter with motion sliding background (SV layoutId pattern).

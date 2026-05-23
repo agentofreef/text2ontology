@@ -131,6 +131,44 @@ function stripFunctionCallBlocks(text: unknown): string {
   return safe.replace(/<function_call>[\s\S]*?<\/function_call>/g, '').replace(/<function_call>[\s\S]*/g, '').trim()
 }
 
+// JsonView renders a tool call's arguments/result as a structured, indented
+// tree (keys bold, values colored by type, nested objects/arrays indented)
+// instead of a bare JSON.stringify dump — keeps non-special tool cards readable.
+function JsonView({ data, depth = 0 }: { data: unknown; depth?: number }) {
+  if (data === null || data === undefined) return <span className="text-gray-400">null</span>
+  if (typeof data === 'string') return <span className="text-amber-700 break-all whitespace-pre-wrap">{data}</span>
+  if (typeof data === 'number') return <span className="text-blue-600">{String(data)}</span>
+  if (typeof data === 'boolean') return <span className="text-purple-600">{String(data)}</span>
+  if (Array.isArray(data)) {
+    if (data.length === 0) return <span className="text-gray-400">[]</span>
+    return (
+      <div className="border-l border-gray-200 pl-2">
+        {data.map((v, i) => (
+          <div key={i} className="flex gap-1.5 items-start">
+            <span className="text-gray-400 select-none shrink-0">{i}</span>
+            <div className="min-w-0 flex-1"><JsonView data={v} depth={depth + 1} /></div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  if (typeof data === 'object') {
+    const entries = Object.entries(data as Record<string, unknown>)
+    if (entries.length === 0) return <span className="text-gray-400">{'{}'}</span>
+    return (
+      <div className={depth > 0 ? 'border-l border-gray-200 pl-2' : ''}>
+        {entries.map(([k, v]) => (
+          <div key={k} className="flex gap-1.5 items-start">
+            <span className="text-gray-600 font-semibold shrink-0">{k}</span>
+            <div className="min-w-0 flex-1"><JsonView data={v} depth={depth + 1} /></div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  return <span className="text-gray-500">{String(data)}</span>
+}
+
 function StreamMarkdown({ content, className = '' }: { content: unknown; className?: string }) {
   const clean = stripFunctionCallBlocks(content)
   return (
@@ -422,7 +460,7 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {fc.result?.matched_intent && (
                         <>
-                          <span className="text-[10px] text-gray-400">Intent:</span>
+                          <span className="text-[10px] text-gray-400">{t('tool_card.label_intent')}</span>
                           <span className="border border-gray-300 bg-gray-100 px-1.5 py-0.5 rounded text-[10px] text-gray-700 font-semibold">{String(fc.result.matched_intent)}</span>
                         </>
                       )}
@@ -480,9 +518,9 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
               )}
 
               {!['lookup', 'smartquery', 'read', 'request_query', 'propose_learned_fact', 'clarify_and_branch', 'return_to_parent'].includes(fc.name) && Object.keys(fc.arguments).length > 0 && (
-                <pre className="bg-gray-50 border border-gray-200 rounded px-2 py-1.5 font-mono text-[11px] text-gray-500 whitespace-pre-wrap max-h-32 overflow-y-auto">
-                  {JSON.stringify(fc.arguments, null, 2)}
-                </pre>
+                <div className="bg-gray-50 border border-gray-200 rounded px-2 py-1.5 font-mono text-[11px] text-gray-600 leading-relaxed max-h-48 overflow-auto">
+                  <JsonView data={fc.arguments} />
+                </div>
               )}
 
               {fc.result?.content && fc.name !== 'propose_learned_fact' && (
@@ -1459,7 +1497,7 @@ function LakehouseAgentChat() {
                       <div className="text-[9px] text-gray-400">Od</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.odCount}</div>
                     </div>
                     <div className="border border-gray-200 rounded px-2 py-1 bg-white">
-                      <div className="text-[9px] text-gray-400">Intent</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.intentCount}</div>
+                      <div className="text-[9px] text-gray-400">Metric</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.intentCount}</div>
                     </div>
                     <div className="border border-gray-200 rounded px-2 py-1 bg-white">
                       <div className="text-[9px] text-gray-400">Token</div><div className="text-sm font-semibold text-gray-800">{ledger.summary.strongTokenCount}/{ledger.summary.tokenCount}</div>
@@ -1516,7 +1554,7 @@ function LakehouseAgentChat() {
                 {/* Intents */}
                 {ledger.intents.length > 0 && (
                   <div className="px-4 py-3">
-                    <div className="text-[10px] uppercase tracking-wider text-gray-400 mb-2">Intents · {ledger.intents.length}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-gray-400 mb-2">Metrics · {ledger.intents.length}</div>
                     <div className="space-y-1.5">
                       {ledger.intents.map(mi => (
                         <div key={mi.intentId} className={`rounded border px-2.5 py-1.5 ${mi.versionStale ? 'border-amber-200 bg-amber-50/40' : 'border-gray-200 bg-white'}`}>
