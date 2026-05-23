@@ -4,10 +4,10 @@ import { Link } from '@/i18n/navigation'
 import Image from 'next/image'
 import { usePathname, useRouter } from '@/i18n/navigation'
 import {
-  Tag, Search, MessageSquare, History,
-  ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Cpu, Plus, Database,
+  ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Plus, Database,
   Box, BarChart3, Tags, Trash2, Filter,
   Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
+  Upload, LayoutDashboard, Search,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useProject } from '@/lib/project'
@@ -21,6 +21,7 @@ import { useStyleMode } from '@/lib/style-mode'
 interface SidebarProps {
   collapsed: boolean
   onToggle: () => void
+  onOpenCommand?: () => void
 }
 
 // ─── Nav model ────────────────────────────────────────────────
@@ -49,74 +50,71 @@ type NavGroup = {
   icon?: ElementType
 }
 
+// Nav restructured around the WORKFLOW (ingest → model → diagnose-loop), not a
+// flat catalog of pages. Each group is a "mode": its header IS the entry to the
+// mode's primary page, and `items` are the secondary pages within that mode.
+// Three former Agent sub-pages — 对话历史 / 标注 / Token 召回 — are intentionally
+// NOT listed: they fold into the Agent workbench as panels and stay reachable
+// via Cmd+K (CommandPalette) and their direct URLs.
 function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGroup[] {
   return [
     {
-      label: t('data_assets'),
+      // 接入 — phase-1 ingest. One-time per project; header → data sources.
+      label: t('mode_ingest'),
+      href: '/settings/data-sources',
+      icon: Upload,
+      items: [],
+    },
+    {
+      // 本体 — the curated model + all curation levers. Header → object list
+      // (the property-graph split view at /ontology/lakehouse-objects; the old
+      // er-diagram and lakehouse-graph routes still exist but redirect/are
+      // hidden, since this is the path users are meant to take).
+      label: t('ontology'),
+      href: '/ontology/lakehouse-objects',
+      icon: Box,
       items: [
-        { href: '/ontology/lakehouse',         label: t('lakehouse'),       icon: Database },
-        // ER Diagram: page lives at /ontology/er-diagram and still renders the
-        // raw FK-relationship view, but it's hidden from the sidebar because
-        // ontology design (OD / property / link) is the curated path users
-        // are meant to take — the raw ER view duplicates what they'd see in
-        // any DB GUI and adds little value here.
-        // { href: '/ontology/er-diagram',        label: t('er_diagram'),      icon: Network  },
-        // Ontology: the object list + property graph were merged into one
-        // split-view page at /ontology/lakehouse-objects. /ontology/lakehouse-graph
-        // now redirects there, so the single nav entry covers both.
-        { href: '/ontology/lakehouse-objects', label: t('ontology'),        icon: Box      },
+        { href: '/ontology/lakehouse',                label: t('lakehouse'),          icon: Database  },
+        { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
+        { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
+        { href: '/ontology/lakehouse-metric-intents', label: t('metric_intents'),     icon: BarChart3 },
       ],
     },
     {
-      label: t('knowledge_engineering'),
+      // 工作台 — the diagnose-first agent loop (ask → diagnose → fix).
+      label: t('mode_workbench'),
+      href: '/ontology/lakehouse-agent',
+      icon: LayoutDashboard,
       items: [
-        { href: '/ontology/lakehouse-keywords',         label: t('lakehouse_keywords'), icon: Tags      },
-        { href: '/ontology/lakehouse-keyword-triage',   label: t('keyword_triage'),     icon: Filter    },
-        { href: '/ontology/lakehouse-metric-intents',   label: t('metric_intents'),     icon: BarChart3 },
-      ],
-    },
-    {
-      // Group header is just 'Agent'; the chat page sits as a normal sub-item
-      // alongside its siblings so the menu reads as "Agent → 湖仓 Agent / 对话历史 / ...".
-      label: 'Agent',
-      items: [
-        { href: '/ontology/lakehouse-agent',                   label: t('lakehouse_agent'),   icon: MessageSquare, exact: true },
-        { href: '/ontology/lakehouse-agent/history',           label: t('chat_history'),      icon: History       },
-        { href: '/ontology/lakehouse-agent/annotations',       label: t('annotations'),       icon: Tag           },
-        { href: '/ontology/lakehouse-agent/token-recall',      label: t('token_recall'),      icon: Search        },
-        { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb     },
-        { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical  },
-        { href: '/ontology/lakehouse-agent/flywheel',          label: t('data_flywheel'),     icon: RotateCw      },
+        { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical },
+        { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb    },
+        { href: '/ontology/lakehouse-agent/flywheel',          label: t('data_flywheel'),     icon: RotateCw     },
       ],
     },
     {
       label: 'SQL',
+      href: '/ontology/sql-passthrough',
+      icon: Terminal,
       items: [
-        { href: '/ontology/sql-passthrough', label: 'Ontology SQL', icon: Terminal },
-        { href: '/ontology/lakehouse-sql',   label: t('lakehouse_sql'), icon: Database },
+        { href: '/ontology/lakehouse-sql', label: t('lakehouse_sql'), icon: Database },
       ],
     },
   ]
 }
 
+// 系统 — config mode. 数据源 moved to the 接入 mode; header → LLM config (the
+// most-touched settings page), the rest are secondary.
 function useSystemGroup(t: ReturnType<typeof useTranslations<'nav'>>, isAdmin: boolean): NavGroup {
   const items: NavLeaf[] = [
-    { href: '/settings/data-sources',   label: t('data_sources'),      icon: Database  },
-    // Prompt Engineering: page lives at /settings/prompt-config but is
-    // hidden from the sidebar — current prompts are driven from llm-config
-    // role bindings and DB-stored templates, so this page has no active
-    // UX role yet. Keep the file in case it comes back for advanced users.
-    // { href: '/settings/prompt-config',  label: t('prompt_engineering'), icon: Settings },
-    { href: '/settings/llm-config',     label: t('llm_config'),         icon: Cpu      },
-    { href: '/settings/mcp-keys',       label: t('mcp_keys'),           icon: KeyRound },
-    { href: '/settings/preferences',    label: t('preferences'),        icon: UserCog  },
+    { href: '/settings/mcp-keys',       label: t('mcp_keys'),       icon: KeyRound },
+    { href: '/settings/preferences',    label: t('preferences'),    icon: UserCog  },
   ]
   // User management is admin-only; the backend also gates every /api/admin/*
   // call, so hiding the nav is convenience, not the security boundary.
   if (isAdmin) {
     items.push({ href: '/settings/users', label: t('user_management'), icon: Users })
   }
-  return { label: t('system'), items }
+  return { label: t('system'), href: '/settings/llm-config', icon: Settings, items }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -179,17 +177,25 @@ function NavGroupSection({
   const t = useTranslations('nav')
 
   if (collapsed) {
-    // Collapsed sidebar: skip group chrome; flatten so every reachable route
-    // is one icon-click away.
-    const flat: NavLeaf[] = [
-      ...(group.href && group.icon
-        ? [{ href: group.href, label: group.label, icon: group.icon } as NavLeaf]
-        : []),
-      ...group.items,
-    ]
+    // Collapsed rail = ONE icon per mode (the group header). Sub-items are
+    // reached via Cmd+K or by expanding the rail — this keeps the rail to a
+    // handful of icons instead of mirroring the whole route list.
+    if (group.href && group.icon) {
+      return (
+        <div className="mb-1.5">
+          <NavLeafLink
+            leaf={{ href: group.href, label: group.label, icon: group.icon }}
+            collapsed
+            isActive={isPathActive(pathname, group.href)}
+            indent={false}
+          />
+        </div>
+      )
+    }
+    // Fallback for any header-less group: show its items directly.
     return (
       <div className="mb-1.5">
-        {flat.map((leaf) => (
+        {group.items.map((leaf) => (
           <NavLeafLink
             key={leaf.href}
             leaf={leaf}
@@ -232,16 +238,18 @@ function NavGroupSection({
             {labelText}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-ink-ghost hover:text-ink transition-colors"
-          aria-label={open ? t('collapse') : t('expand')}
-        >
-          <ChevronDown className={`h-3 w-3 transition-transform duration-150 ${open ? '' : '-rotate-90'}`} />
-        </button>
+        {group.items.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-ink-ghost hover:text-ink transition-colors"
+            aria-label={open ? t('collapse') : t('expand')}
+          >
+            <ChevronDown className={`h-3 w-3 transition-transform duration-150 ${open ? '' : '-rotate-90'}`} />
+          </button>
+        )}
       </div>
-      {open && (
+      {open && group.items.length > 0 && (
         <div className="mt-0.5">
           {group.items.map((leaf) => (
             <NavLeafLink
@@ -260,13 +268,14 @@ function NavGroupSection({
 
 // ─── Sidebar ──────────────────────────────────────────────────
 
-export function Sidebar({ collapsed, onToggle }: SidebarProps) {
+export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const { user, logout } = useAuth()
   const { projects, currentProject, switchProject, refetchProjects } = useProject()
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false)
   const t = useTranslations('nav')
+  const tc = useTranslations('command')
   const industrial = useStyleMode().mode === 'industrial'
 
   const handleLogout = () => {
@@ -312,6 +321,21 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
         </button>
       </div>
+
+      {/* Collapsed-rail project affordance — the full switcher only renders when
+          expanded, so surface a compact button that expands the rail (and opens
+          the dropdown) to keep project switching reachable from the icon strip. */}
+      {collapsed && (
+        <div className={`flex justify-center py-2 ${industrial ? 'border-b-2 border-ink' : 'border-b border-border'}`}>
+          <button
+            onClick={() => { setProjectDropdownOpen(true); onToggle() }}
+            title={currentProject?.name || 'Select Project'}
+            className="flex h-9 w-9 items-center justify-center text-ink-ghost transition-colors hover:bg-canvas-alt hover:text-ink"
+          >
+            <FolderOpen className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {/* Project Switcher */}
       {!collapsed && (
@@ -405,6 +429,30 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto py-2">
+        {/* Cmd+K affordance — the primary navigator while the rail is the thin
+            icon strip. Clickable for mouse users; shows the ⌘K hint when open. */}
+        {onOpenCommand && (
+          <div className={collapsed ? 'mb-2' : 'mb-2 px-3'}>
+            <button
+              type="button"
+              onClick={onOpenCommand}
+              title={collapsed ? `${tc('hint')} ⌘K` : undefined}
+              className={`flex items-center gap-2 text-sm transition-colors duration-150 ${
+                collapsed
+                  ? 'mx-auto h-9 w-9 justify-center text-ink-ghost hover:bg-canvas-alt hover:text-ink'
+                  : `w-full ${industrial ? 'border border-ink' : 'rounded border border-border'} px-2.5 py-1.5 text-ink-muted hover:bg-canvas-alt hover:text-ink`
+              }`}
+            >
+              <Search className="h-4 w-4 flex-shrink-0 text-ink-ghost" />
+              {!collapsed && (
+                <>
+                  <span className="flex-1 text-left">{tc('hint')}</span>
+                  <kbd className={`text-[10px] text-ink-ghost ${industrial ? 'font-mono' : ''}`}>⌘K</kbd>
+                </>
+              )}
+            </button>
+          </div>
+        )}
         {groups.map((group) => (
           <NavGroupSection
             key={group.label}

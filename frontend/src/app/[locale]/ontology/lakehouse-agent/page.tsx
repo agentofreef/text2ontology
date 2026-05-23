@@ -29,6 +29,7 @@ import remarkGfm from 'remark-gfm'
 import { Link } from '@/i18n/navigation'
 import type { OntKnowledge, OntCausality, OntObjectType, OntLinkType, OntLearnedFact, OntFactLink, LLMConfig, LLMRoleBinding } from '@/types/api'
 import { OntologyGraph, type GraphHighlight, type GraphLayoutMode } from '@/components/ui/OntologyGraph'
+import { DiagnosePanel } from '@/components/lakehouse-agent/DiagnosePanel'
 import {
   MotionGroup,
   MotionGroupItem,
@@ -594,6 +595,7 @@ function StreamingDot() {
 
 function LakehouseAgentChat() {
   const t = useTranslations('agent.main')
+  const tw = useTranslations('workbench')
   const industrial = useStyleMode().mode === 'industrial'
   const searchParams = useSearchParams()
   const { currentProject } = useProject()
@@ -670,6 +672,9 @@ function LakehouseAgentChat() {
 
   const [graphFullscreen, setGraphFullscreen] = useState(false)
   const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-od')
+  // Right pane is now diagnose-first: the default tab answers "why was this
+  // understood this way", with the graph and mission ledger one click away.
+  const [panelTab, setPanelTab] = useState<'diagnose' | 'graph' | 'mission'>('diagnose')
 
   // Agent LLM binding — 让用户在顶部直接切换 Agent 用的模型，
   // 写入 /llm-role-binding（roleName=agent）。下一轮发送即生效。
@@ -1001,6 +1006,14 @@ function LakehouseAgentChat() {
   // Last streaming message (for fade-in during active SSE)
   const lastMessage = loading && messages.length > 0 ? messages[messages.length - 1] : null
 
+  // The most recent user question — drives the diagnose panel on the right.
+  const lastUserQuestion = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return parseUserMessage(messages[i].content).display
+    }
+    return ''
+  }, [messages])
+
   return (
     <div className="flex flex-col overflow-hidden h-full">
       {/* Header */}
@@ -1129,11 +1142,47 @@ function LakehouseAgentChat() {
         </div>
       </div>
 
-      {/* Body: Graph + Chat */}
-      <div className="flex flex-1 min-h-0">
-        {/* Lakehouse / builder left pane — Graph + Od list. */}
+      {/* Body: Chat (primary, left) + diagnostics panel (right). flex-row-reverse
+          keeps the chat — where you act — on the left while the panel's DOM stays
+          after it; the panel opens on the 诊断 tab (graph / mission one click away). */}
+      <div className="flex flex-row-reverse flex-1 min-h-0">
+        {/* Right pane — tabbed: 诊断 (default) / 图谱 / 任务. */}
         {(
-        <div className={`${graphFullscreen ? 'w-full' : 'w-[55%]'} border-r border-gray-200 flex flex-col overflow-hidden`}>
+        <div className={`${graphFullscreen ? 'w-full' : 'w-[46%]'} border-l border-gray-200 flex flex-col overflow-hidden`}>
+          {/* Panel tab bar */}
+          <div className={`flex items-center gap-0 px-2 flex-shrink-0 bg-white ${industrial ? 'border-b border-ink' : 'border-b border-gray-200'}`}>
+            {([
+              ['diagnose', tw('tab_diagnose')],
+              ['graph', tw('tab_graph')],
+              ['mission', tw('tab_mission')],
+            ] as const).map(([key, label]) => {
+              const active = panelTab === key
+              return (
+                <button
+                  key={key}
+                  onClick={() => setPanelTab(key)}
+                  className={`-mb-px h-9 px-3 border-b-2 transition-colors ${
+                    industrial ? 'font-mono text-[11px] uppercase tracking-[0.12em]' : 'text-xs'
+                  } ${active ? 'border-ink font-semibold text-ink' : 'border-transparent text-gray-500 hover:text-ink'}`}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* 诊断 tab — diagnose-first default. */}
+          {panelTab === 'diagnose' && (
+            <DiagnosePanel
+              projectId={currentProject?.id}
+              question={lastUserQuestion}
+              graphHighlight={graphHighlight}
+            />
+          )}
+
+          {/* 图谱 tab */}
+          {panelTab === 'graph' && (
+          <>
           {/* Graph toolbar */}
           <div className="flex items-center gap-3 px-3 py-1.5 border-b border-gray-200 bg-gray-50 flex-shrink-0">
             <div className="flex gap-3">
@@ -1186,20 +1235,22 @@ function LakehouseAgentChat() {
             highlight={graphHighlight}
             layoutMode={graphLayoutMode}
           />
+          </>
+          )}
 
-          {/* 任务可达器 (MissionAct) — bottom half of the left pane. Shows the
-              current mission's full detail inline; history opens a modal. */}
-          {!graphFullscreen && (
-            <div className="flex-1 flex flex-col min-h-0">
+          {/* 任务 tab — the mission ledger (任务可达器). */}
+          {panelTab === 'mission' && (
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
             </div>
           )}
         </div>
         )}
 
-        {/* Right: AI Chat — visible unless graph is fullscreen. */}
+        {/* Chat — the primary column (left). Hidden only when the panel is
+            fullscreened. */}
         {!graphFullscreen && (
-          <div className="w-[45%] flex flex-col overflow-hidden bg-white">
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white">
             {/* Plan strip */}
             {todoItems.length > 0 && (
               <div className="border-b border-gray-200 px-3 py-2 flex-shrink-0 bg-gray-50">

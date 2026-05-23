@@ -2,6 +2,7 @@
 
 import { Sidebar } from '@/components/layout/Sidebar'
 import { TasksDrawer } from '@/components/jobs/TasksDrawer'
+import { CommandPalette } from '@/components/CommandPalette'
 import { AuthProvider, useAuth } from '@/lib/auth'
 import { ProjectProvider } from '@/lib/project'
 import { MessageProvider } from '@/lib/message'
@@ -13,7 +14,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth()
   const pathname = usePathname()
   const router = useRouter()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Sidebar defaults to the thin icon rail — this is a workbench, not a
+  // browse-heavy app — and the choice is remembered across reloads. Cmd+K is
+  // the primary navigator while the rail is collapsed.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
+  const [cmdkOpen, setCmdkOpen] = useState(false)
 
   const isLoginPage = pathname === '/login'
   const isSetupWizard = pathname === '/setup-wizard'
@@ -23,6 +28,36 @@ function AppShell({ children }: { children: React.ReactNode }) {
       router.push('/login')
     }
   }, [user, isLoading, isLoginPage, router])
+
+  // Hydrate the remembered collapse choice once on mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('lakehouse2ontology_sidebar_collapsed')
+      if (raw === '0') setSidebarCollapsed(false)
+      else if (raw === '1') setSidebarCollapsed(true)
+    } catch { /* localStorage unavailable */ }
+  }, [])
+
+  // Global ⌘K / Ctrl+K toggles the command palette (authenticated shell only).
+  useEffect(() => {
+    if (!user) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setCmdkOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [user])
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((v) => {
+      const next = !v
+      try { localStorage.setItem('lakehouse2ontology_sidebar_collapsed', next ? '1' : '0') } catch { /* ignore */ }
+      return next
+    })
+  }
 
   if (isLoading) {
     return (
@@ -74,7 +109,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onToggle={toggleSidebar}
+        onOpenCommand={() => setCmdkOpen(true)}
       />
       <div className="flex flex-1 flex-col overflow-hidden">
         <main className={`flex-1 ${isAgentPage ? 'overflow-hidden' : 'overflow-y-auto p-6'}`}>
@@ -82,6 +118,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
       <TasksDrawer />
+      <CommandPalette
+        open={cmdkOpen}
+        onClose={() => setCmdkOpen(false)}
+        isAdmin={user?.role === 'admin'}
+      />
     </div>
   )
 }
