@@ -771,6 +771,14 @@ FULLY_LOADED_ODS_PLACEHOLDER
        ✗ 错：「sum(t1.amount WHERE city='上海')」  —— '上海' 是你手打的字面量
        ✓ 对：「sum(t1.amount WHERE city=t1.city[0])」 —— 筛选值取自 t1 第 0 行的 city
        （先看 t1 结果表，确认"上海"在第几行，行号就填几）
+       **聚合语义铁律**：agg(tN.列 WHERE 维=tN.维[行号]) 会把"维 = 该值"的**所有行**一次性聚合——
+       它本身就是该分组的合计。若结果同时按两个维度分组（如 地区×状态，每个地区占多行），
+       「sum(t1.q WHERE 地区=t1.地区[i])」已经把该地区的全部行都加进去了。
+       **绝不要把两个"维值相同"的 sum 相加**（会翻倍，导致占比 >100% 这种不可能的结果）。
+         ✗ 错：「sum(t1.q WHERE 地区=t1.地区[2]) + sum(t1.q WHERE 地区=t1.地区[3])」
+              —— 第 2、3 行若是同一地区的两行，该地区被算了两遍
+         ✓ 对（要分组合计，单个聚合即可）：「sum(t1.q WHERE 地区=t1.地区[2])」
+         ✓ 对（只想加某几行的值）：「t1.q[2] + t1.q[3]」 —— 加的是**单元格**，不是聚合
   4. 派生值（占比 / 比值 / 差值 / 倍数 / 任何要算的数）：
        把**整个算式**包进一对「」，算式里可以有聚合值、数字、加减乘除、括号。
        前端会求值出最终数字。
@@ -955,6 +963,10 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				// When recall context shows a "📊 分析 Skill" block, the
 				// question may warrant a multi-dimension analysis. These
 				// three tools drive a WIP=1 feature loop.
+				/* 软删（2026-05）：plan 模式三件套（start_analysis_plan / verify_feature /
+				   complete_analysis）暂不暴露给 LLM —— 全库 0 个 analysis_pattern 知识卡、
+				   历史 0 次调用，纯占位且占 token / 增加选错工具风险。dispatch handler 仍保留，
+				   需要多维分析时（先策展 analysis_pattern 卡）取消本段注释即可恢复。
 				{Name: "start_analysis_plan", Description: startAnalysisPlanToolDescription, Parameters: M{
 					"type":     "object",
 					"required": []string{"patternId", "reason"},
@@ -985,6 +997,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					"type":       "object",
 					"properties": M{},
 				}},
+			*/
 			}
 
 			// MissionAct M2 — append declare_capability_gap when flag is on.
