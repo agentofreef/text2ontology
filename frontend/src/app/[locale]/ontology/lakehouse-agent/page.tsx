@@ -422,7 +422,7 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {fc.result?.matched_intent && (
                         <>
-                          <span className="text-[10px] text-gray-400">Intent:</span>
+                          <span className="text-[10px] text-gray-400">{t('tool_card.label_intent')}</span>
                           <span className="border border-gray-300 bg-gray-100 px-1.5 py-0.5 rounded text-[10px] text-gray-700 font-semibold">{String(fc.result.matched_intent)}</span>
                         </>
                       )}
@@ -1459,7 +1459,7 @@ function LakehouseAgentChat() {
                       <div className="text-[9px] text-gray-400">Od</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.odCount}</div>
                     </div>
                     <div className="border border-gray-200 rounded px-2 py-1 bg-white">
-                      <div className="text-[9px] text-gray-400">Intent</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.intentCount}</div>
+                      <div className="text-[9px] text-gray-400">Metric</div><div className="text-sm font-semibold text-blue-600">{ledger.summary.intentCount}</div>
                     </div>
                     <div className="border border-gray-200 rounded px-2 py-1 bg-white">
                       <div className="text-[9px] text-gray-400">Token</div><div className="text-sm font-semibold text-gray-800">{ledger.summary.strongTokenCount}/{ledger.summary.tokenCount}</div>
@@ -1516,7 +1516,7 @@ function LakehouseAgentChat() {
                 {/* Intents */}
                 {ledger.intents.length > 0 && (
                   <div className="px-4 py-3">
-                    <div className="text-[10px] uppercase tracking-wider text-gray-400 mb-2">Intents · {ledger.intents.length}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-gray-400 mb-2">Metrics · {ledger.intents.length}</div>
                     <div className="space-y-1.5">
                       {ledger.intents.map(mi => (
                         <div key={mi.intentId} className={`rounded border px-2.5 py-1.5 ${mi.versionStale ? 'border-amber-200 bg-amber-50/40' : 'border-gray-200 bg-white'}`}>

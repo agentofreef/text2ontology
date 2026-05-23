@@ -1242,7 +1242,7 @@ export function ObjectListView({ compact, selectedId, onSelect, onMutated }: Obj
                 <ImpactRow label={`${t('col_properties')} (ont_property)`} value={bulkDeleteImpact.properties} />
                 <ImpactRow label="Link (ont_link_type)" value={bulkDeleteImpact.links} />
                 <ImpactRow label="Keyword (lakehouse_keyword)" value={bulkDeleteImpact.keywords} />
-                <ImpactRow label="Intent (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} />
+                <ImpactRow label="Metric (lakehouse_metric_intent)" value={bulkDeleteImpact.intents} />
               </div>
               {(bulkDeleteImpact.orphans.knowledge > 0 || bulkDeleteImpact.orphans.aliases > 0) && (
                 <div className="rounded-md border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed text-ink-muted">

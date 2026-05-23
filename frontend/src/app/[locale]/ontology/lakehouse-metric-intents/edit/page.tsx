@@ -1,6 +1,6 @@
 'use client'
 
-// 编辑查询意图（Metric Intent）— mirrors the /new page layout. Loads the
+// 编辑指标（Metric）— mirrors the /new page layout. Loads the
 // intent by id from the existing /metric-intents collection (no GET-by-id
 // endpoint exists, so we filter the list — same pattern as the modal flow).
 //
