@@ -58,7 +58,7 @@ export function LocaleBootstrapModal() {
       <div className="w-full max-w-md rounded-xl border border-border bg-white p-8 shadow-sm">
         <div className="mb-6 flex items-center justify-center gap-3">
           <Image src="/lakehouse/logo.svg" alt="text2ontology" width={36} height={36} />
-          <span className="font-sans text-lg font-semibold text-ink">text2ontology</span>
+          <span className="font-sans text-lg font-semibold text-ink">TEXT2ONTOLOGY</span>
         </div>
         <h2 className="font-sans text-xl font-semibold text-ink text-center">
           选择语言 · Choose Language

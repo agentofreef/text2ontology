@@ -2,7 +2,7 @@
   <img src="./docs/cover.svg" alt="text2ontology — 本体先于查询" width="100%" />
 </p>
 
-# text2ontology
+# TEXT2ONTOLOGY
 
 > **本体先于查询。** 在分析之前,先建立意义。
 
