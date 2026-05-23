@@ -1,6 +1,6 @@
 {
   "common": {
-    "app_name": "text2ontology",
+    "app_name": "TEXT2ONTOLOGY",
     "loading": "加载中"
   },
   "login": {
@@ -2016,7 +2016,7 @@
   },
   "setup_wizard": {
     "init_project": "初始化新项目",
-    "welcome_title": "欢迎使用 text2ontology",
+    "welcome_title": "欢迎使用 TEXT2ONTOLOGY",
     "welcome_hint": "输入项目名称，选择数据源类型，我们会带你进入对应的连接配置页面。",
     "project_name": "项目名称",
     "project_name_placeholder": "例如：销售数据分析",

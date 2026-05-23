@@ -1,6 +1,6 @@
 {
   "common": {
-    "app_name": "text2ontology",
+    "app_name": "TEXT2ONTOLOGY",
     "loading": "Loading"
   },
   "login": {
@@ -2016,7 +2016,7 @@
   },
   "setup_wizard": {
     "init_project": "Initialize new project",
-    "welcome_title": "Welcome to text2ontology",
+    "welcome_title": "Welcome to TEXT2ONTOLOGY",
     "welcome_hint": "Enter a project name and choose a data source type. We'll take you to the matching connection setup page.",
     "project_name": "Project name",
     "project_name_placeholder": "e.g. Sales data analysis",

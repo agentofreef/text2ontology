@@ -296,14 +296,14 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <div className={`flex h-14 items-center justify-between px-4 ${industrial ? 'border-b-2 border-ink' : 'border-b border-border'}`}>
         {!collapsed && (
           <div className="flex items-center gap-2.5">
-            <Image src="/logo.svg" alt="text2ontology" width={24} height={24} />
+            <Image src="/logo.svg" alt="TEXT2ONTOLOGY" width={24} height={24} />
             <span className={industrial ? 'font-mono text-[12px] font-bold tracking-[0.06em] text-ink' : 'font-sans text-sm font-semibold text-ink'}>
               TEXT2ONTOLOGY
             </span>
           </div>
         )}
         {collapsed && (
-          <Image src="/logo.svg" alt="text2ontology" width={22} height={22} className="mx-auto" />
+          <Image src="/logo.svg" alt="TEXT2ONTOLOGY" width={22} height={22} className="mx-auto" />
         )}
         <button
           onClick={onToggle}
