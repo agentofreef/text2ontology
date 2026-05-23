@@ -108,7 +108,7 @@ export default function SetupWizardPage() {
     <div className="flex min-h-screen flex-col bg-canvas">
       {/* Top bar */}
       <div className="flex h-12 items-center gap-2 border-b border-border bg-white px-6">
-        <span className="font-mono text-[12px] font-bold tracking-[0.06em] text-ink">text2ontology</span>
+        <span className="font-mono text-[12px] font-bold tracking-[0.06em] text-ink">TEXT2ONTOLOGY</span>
         <span className="text-xs text-ink-ghost">/ {t('init_project')}</span>
       </div>
 

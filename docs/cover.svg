@@ -36,7 +36,7 @@
     <text x="0" y="120" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="12" fill="#737373" letter-spacing="0.22em">A REFERENCE IMPLEMENTATION</text>
 
     <!-- Title -->
-    <text x="0" y="200" font-size="84" font-weight="700" fill="#171717" letter-spacing="-0.025em">text2ontology</text>
+    <text x="0" y="200" font-size="84" font-weight="700" fill="#171717" letter-spacing="-0.025em">TEXT2ONTOLOGY</text>
 
     <!-- Divider rule -->
     <line x1="0" y1="226" x2="64" y2="226" stroke="#171717" stroke-width="2"/>

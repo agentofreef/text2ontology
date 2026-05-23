@@ -2,7 +2,7 @@
   <img src="./docs/cover.svg" alt="text2ontology — Ontology before query" width="100%" />
 </p>
 
-# text2ontology
+# TEXT2ONTOLOGY
 
 > **Ontology before query.** Build the meaning before you analyze.
 

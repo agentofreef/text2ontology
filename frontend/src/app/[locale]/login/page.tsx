@@ -99,7 +99,7 @@ export default function LoginPageMinimal() {
             <div className="mb-3 font-mono text-[11px] tracking-[0.22em] text-ink-ghost">
               A REFERENCE IMPLEMENTATION
             </div>
-            <h1 className="text-5xl font-bold tracking-tight text-ink">text2ontology</h1>
+            <h1 className="text-5xl font-bold tracking-tight text-ink">TEXT2ONTOLOGY</h1>
             <div className="mt-5 h-[2px] w-12 bg-ink" />
             <p className="mt-5 text-lg font-medium text-ink">Ontology before query.</p>
             <p className="mt-1 text-sm text-ink-muted">Build the meaning before the SQL.</p>
@@ -142,7 +142,7 @@ export default function LoginPageMinimal() {
             <line x1="16" y1="9" x2="12" y2="16" stroke="#171717" strokeWidth="0.9" />
             <rect x="13" y="13" width="16" height="16" fill="#171717" />
           </svg>
-          <span className="text-sm font-semibold text-ink">text2ontology</span>
+          <span className="text-sm font-semibold text-ink">TEXT2ONTOLOGY</span>
         </div>
 
         <MotionFade className="w-full max-w-sm">

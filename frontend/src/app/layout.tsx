@@ -6,7 +6,7 @@
 import './globals.css'
 
 export const metadata = {
-  title: 'text2ontology',
+  title: 'TEXT2ONTOLOGY',
 }
 
 export default function RootLayout({

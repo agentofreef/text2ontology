@@ -298,7 +298,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           <div className="flex items-center gap-2.5">
             <Image src="/logo.svg" alt="text2ontology" width={24} height={24} />
             <span className={industrial ? 'font-mono text-[12px] font-bold tracking-[0.06em] text-ink' : 'font-sans text-sm font-semibold text-ink'}>
-              text2ontology
+              TEXT2ONTOLOGY
             </span>
           </div>
         )}
