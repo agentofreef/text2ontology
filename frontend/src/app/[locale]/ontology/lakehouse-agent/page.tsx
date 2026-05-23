@@ -1027,18 +1027,21 @@ function LakehouseAgentChat() {
   const toggleTool = (key: string) => setExpandedTools(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const toggleThinking = (idx: number) => setExpandedThinking(prev => { const n = new Set(prev); n.has(idx) ? n.delete(idx) : n.add(idx); return n })
 
-  if (loadingThread) return <div className="flex h-64 items-center justify-center"><CyberLoader /></div>
-
-  // Last streaming message (for fade-in during active SSE)
-  const lastMessage = loading && messages.length > 0 ? messages[messages.length - 1] : null
-
   // Current question's 分词 — taken straight from the agent's 'recall' SSE event
   // (no extra HTTP). strongHit = the token matched at least one keyword.
+  // MUST stay ABOVE the early return below: putting a hook after the
+  // `if (loadingThread)` return changes the hook count between renders and
+  // crashes with React #300 when a thread loads.
   const currentTurnTokens = useMemo(() => {
     if (!streamRecall) return []
     const td = streamRecall.recall?.tokenDetails || {}
     return streamRecall.tokens.map(t => ({ token: t, strongHit: (td[t]?.length ?? 0) > 0 }))
   }, [streamRecall])
+
+  if (loadingThread) return <div className="flex h-64 items-center justify-center"><CyberLoader /></div>
+
+  // Last streaming message (for fade-in during active SSE)
+  const lastMessage = loading && messages.length > 0 ? messages[messages.length - 1] : null
 
   return (
     <div className="flex flex-col overflow-hidden h-full">
@@ -1172,6 +1175,55 @@ function LakehouseAgentChat() {
           keeps the chat — where you act — on the left while the panel's DOM stays
           after it; the panel opens on the 诊断 tab (graph / mission one click away). */}
       <div className="flex flex-row-reverse flex-1 min-h-0">
+        {/* History panel — PUSHES the workbench left (not an overlay): in
+            flex-row-reverse, being the first DOM child renders it on the far
+            right, and the flex-1 chat shrinks to make room. Pick a past thread
+            in place; the panel stays open so you can browse. */}
+        {historyOpen && (
+          <div className="flex w-[320px] flex-shrink-0 flex-col overflow-hidden border-l border-gray-200 bg-white">
+            <div className="flex h-14 flex-shrink-0 items-center justify-between border-b border-gray-200 bg-gray-50 px-3">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-gray-600" />
+                <span className="text-sm font-semibold text-gray-800">{t('header.history')}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Link
+                  href={`/ontology/lakehouse-agent/history?mode=${mode}`}
+                  onClick={() => setHistoryOpen(false)}
+                  className="inline-flex items-center gap-1 rounded border border-transparent px-2 py-1 text-[10px] text-gray-500 hover:border-gray-200 hover:bg-white hover:text-blue-600"
+                  title={tw('history_open_full')}
+                >
+                  <ExternalLink className="h-3 w-3" />{tw('history_open_full')}
+                </Link>
+                <button onClick={() => setHistoryOpen(false)} className="p-1 text-gray-400 hover:text-gray-700" title={t('ledger.close')}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {historyLoading && <div className="p-4 text-sm text-gray-500">…</div>}
+              {!historyLoading && historyThreads.filter(th => (th.agentType || 'lakehouse') === mode).length === 0 && (
+                <div className="p-4 text-sm text-gray-500">{tw('history_empty')}</div>
+              )}
+              {!historyLoading && (
+                <div className="divide-y divide-gray-100">
+                  {historyThreads
+                    .filter(th => (th.agentType || 'lakehouse') === mode)
+                    .map(th => (
+                      <button
+                        key={th.id}
+                        onClick={() => { void loadThread(th.id) }}
+                        className={`flex w-full flex-col items-start gap-0.5 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 ${th.id === threadId ? 'bg-gray-50' : ''}`}
+                      >
+                        <span className="w-full truncate text-sm text-gray-800">{th.title || tw('history_no_title')}</span>
+                        <span className="text-[11px] tabular-nums text-gray-400">{new Date(th.updatedAt).toLocaleString('zh-CN')}</span>
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {/* Right pane — tabbed: 诊断 (default) / 图谱 / 任务. */}
         {(
         <div className={`${graphFullscreen ? 'w-full' : 'w-[46%]'} border-l border-gray-200 flex flex-col overflow-hidden`}>
@@ -1531,54 +1583,6 @@ function LakehouseAgentChat() {
           </div>
         )}
       </div>
-
-      {/* History preview drawer — pick a past thread without leaving the
-          workbench; the full History page is one click away. */}
-      {historyOpen && (
-        <div className="fixed top-0 right-0 z-40 flex h-full w-[360px] flex-col border-l border-gray-200 bg-white shadow-xl">
-          <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2.5">
-            <div className="flex items-center gap-2">
-              <History className="h-4 w-4 text-gray-600" />
-              <span className="text-sm font-semibold text-gray-800">{t('header.history')}</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <Link
-                href={`/ontology/lakehouse-agent/history?mode=${mode}`}
-                onClick={() => setHistoryOpen(false)}
-                className="inline-flex items-center gap-1 rounded border border-transparent px-2 py-1 text-[10px] text-gray-500 hover:border-gray-200 hover:bg-white hover:text-blue-600"
-                title={tw('history_open_full')}
-              >
-                <ExternalLink className="h-3 w-3" />{tw('history_open_full')}
-              </Link>
-              <button onClick={() => setHistoryOpen(false)} className="p-1 text-gray-400 hover:text-gray-700" title={t('ledger.close')}>
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {historyLoading && <div className="p-4 text-sm text-gray-500">…</div>}
-            {!historyLoading && historyThreads.filter(th => (th.agentType || 'lakehouse') === mode).length === 0 && (
-              <div className="p-4 text-sm text-gray-500">{tw('history_empty')}</div>
-            )}
-            {!historyLoading && (
-              <div className="divide-y divide-gray-100">
-                {historyThreads
-                  .filter(th => (th.agentType || 'lakehouse') === mode)
-                  .map(th => (
-                    <button
-                      key={th.id}
-                      onClick={async () => { setHistoryOpen(false); await loadThread(th.id) }}
-                      className={`flex w-full flex-col items-start gap-0.5 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 ${th.id === threadId ? 'bg-gray-50' : ''}`}
-                    >
-                      <span className="w-full truncate text-sm text-gray-800">{th.title || tw('history_no_title')}</span>
-                      <span className="text-[11px] tabular-nums text-gray-400">{new Date(th.updatedAt).toLocaleString('zh-CN')}</span>
-                    </button>
-                  ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Thread Memory Ledger drawer (minimal theme) */}
       {showMemory && (
