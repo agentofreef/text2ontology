@@ -470,10 +470,11 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
         </div>
       )}
 
-      {/* User & Logout */}
-      <div className="border-t border-border p-3">
+      {/* User & Logout — fixed h-14 so the bottom gridline aligns with the
+          workbench's chat input bar (also h-14). */}
+      <div className="flex h-14 items-center border-t border-border px-3">
         {!collapsed ? (
-          <div className="flex items-center justify-between">
+          <div className="flex w-full items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="flex h-7 w-7 items-center justify-center rounded-full bg-canvas-alt text-xs font-semibold text-ink">
                 {user?.displayName?.charAt(0)?.toUpperCase() || 'U'}
@@ -494,7 +495,7 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex w-full flex-col items-center gap-2">
             <button
               onClick={handleLogout}
               className="mx-auto flex h-8 w-8 items-center justify-center text-ink-ghost hover:text-ink transition-colors"

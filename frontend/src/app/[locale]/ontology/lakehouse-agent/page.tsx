@@ -14,7 +14,7 @@ import { llmDisplay } from '@/lib/llmDisplay'
 import { CyberLoader } from '@/components/ui/CyberLoader'
 import {
   Send, Bot, User, ChevronDown, ChevronRight, BookOpen, FileText, Database, Play,
-  Maximize2, Minimize2, Link2, GitBranch, Check, X, Square, Brain
+  Maximize2, Minimize2, Link2, GitBranch, Check, X, Square, Brain, History, ExternalLink
 } from 'lucide-react'
 import { ResultViewer } from '@/components/ui/ResultViewer'
 import { BuilderProposeOdCard } from '@/components/lakehouse-agent/BuilderProposeOdCard'
@@ -672,9 +672,24 @@ function LakehouseAgentChat() {
 
   const [graphFullscreen, setGraphFullscreen] = useState(false)
   const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-od')
-  // Right pane is now diagnose-first: the default tab answers "why was this
-  // understood this way", with the graph and mission ledger one click away.
-  const [panelTab, setPanelTab] = useState<'diagnose' | 'graph' | 'mission'>('diagnose')
+  // Right pane tabs. 任务 (mission/reachability + the question's live 分词) is the
+  // default and leads, since the agent forcibly tokenizes + judges reachability
+  // for every question as it answers; 诊断 / 图谱 follow.
+  const [panelTab, setPanelTab] = useState<'mission' | 'diagnose' | 'graph'>('mission')
+  // History preview drawer — pick a past thread without leaving the workbench.
+  type HistoryThread = { id: string; title: string; agentType?: 'lakehouse' | 'builder'; updatedAt: string }
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyThreads, setHistoryThreads] = useState<HistoryThread[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const openHistory = async () => {
+    setHistoryOpen(true)
+    setHistoryLoading(true)
+    try {
+      const res = await api<{ data: HistoryThread[] }>(`/ontology/lakehouse-agent-threads?projectId=${currentProject?.id}`)
+      setHistoryThreads(res.data || [])
+    } catch { /* ignore — drawer shows empty state */ }
+    finally { setHistoryLoading(false) }
+  }
 
   // Agent LLM binding — 让用户在顶部直接切换 Agent 用的模型，
   // 写入 /llm-role-binding（roleName=agent）。下一轮发送即生效。
@@ -965,6 +980,12 @@ function LakehouseAgentChat() {
             if (evt.type !== 'token' && evt.type !== 'thinking') {
               void refetchMissions(streamThreadId)
             }
+            // Surface the question's 分词 in real time: the ledger carries the
+            // tokenization once the recall step runs, so refetch it as tool
+            // calls land (and at done) — no manual trigger needed.
+            if ((evt.type === 'function_call' || evt.type === 'done') && streamThreadId) {
+              void fetchLedger(streamThreadId)
+            }
           } catch { /* skip */ }
         }
       }
@@ -1014,10 +1035,21 @@ function LakehouseAgentChat() {
     return ''
   }, [messages])
 
+  // Current question's 分词, derived from the live Thread Memory Ledger
+  // (refetched during streaming). Prefer tokens seen in the latest turn; fall
+  // back to all when the turn counter isn't available yet.
+  const currentTurnTokens = useMemo(() => {
+    const all = ledger?.tokens ?? []
+    if (all.length === 0) return []
+    const turn = ledger?.summary?.turnCount ?? 0
+    const cur = all.filter(tk => tk.lastSeen === turn)
+    return cur.length > 0 ? cur : all
+  }, [ledger])
+
   return (
     <div className="flex flex-col overflow-hidden h-full">
       {/* Header */}
-      <div className={`flex items-center justify-between px-4 py-2.5 flex-shrink-0 bg-white ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-200'}`}>
+      <div className={`flex h-14 items-center justify-between px-4 flex-shrink-0 bg-white ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-200'}`}>
         <div className="flex items-center gap-3">
           {industrial ? (
             // min-width pins the title cell so the [QUERY|BUILDER] toggle to its
@@ -1138,7 +1170,7 @@ function LakehouseAgentChat() {
             {graphFullscreen ? t('header.graph_exit_fullscreen') : t('header.graph_fullscreen')}
           </Button>
           <Button variant="ghost" size="sm" onClick={startNewThread}>{t('header.new_thread')}</Button>
-          <Link href={`/ontology/lakehouse-agent/history?mode=${mode}`} className="border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-500 hover:text-gray-800 hover:border-gray-400 transition-colors">{t('header.history')}</Link>
+          <button onClick={openHistory} className="border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-500 hover:text-gray-800 hover:border-gray-400 transition-colors">{t('header.history')}</button>
         </div>
       </div>
 
@@ -1152,9 +1184,9 @@ function LakehouseAgentChat() {
           {/* Panel tab bar */}
           <div className={`flex items-center gap-0 px-2 flex-shrink-0 bg-white ${industrial ? 'border-b border-ink' : 'border-b border-gray-200'}`}>
             {([
+              ['mission', tw('tab_mission')],
               ['diagnose', tw('tab_diagnose')],
               ['graph', tw('tab_graph')],
-              ['mission', tw('tab_mission')],
             ] as const).map(([key, label]) => {
               const active = panelTab === key
               return (
@@ -1238,10 +1270,32 @@ function LakehouseAgentChat() {
           </>
           )}
 
-          {/* 任务 tab — the mission ledger (任务可达器). */}
+          {/* 任务 tab — the mission ledger (任务可达器) plus the current question's
+              分词, surfaced live from the ledger as the agent runs (no manual
+              trigger). The 分词 is its own section under the ledger. */}
           {panelTab === 'mission' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
+              {currentTurnTokens.length > 0 && (
+                <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2">
+                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                    {tw('diag_tokens_label')}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {currentTurnTokens.map(tk => (
+                      <span
+                        key={tk.token}
+                        title={tk.strongHit ? 'STRONG' : 'WEAK'}
+                        className={`rounded-md border px-2 py-0.5 font-mono text-xs ${
+                          tk.strongHit ? 'border-ink bg-white text-ink' : 'border-border bg-canvas-alt text-ink-muted'
+                        }`}
+                      >
+                        {tk.token}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1470,11 +1524,12 @@ function LakehouseAgentChat() {
               <div ref={bottomRef} />
             </div>
 
-            {/* Input */}
-            <div className="flex gap-2 px-4 py-3 border-t border-gray-200 flex-shrink-0 bg-white">
+            {/* Input — bar height matches the sidebar footer (user/logout) row
+                so the bottom gridline aligns left-to-right. */}
+            <div className="flex h-14 items-center gap-2 px-4 border-t border-gray-200 flex-shrink-0 bg-white">
               <input
                 ref={chatInputRef}
-                className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:border-gray-400 focus:outline-none disabled:bg-gray-50 disabled:cursor-not-allowed transition-colors"
+                className="h-9 flex-1 border border-gray-200 rounded-xl px-4 text-sm focus:border-gray-400 focus:outline-none disabled:bg-gray-50 disabled:cursor-not-allowed transition-colors"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
@@ -1502,6 +1557,54 @@ function LakehouseAgentChat() {
           </div>
         )}
       </div>
+
+      {/* History preview drawer — pick a past thread without leaving the
+          workbench; the full History page is one click away. */}
+      {historyOpen && (
+        <div className="fixed top-0 right-0 z-40 flex h-full w-[360px] flex-col border-l border-gray-200 bg-white shadow-xl">
+          <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <History className="h-4 w-4 text-gray-600" />
+              <span className="text-sm font-semibold text-gray-800">{t('header.history')}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Link
+                href={`/ontology/lakehouse-agent/history?mode=${mode}`}
+                onClick={() => setHistoryOpen(false)}
+                className="inline-flex items-center gap-1 rounded border border-transparent px-2 py-1 text-[10px] text-gray-500 hover:border-gray-200 hover:bg-white hover:text-blue-600"
+                title={tw('history_open_full')}
+              >
+                <ExternalLink className="h-3 w-3" />{tw('history_open_full')}
+              </Link>
+              <button onClick={() => setHistoryOpen(false)} className="p-1 text-gray-400 hover:text-gray-700" title={t('ledger.close')}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {historyLoading && <div className="p-4 text-sm text-gray-500">…</div>}
+            {!historyLoading && historyThreads.filter(th => (th.agentType || 'lakehouse') === mode).length === 0 && (
+              <div className="p-4 text-sm text-gray-500">{tw('history_empty')}</div>
+            )}
+            {!historyLoading && (
+              <div className="divide-y divide-gray-100">
+                {historyThreads
+                  .filter(th => (th.agentType || 'lakehouse') === mode)
+                  .map(th => (
+                    <button
+                      key={th.id}
+                      onClick={async () => { setHistoryOpen(false); await loadThread(th.id) }}
+                      className={`flex w-full flex-col items-start gap-0.5 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 ${th.id === threadId ? 'bg-gray-50' : ''}`}
+                    >
+                      <span className="w-full truncate text-sm text-gray-800">{th.title || tw('history_no_title')}</span>
+                      <span className="text-[11px] tabular-nums text-gray-400">{new Date(th.updatedAt).toLocaleString('zh-CN')}</span>
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Thread Memory Ledger drawer (minimal theme) */}
       {showMemory && (

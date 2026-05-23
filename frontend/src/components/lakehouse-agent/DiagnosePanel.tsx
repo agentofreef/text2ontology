@@ -100,6 +100,21 @@ export function DiagnosePanel({
         <div className="px-3 py-2 text-sm text-ink">{question}</div>
       </div>
 
+      {/* 分词 — how the current question was split into tokens. Shown as soon as
+          a diagnose runs, before the deeper recall breakdown. */}
+      {tokens.length > 0 && (
+        <div className="overflow-hidden rounded-md border border-border bg-white">
+          <div className="border-b border-border-light bg-canvas-alt px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-ghost">
+            {tw('diag_tokens_label')}
+          </div>
+          <div className="flex flex-wrap gap-1.5 px-3 py-2">
+            {tokens.map((tk, i) => (
+              <span key={i} className="rounded-md border border-ink bg-white px-2 py-0.5 font-mono text-xs text-ink">{tk}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Matched ontology objects — the "address", free from the SSE stream. */}
       {involved.length > 0 && (
         <div className="overflow-hidden rounded-md border border-border bg-white">
@@ -134,7 +149,7 @@ export function DiagnosePanel({
         </div>
       )}
       {result && (
-        <RecallResultView result={result} tokens={tokens} vectorCandidates={vectorCandidates} />
+        <RecallResultView result={result} vectorCandidates={vectorCandidates} />
       )}
     </div>
   )
