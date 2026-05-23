@@ -30,6 +30,7 @@ import { Link } from '@/i18n/navigation'
 import type { OntKnowledge, OntCausality, OntObjectType, OntLinkType, OntLearnedFact, OntFactLink, LLMConfig, LLMRoleBinding } from '@/types/api'
 import { OntologyGraph, type GraphHighlight, type GraphLayoutMode } from '@/components/ui/OntologyGraph'
 import { DiagnosePanel } from '@/components/lakehouse-agent/DiagnosePanel'
+import type { RecallResult } from '@/components/lakehouse-agent/RecallDiagnostics'
 import {
   MotionGroup,
   MotionGroupItem,
@@ -676,6 +677,9 @@ function LakehouseAgentChat() {
   // default and leads, since the agent forcibly tokenizes + judges reachability
   // for every question as it answers; 诊断 / 图谱 follow.
   const [panelTab, setPanelTab] = useState<'mission' | 'diagnose' | 'graph'>('mission')
+  // 分词 + 召回 for the current turn, delivered by the agent's 'recall' SSE event
+  // (not a client-side HTTP call). Feeds both the 任务 and 诊断 panels.
+  const [streamRecall, setStreamRecall] = useState<{ tokens: string[]; recall: RecallResult } | null>(null)
   // History preview drawer — pick a past thread without leaving the workbench.
   type HistoryThread = { id: string; title: string; agentType?: 'lakehouse' | 'builder'; updatedAt: string }
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -781,6 +785,7 @@ function LakehouseAgentChat() {
   const loadThread = useCallback(async (id: string) => {
     if (!id) return
     setLoadingThread(true)
+    setStreamRecall(null)
     try {
       const res = await api<{
         id: string
@@ -852,6 +857,7 @@ function LakehouseAgentChat() {
   const startNewThread = () => {
     setThreadId('')
     setMessages([])
+    setStreamRecall(null)
     setBranchStack([])
     setThreadStatus('active')
     setAmbiguousKeyword('')
@@ -867,6 +873,7 @@ function LakehouseAgentChat() {
     if (!messageText) setInput('')
     setLoading(true)
     setGraphHighlight(null)
+    setStreamRecall(null)
 
     const assistantIdx = newMessages.length
     setMessages(prev => [...prev, { role: 'assistant', content: '', functionCalls: [] }])
@@ -966,6 +973,10 @@ function LakehouseAgentChat() {
             } else if (evt.type === 'done') {
               if (evt.promptTokens) current = { ...current, promptTokens: evt.promptTokens as number, completionTokens: evt.completionTokens as number, totalTokens: evt.totalTokens as number }
               if (evt.modelName) current = { ...current, modelName: evt.modelName as string }
+            } else if (evt.type === 'recall') {
+              // 分词 + 召回 straight from the agent's pipeline — populates the
+              // 任务/诊断 panels without any extra client HTTP call.
+              setStreamRecall({ tokens: (evt.tokens as string[]) || [], recall: evt.recall as RecallResult })
             }
             setMessages(prev => {
               const n = [...prev]
@@ -979,12 +990,6 @@ function LakehouseAgentChat() {
             // early in the turn, so this surfaces it without waiting for 'done'.
             if (evt.type !== 'token' && evt.type !== 'thinking') {
               void refetchMissions(streamThreadId)
-            }
-            // Surface the question's 分词 in real time: the ledger carries the
-            // tokenization once the recall step runs, so refetch it as tool
-            // calls land (and at done) — no manual trigger needed.
-            if ((evt.type === 'function_call' || evt.type === 'done') && streamThreadId) {
-              void fetchLedger(streamThreadId)
             }
           } catch { /* skip */ }
         }
@@ -1027,24 +1032,13 @@ function LakehouseAgentChat() {
   // Last streaming message (for fade-in during active SSE)
   const lastMessage = loading && messages.length > 0 ? messages[messages.length - 1] : null
 
-  // The most recent user question — drives the diagnose panel on the right.
-  const lastUserQuestion = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') return parseUserMessage(messages[i].content).display
-    }
-    return ''
-  }, [messages])
-
-  // Current question's 分词, derived from the live Thread Memory Ledger
-  // (refetched during streaming). Prefer tokens seen in the latest turn; fall
-  // back to all when the turn counter isn't available yet.
+  // Current question's 分词 — taken straight from the agent's 'recall' SSE event
+  // (no extra HTTP). strongHit = the token matched at least one keyword.
   const currentTurnTokens = useMemo(() => {
-    const all = ledger?.tokens ?? []
-    if (all.length === 0) return []
-    const turn = ledger?.summary?.turnCount ?? 0
-    const cur = all.filter(tk => tk.lastSeen === turn)
-    return cur.length > 0 ? cur : all
-  }, [ledger])
+    if (!streamRecall) return []
+    const td = streamRecall.recall?.tokenDetails || {}
+    return streamRecall.tokens.map(t => ({ token: t, strongHit: (td[t]?.length ?? 0) > 0 }))
+  }, [streamRecall])
 
   return (
     <div className="flex flex-col overflow-hidden h-full">
@@ -1206,8 +1200,7 @@ function LakehouseAgentChat() {
           {/* 诊断 tab — diagnose-first default. */}
           {panelTab === 'diagnose' && (
             <DiagnosePanel
-              projectId={currentProject?.id}
-              question={lastUserQuestion}
+              streamRecall={streamRecall}
               graphHighlight={graphHighlight}
             />
           )}
