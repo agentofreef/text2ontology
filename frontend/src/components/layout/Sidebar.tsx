@@ -7,7 +7,7 @@ import {
   ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Plus, Database,
   Box, BarChart3, Tags, Trash2, Filter,
   Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
-  Upload, LayoutDashboard, Search,
+  Upload, Bot, Search,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useProject } from '@/lib/project'
@@ -81,10 +81,11 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
       ],
     },
     {
-      // 工作台 — the diagnose-first agent loop (ask → diagnose → fix).
+      // 工作台 — the diagnose-first agent loop (ask → diagnose → fix). Bot icon
+      // (reads as an Agent, not a dashboard).
       label: t('mode_workbench'),
       href: '/ontology/lakehouse-agent',
-      icon: LayoutDashboard,
+      icon: Bot,
       items: [
         { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical },
         { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb    },
@@ -208,34 +209,38 @@ function NavGroupSection({
     )
   }
 
-  // Expanded sidebar — single header style for ALL groups.
-  // Label area is a <Link> when the group is itself a page entry (e.g. 湖仓 Agent),
-  // otherwise plain text. Chevron always toggles. Visible state = `open` only,
-  // so the user's fold choice always wins.
+  // Expanded sidebar — the mode header is a REAL nav row (icon + label,
+  // clickable to the mode's primary page), so it shows the very page the
+  // collapsed rail shows as an icon. Sub-pages render indented beneath it, and
+  // the chevron toggles them. So expanded ⊇ collapsed (nothing is lost).
   const industrial = useStyleMode().mode === 'industrial'
-  const labelClass = industrial
-    ? 'flex-1 text-left font-mono text-[10px] uppercase tracking-[0.22em] text-ink-ghost hover:text-ink transition-colors'
-    : 'flex-1 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-light hover:text-ink transition-colors'
-  const labelActive = group.href ? isExactActive(pathname, group.href) : false
-  const labelText = industrial ? `// ${group.label.toUpperCase()}` : group.label
+  const Icon = group.icon
+  const headerActive = group.href ? isExactActive(pathname, group.href) : false
 
   return (
     <div className="mb-2">
-      <div className="flex items-center px-3 py-1.5">
-        {group.href ? (
+      <div className="flex items-center">
+        {group.href && Icon ? (
           <Link
             href={group.href}
-            className={`${labelClass} ${labelActive ? 'text-ink' : ''}`}
+            className={`flex flex-1 items-center gap-3 px-3 py-1.5 text-sm transition-colors duration-150 ${
+              headerActive
+                ? industrial ? 'bg-ink text-white font-medium' : 'bg-canvas-alt text-ink font-medium'
+                : 'text-ink-muted hover:bg-canvas-alt hover:text-ink'
+            }`}
           >
-            {labelText}
+            <Icon className={`h-4 w-4 flex-shrink-0 ${headerActive ? (industrial ? 'text-white' : 'text-ink') : 'text-ink-ghost'}`} />
+            <span className={industrial ? 'font-mono text-[12px] tracking-[0.04em]' : 'font-medium'}>
+              {industrial ? group.label.toUpperCase() : group.label}
+            </span>
           </Link>
         ) : (
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className={labelClass}
+            className={`flex-1 px-3 py-1.5 text-left ${industrial ? 'font-mono text-[10px] uppercase tracking-[0.22em] text-ink-ghost' : 'text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-light'}`}
           >
-            {labelText}
+            {industrial ? `// ${group.label.toUpperCase()}` : group.label}
           </button>
         )}
         {group.items.length > 0 && (
@@ -257,7 +262,7 @@ function NavGroupSection({
               leaf={leaf}
               collapsed={false}
               isActive={leaf.exact ? isExactActive(pathname, leaf.href) : isPathActive(pathname, leaf.href)}
-              indent={false}
+              indent={true}
             />
           ))}
         </div>
