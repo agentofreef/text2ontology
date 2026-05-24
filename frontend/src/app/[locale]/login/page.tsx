@@ -225,24 +225,6 @@ export default function LoginPageMinimal() {
             </div>
           )}
 
-          {/* Demo credentials trace — sign-in only */}
-          {mode === 'signin' && (
-            <div className="mt-10 border-t border-border pt-5">
-              <div className="mb-2 font-mono text-[10px] tracking-[0.18em] text-ink-ghost">
-                // {t('demo_credentials_title')}
-              </div>
-              <div className="flex gap-6 font-mono text-xs text-ink">
-                <span>
-                  {t('demo_username_label')}&nbsp;
-                  <span className="font-bold">admin</span>
-                </span>
-                <span>
-                  {t('demo_password_label')}&nbsp;
-                  <span className="font-bold">admin</span>
-                </span>
-              </div>
-            </div>
-          )}
         </MotionFade>
       </main>
     </div>
