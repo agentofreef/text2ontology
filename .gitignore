@@ -25,6 +25,8 @@ mcp-server/.venv/
 .env.local
 .env.production
 .env.*.local
+.env.bak*
+*.bak.old-dev
 **/.env
 **/.env.shared
 **/.env.local
@@ -79,3 +81,8 @@ docs/business/
 docs/ontology-handover/
 docs/harness-agent-design/
 *.xlsx
+
+# Demo video bundle — produced by the Playwright recording harness (also ignored,
+# see frontend/.gitignore). The mp4 recordings + their per-video .md descriptions
+# are a local/distributable bundle and are never committed to this repo.
+docs/demos/

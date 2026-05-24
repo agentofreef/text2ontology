@@ -13,9 +13,6 @@
     "submit": "Sign in",
     "submitting": "Signing in...",
     "failed_default": "Sign-in failed",
-    "demo_credentials_title": "Demo account",
-    "demo_username_label": "Username:",
-    "demo_password_label": "Password:",
     "register_title": "Create account",
     "register_subtitle": "Register a new account",
     "display_name_label": "Display name",
@@ -137,6 +134,8 @@
     "dataset_testing": "Dataset Testing",
     "data_flywheel": "Data Flywheel",
     "lakehouse_sql": "Lakehouse SQL",
+    "objects": "Objects",
+    "sql_passthrough": "Ontology SQL",
     "system": "System",
     "data_sources": "Data Sources",
     "prompt_engineering": "Prompt Engineering",
@@ -323,7 +322,18 @@
         "empty_title_lakehouse": "Lakehouse Agent",
         "empty_title_builder": "Ontology Builder",
         "empty_hint_lakehouse": "Ask a question — the Agent will browse the knowledge manual and query the data once it understands your business",
-        "empty_hint_builder": "Describe the business object you want to model — the Agent will draft OD, properties, and links together with you"
+        "empty_hint_builder": "Describe the business object you want to model — the Agent will draft OD, properties, and links together with you",
+        "examples_label": "Try asking",
+        "example_1": "Compare sales by region",
+        "example_2": "Top 10 products by sales",
+        "example_3": "Total orders this month"
+      },
+      "dashboard": {
+        "objects": "Objects",
+        "objects_active": "{count} active",
+        "keywords": "Keywords",
+        "examples": "Example questions",
+        "described": "Described properties"
       },
       "ledger": {
         "title": "Thread Memory (Ledger)",
@@ -1360,6 +1370,7 @@
     "edge_from": "From",
     "edge_to": "To",
     "delete_link": "Delete link",
+    "delete_hint": "Click a relationship line to delete it",
     "legend_od": "Object",
     "legend_fact": "Fact",
     "legend_prop": "Property",

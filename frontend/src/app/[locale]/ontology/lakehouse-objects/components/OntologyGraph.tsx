@@ -63,6 +63,15 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
   const [cardinality, setCardinality] = useState('1:N')
   const [linkDesc, setLinkDesc] = useState('')
 
+  // Clicking a relationship line opens a targeted delete popup. kind routes the
+  // delete to the right table: join_key causality (prop↔prop) vs ont_link_type
+  // (OD→OD FK). Edges without a _linkId (ownership / learned-fact lines) are not
+  // deletable and never open this popup.
+  const [edgeToDelete, setEdgeToDelete] = useState<
+    { id: string; kind: 'causality' | 'link_type'; from: string; to: string; cardinality: string } | null
+  >(null)
+  const [deletingEdge, setDeletingEdge] = useState(false)
+
   const { data: objects, loading: objectsLoading, refetch: refetchObjects } = useFetch<OntObjectType>('/ontology/objects')
   const { data: knowledge, loading: knowledgeLoading, refetch: refetchKnowledge } = useFetch<OntKnowledge>('/ontology/knowledge')
   const { data: causalities, refetch: refetchCausalities } = useFetch<OntCausality>('/ontology/causality')
@@ -285,6 +294,7 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
           ].filter(Boolean).join('<br/>'),
         },
         _linkId: l.id,
+        _linkKind: 'link_type',
         _from: l.fromObjectName,
         _to: l.toObjectName,
         _cardinality: l.cardinality,
@@ -311,6 +321,7 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
           formatter: `<b>${fromInfo.odName}.${fromInfo.propName}</b> → <b>${toInfo.odName}.${toInfo.propName}</b><br/>${t('tt_cardinality')}${link.direction}<br/>${link.description || ''}`,
         },
         _linkId: link.id,
+        _linkKind: 'causality',
         _from: `${fromInfo.odName}.${fromInfo.propName}`,
         _to: `${toInfo.odName}.${toInfo.propName}`,
         _cardinality: link.direction,
@@ -449,6 +460,14 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
           to: params.data._to,
           cardinality: params.data._cardinality,
         })
+        // Open the targeted delete popup for this specific relationship line.
+        setEdgeToDelete({
+          id: params.data._linkId,
+          kind: params.data._linkKind === 'link_type' ? 'link_type' : 'causality',
+          from: params.data._from || '',
+          to: params.data._to || '',
+          cardinality: params.data._cardinality || '',
+        })
       }
     })
 
@@ -527,17 +546,26 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
     } catch (e) { msg.error(e instanceof Error ? e.message : t('err_create_failed')) }
   }
 
-  // Kept for parity with the original page (parent drawer triggers edge
-  // deletion via its own handler, but the component still exposes this).
-  const deleteLink = async (id: string) => {
-    if (!confirm(t('confirm_delete_link'))) return
+  // Targeted edge deletion — confirmed via the popup opened on edge click.
+  // Routes to the correct backend table by edge kind: join_key causality
+  // (prop↔prop) vs ont_link_type (OD→OD FK).
+  const confirmDeleteEdge = async () => {
+    if (!edgeToDelete || !currentProject) return
+    const path = edgeToDelete.kind === 'link_type'
+      ? `/ontology/links/${edgeToDelete.id}?projectId=${currentProject.id}`
+      : `/ontology/causality/${edgeToDelete.id}?projectId=${currentProject.id}`
+    setDeletingEdge(true)
     try {
-      await api(`/ontology/causality/${id}?projectId=${currentProject?.id}`, { method: 'DELETE' })
+      await api(path, { method: 'DELETE' })
       msg.success(t('msg_link_deleted'))
+      setEdgeToDelete(null)
       refetchAll()
-    } catch (e) { msg.error(e instanceof Error ? e.message : t('err_delete_failed')) }
+    } catch (e) {
+      msg.error(e instanceof Error ? e.message : t('err_delete_failed'))
+    } finally {
+      setDeletingEdge(false)
+    }
   }
-  void deleteLink
 
   if (!currentProject) {
     return (
@@ -551,9 +579,10 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
   const loading = (objectsLoading && objects.length === 0) || (knowledgeLoading && knowledge.length === 0)
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Slim toolbar */}
-      <div className="flex flex-shrink-0 items-center justify-end gap-2 border-b border-border bg-white px-4 py-2">
+    <div className="relative flex h-full min-h-0 flex-col">
+      {/* No top bar — the graph runs full-bleed. The page's 湖仓对象 panel owns the
+          top-left; these controls float over the top-right corner. */}
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
         <motion.button
           onClick={refetchAll}
           whileHover={reduce ? undefined : { scale: 1.05 }}
@@ -592,6 +621,7 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
         <LegendItem color={COLORS.propertyMc} shape="rect" label={t('legend_mc')} />
         <LegendItem color={COLORS.joinKey} shape="line" label={t('legend_join_key')} />
         <LegendItem color={COLORS.learnedFact} shape="diamond" label={t('legend_fact')} />
+        <span className="ml-auto text-[11px] text-ink-ghost">{t('delete_hint')}</span>
       </div>
 
       {/* Link modal */}
@@ -663,6 +693,47 @@ export function OntologyGraph({ selectedId, onSelectNode, onSelectEdge, refreshK
               aria-label={t('create_link')}
             >
               {t('create_link')}
+            </AnimatedButton>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Targeted delete popup — opened by clicking a relationship line. */}
+      <Modal open={!!edgeToDelete} onClose={() => setEdgeToDelete(null)} title={t('delete_link')}>
+        <div className="space-y-4">
+          <p className="text-sm text-ink">{t('confirm_delete_link')}</p>
+          {edgeToDelete && (
+            <div className="rounded-md border border-border bg-canvas-alt px-3 py-2">
+              <div className="flex items-center gap-2 font-mono text-[13px] text-ink">
+                <span className="truncate">{edgeToDelete.from}</span>
+                <span className="flex-shrink-0 text-ink-ghost">→</span>
+                <span className="truncate">{edgeToDelete.to}</span>
+              </div>
+              {edgeToDelete.cardinality && (
+                <div className="mt-1 text-[11px] text-ink-muted">
+                  {t('modal_cardinality')}：{edgeToDelete.cardinality}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <AnimatedButton
+              variant="ghost"
+              size="md"
+              onClick={() => setEdgeToDelete(null)}
+              aria-label={t('cancel')}
+            >
+              {t('cancel')}
+            </AnimatedButton>
+            <AnimatedButton
+              variant="danger"
+              size="md"
+              onClick={confirmDeleteEdge}
+              disabled={deletingEdge}
+              aria-label={t('delete_link')}
+              data-testid="confirm-delete-edge"
+            >
+              {t('delete_link')}
             </AnimatedButton>
           </div>
         </div>
