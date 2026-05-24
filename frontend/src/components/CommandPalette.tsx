@@ -11,9 +11,9 @@ import { useRouter } from '@/i18n/navigation'
 import { useTranslations } from 'next-intl'
 import { useStyleMode } from '@/lib/style-mode'
 import {
-  Upload, Box, Database, Tags, Filter, BarChart3, LayoutDashboard,
-  FlaskConical, Search, History, Tag, Lightbulb, RotateCw, Terminal,
-  Cpu, KeyRound, UserCog, Users, CornerDownLeft, type LucideIcon,
+  Upload, Box, Database, Tags, Filter, BarChart3, Bot,
+  FlaskConical, Search, History, PenLine, Lightbulb, RotateCw, Terminal,
+  Cpu, KeyRound, UserCog, Users, CornerDownLeft, Crosshair, ScrollText, type LucideIcon,
 } from 'lucide-react'
 
 type Dest = { href: string; label: string; icon: LucideIcon }
@@ -36,9 +36,10 @@ export function CommandPalette({
 
   const sections: Section[] = useMemo(() => {
     const sys: Dest[] = [
-      { href: '/settings/llm-config',  label: t('llm_config'),  icon: Cpu      },
-      { href: '/settings/mcp-keys',    label: t('mcp_keys'),    icon: KeyRound },
-      { href: '/settings/preferences', label: t('preferences'), icon: UserCog  },
+      { href: '/settings/llm-config',    label: t('llm_config'),         icon: Cpu        },
+      { href: '/settings/prompt-config', label: t('prompt_engineering'), icon: ScrollText },
+      { href: '/settings/mcp-keys',      label: t('mcp_keys'),           icon: KeyRound   },
+      { href: '/settings/preferences',   label: t('preferences'),        icon: UserCog    },
     ]
     if (isAdmin) sys.push({ href: '/settings/users', label: t('user_management'), icon: Users })
     return [
@@ -46,24 +47,24 @@ export function CommandPalette({
         { href: '/settings/data-sources', label: t('data_sources'), icon: Upload },
       ] },
       { label: t('ontology'), items: [
-        { href: '/ontology/lakehouse-objects',        label: t('ontology'),           icon: Box       },
+        { href: '/ontology/lakehouse-objects',        label: t('objects'),            icon: Box       },
         { href: '/ontology/lakehouse',                label: t('lakehouse'),          icon: Database  },
         { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
         { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
         { href: '/ontology/lakehouse-metric-intents', label: t('metric_intents'),     icon: BarChart3 },
       ] },
       { label: t('mode_workbench'), items: [
-        { href: '/ontology/lakehouse-agent',                   label: t('lakehouse_agent'),   icon: LayoutDashboard },
-        { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical    },
-        { href: '/ontology/lakehouse-agent/token-recall',      label: t('token_recall'),      icon: Search          },
-        { href: '/ontology/lakehouse-agent/history',           label: t('chat_history'),      icon: History         },
-        { href: '/ontology/lakehouse-agent/annotations',       label: t('annotations'),       icon: Tag             },
-        { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb       },
-        { href: '/ontology/lakehouse-agent/flywheel',          label: t('data_flywheel'),     icon: RotateCw        },
+        { href: '/ontology/lakehouse-agent',                   label: t('lakehouse_agent'),   icon: Bot          },
+        { href: '/ontology/lakehouse-agent/history',           label: t('chat_history'),      icon: History      },
+        { href: '/ontology/lakehouse-agent/annotations',       label: t('annotations'),       icon: PenLine      },
+        { href: '/ontology/lakehouse-agent/token-recall',      label: t('token_recall'),      icon: Crosshair    },
+        { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical },
+        { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb    },
+        { href: '/ontology/lakehouse-agent/flywheel',          label: t('data_flywheel'),     icon: RotateCw     },
       ] },
       { label: 'SQL', items: [
-        { href: '/ontology/sql-passthrough', label: 'Ontology SQL',     icon: Terminal },
-        { href: '/ontology/lakehouse-sql',   label: t('lakehouse_sql'), icon: Database },
+        { href: '/ontology/sql-passthrough', label: t('sql_passthrough'), icon: Terminal },
+        { href: '/ontology/lakehouse-sql',   label: t('lakehouse_sql'),   icon: Database },
       ] },
       { label: t('system'), items: sys },
     ]

@@ -7,7 +7,7 @@ import {
   ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Plus, Database,
   Box, BarChart3, Tags, Trash2, Filter,
   Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
-  Upload, Bot, Search,
+  Upload, Bot, Search, History, Crosshair, PenLine, ScrollText,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useProject } from '@/lib/project'
@@ -50,30 +50,25 @@ type NavGroup = {
   icon?: ElementType
 }
 
-// Nav restructured around the WORKFLOW (ingest → model → diagnose-loop), not a
-// flat catalog of pages. Each group is a "mode": its header IS the entry to the
-// mode's primary page, and `items` are the secondary pages within that mode.
-// Three former Agent sub-pages — 对话历史 / 标注 / Token 召回 — are intentionally
-// NOT listed: they fold into the Agent workbench as panels and stay reachable
-// via Cmd+K (CommandPalette) and their direct URLs.
+// Expanded sidebar shows the COMPLETE catalogue: every mode is a section label
+// whose pages are explicit, labelled leaves — INCLUDING the mode's primary page.
+// Nothing is hidden behind a header-click ("expanded = all pages"). The thin
+// collapsed rail (rendered separately in <Sidebar>) deliberately shows only the
+// 4 debug-loop destinations (search / Agent / objects / token-recall).
 function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGroup[] {
   return [
     {
-      // 接入 — phase-1 ingest. One-time per project; header → data sources.
+      // 接入 — phase-1 ingest. One-time per project.
       label: t('mode_ingest'),
-      href: '/settings/data-sources',
-      icon: Upload,
-      items: [],
+      items: [
+        { href: '/settings/data-sources', label: t('data_sources'), icon: Upload },
+      ],
     },
     {
-      // 本体 — the curated model + all curation levers. Header → object list
-      // (the property-graph split view at /ontology/lakehouse-objects; the old
-      // er-diagram and lakehouse-graph routes still exist but redirect/are
-      // hidden, since this is the path users are meant to take).
+      // 本体 — the curated model + all curation levers.
       label: t('ontology'),
-      href: '/ontology/lakehouse-objects',
-      icon: Box,
       items: [
+        { href: '/ontology/lakehouse-objects',        label: t('objects'),            icon: Box,       exact: true },
         { href: '/ontology/lakehouse',                label: t('lakehouse'),          icon: Database  },
         { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
         { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
@@ -81,41 +76,47 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
       ],
     },
     {
-      // 工作台 — the diagnose-first agent loop (ask → diagnose → fix). Bot icon
-      // (reads as an Agent, not a dashboard).
+      // 工作台 — the diagnose-first agent loop. The Agent chat is the primary
+      // leaf (exact-match highlight so its sub-pages don't also light it up);
+      // 对话历史 / 标注 / Token 召回 are restored as explicit leaves.
       label: t('mode_workbench'),
-      href: '/ontology/lakehouse-agent',
-      icon: Bot,
       items: [
+        { href: '/ontology/lakehouse-agent',                   label: t('lakehouse_agent'),   icon: Bot,         exact: true },
+        { href: '/ontology/lakehouse-agent/history',           label: t('chat_history'),      icon: History      },
+        { href: '/ontology/lakehouse-agent/annotations',       label: t('annotations'),       icon: PenLine      },
+        { href: '/ontology/lakehouse-agent/token-recall',      label: t('token_recall'),      icon: Crosshair    },
         { href: '/ontology/lakehouse-agent/dataset-testing',   label: t('dataset_testing'),   icon: FlaskConical },
         { href: '/ontology/lakehouse-agent/knowledge-learned', label: t('learned_knowledge'), icon: Lightbulb    },
         { href: '/ontology/lakehouse-agent/flywheel',          label: t('data_flywheel'),     icon: RotateCw     },
       ],
     },
     {
+      // SQL — Ontology SQL 直通 (the "ontology circle": Od names as tables,
+      // links as JOINs) + raw 湖仓 SQL.
       label: 'SQL',
-      href: '/ontology/sql-passthrough',
-      icon: Terminal,
       items: [
-        { href: '/ontology/lakehouse-sql', label: t('lakehouse_sql'), icon: Database },
+        { href: '/ontology/sql-passthrough', label: t('sql_passthrough'), icon: Terminal },
+        { href: '/ontology/lakehouse-sql',   label: t('lakehouse_sql'),   icon: Database },
       ],
     },
   ]
 }
 
-// 系统 — config mode. 数据源 moved to the 接入 mode; header → LLM config (the
-// most-touched settings page), the rest are secondary.
+// 系统 — config mode. LLM 配置 is now an explicit leaf (was only the header),
+// alongside Prompt 工程 / MCP 密钥 / 偏好设置 / 用户管理.
 function useSystemGroup(t: ReturnType<typeof useTranslations<'nav'>>, isAdmin: boolean): NavGroup {
   const items: NavLeaf[] = [
-    { href: '/settings/mcp-keys',       label: t('mcp_keys'),       icon: KeyRound },
-    { href: '/settings/preferences',    label: t('preferences'),    icon: UserCog  },
+    { href: '/settings/llm-config',    label: t('llm_config'),         icon: Settings   },
+    { href: '/settings/prompt-config', label: t('prompt_engineering'), icon: ScrollText },
+    { href: '/settings/mcp-keys',      label: t('mcp_keys'),           icon: KeyRound   },
+    { href: '/settings/preferences',   label: t('preferences'),        icon: UserCog    },
   ]
   // User management is admin-only; the backend also gates every /api/admin/*
   // call, so hiding the nav is convenience, not the security boundary.
   if (isAdmin) {
     items.push({ href: '/settings/users', label: t('user_management'), icon: Users })
   }
-  return { label: t('system'), href: '/settings/llm-config', icon: Settings, items }
+  return { label: t('system'), items }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -299,6 +300,33 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
     ? [...lakehouseGroups, systemGroup]
     : [systemGroup]
 
+  // Collapsed rail = exactly the 4 debug-loop destinations. The 搜索 button is
+  // the Cmd+K affordance rendered just below; these are the other three. Agent
+  // is NOT active while on its own token-recall sub-page (that has its own
+  // button), so the two don't light up together.
+  const collapsedRail: { href: string; label: string; icon: ElementType; active: boolean }[] = [
+    {
+      href: '/ontology/lakehouse-agent', label: t('lakehouse_agent'), icon: Bot,
+      // Active only on the Agent chat itself / sub-pages WITHOUT their own rail
+      // button — token-recall and annotations light up their own buttons.
+      active: isPathActive(pathname, '/ontology/lakehouse-agent') &&
+        !isPathActive(pathname, '/ontology/lakehouse-agent/token-recall') &&
+        !isPathActive(pathname, '/ontology/lakehouse-agent/annotations'),
+    },
+    {
+      href: '/ontology/lakehouse-objects', label: t('objects'), icon: Box,
+      active: isPathActive(pathname, '/ontology/lakehouse-objects'),
+    },
+    {
+      href: '/ontology/lakehouse-agent/token-recall', label: t('token_recall'), icon: Crosshair,
+      active: isPathActive(pathname, '/ontology/lakehouse-agent/token-recall'),
+    },
+    {
+      href: '/ontology/lakehouse-agent/annotations', label: t('annotations'), icon: PenLine,
+      active: isPathActive(pathname, '/ontology/lakehouse-agent/annotations'),
+    },
+  ]
+
   return (
     <aside
       className={`flex flex-col bg-canvas transition-all duration-150 ${
@@ -333,6 +361,7 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
       {collapsed && (
         <div className={`flex justify-center py-2 ${industrial ? 'border-b-2 border-ink' : 'border-b border-border'}`}>
           <button
+            data-testid="project-switcher"
             onClick={() => { setProjectDropdownOpen(true); onToggle() }}
             title={currentProject?.name || 'Select Project'}
             className="flex h-9 w-9 items-center justify-center text-ink-ghost transition-colors hover:bg-canvas-alt hover:text-ink"
@@ -346,6 +375,7 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
       {!collapsed && (
         <div className={`relative px-3 py-2 ${industrial ? 'border-b-2 border-ink' : 'border-b border-border'}`}>
           <button
+            data-testid="project-switcher"
             onClick={() => setProjectDropdownOpen(!projectDropdownOpen)}
             className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors duration-150 ${
               industrial
@@ -417,6 +447,7 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
                   </div>
                 ))}
                 <button
+                  data-testid="new-project"
                   onClick={() => {
                     setProjectDropdownOpen(false)
                     router.push('/setup-wizard')
@@ -458,14 +489,25 @@ export function Sidebar({ collapsed, onToggle, onOpenCommand }: SidebarProps) {
             </button>
           </div>
         )}
-        {groups.map((group) => (
-          <NavGroupSection
-            key={group.label}
-            group={group}
-            pathname={pathname}
-            collapsed={collapsed}
-          />
-        ))}
+        {collapsed
+          ? currentProject && collapsedRail.map((item) => (
+              <div key={item.href} className="mb-1.5">
+                <NavLeafLink
+                  leaf={{ href: item.href, label: item.label, icon: item.icon }}
+                  collapsed
+                  isActive={item.active}
+                  indent={false}
+                />
+              </div>
+            ))
+          : groups.map((group) => (
+              <NavGroupSection
+                key={group.label}
+                group={group}
+                pathname={pathname}
+                collapsed={false}
+              />
+            ))}
       </nav>
 
       {/* Locale Switcher (above user row, expanded mode only) */}

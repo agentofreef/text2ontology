@@ -1,0 +1,10 @@
+
+# Playwright doc-demo RECORDING HARNESS — internal tooling, never committed.
+# Covers specs, helpers, auth setup, the runner config, the convert script, and
+# all capture artifacts. The produced videos + their docs live in docs/demos/
+# (ignored at the repo root).
+e2e/
+playwright.config.ts
+scripts/record-docs.mjs
+test-results/
+playwright-report/

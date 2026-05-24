@@ -31,6 +31,7 @@ import { Link } from '@/i18n/navigation'
 import type { OntKnowledge, OntCausality, OntObjectType, OntLinkType, OntLearnedFact, OntFactLink, LLMConfig, LLMRoleBinding } from '@/types/api'
 import { OntologyGraph, type GraphHighlight, type GraphLayoutMode } from '@/components/ui/OntologyGraph'
 import { DiagnosePanel } from '@/components/lakehouse-agent/DiagnosePanel'
+import { HomeDashboard } from '@/components/lakehouse-agent/HomeDashboard'
 import type { RecallResult } from '@/components/lakehouse-agent/RecallDiagnostics'
 import {
   MotionGroup,
@@ -1387,19 +1388,24 @@ function LakehouseAgentChat() {
             <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">
               {messages.length === 0 && (
                 <MotionFade className="flex h-full flex-col items-center justify-center gap-3 text-gray-400">
-                  <BookOpen className="h-10 w-10 text-gray-300" />
-                  {/* whitespace-nowrap pins title height to one line so the SVG
-                      above doesn't move vertically when label changes (e.g.
-                      "湖仓 Agent" vs "本体构造助手") */}
-                  <span className="whitespace-nowrap text-sm font-medium text-gray-500">
-                    {mode === 'builder' ? t('chat.empty_title_builder') : t('chat.empty_title_lakehouse')}
-                  </span>
-                  {/* fixed width + min-height stabilizes the hint box across
-                      modes — different-length hints land in identical
-                      bounding boxes so the surrounding stack doesn't re-flow */}
-                  <span className="block w-72 min-h-[3rem] text-xs text-gray-400 text-center">
-                    {mode === 'builder' ? t('chat.empty_hint_builder') : t('chat.empty_hint_lakehouse')}
-                  </span>
+                  {mode === 'lakehouse' ? (
+                    // Lakehouse home: brand logo + ontology-health dashboard
+                    // (objects / keywords / example questions / described-prop
+                    // ratio). Replaces the old starter-question chips. Lives in
+                    // the messages.length===0 gate, so it disappears the instant
+                    // a conversation starts.
+                    <HomeDashboard />
+                  ) : (
+                    <>
+                      <BookOpen className="h-10 w-10 text-gray-300" />
+                      <span className="whitespace-nowrap text-sm font-medium text-gray-500">
+                        {t('chat.empty_title_builder')}
+                      </span>
+                      <span className="block w-72 min-h-[3rem] text-xs text-gray-400 text-center">
+                        {t('chat.empty_hint_builder')}
+                      </span>
+                    </>
+                  )}
                 </MotionFade>
               )}
 

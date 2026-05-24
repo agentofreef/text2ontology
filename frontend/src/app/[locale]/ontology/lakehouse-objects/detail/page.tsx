@@ -629,6 +629,8 @@ export default function LakehouseObjectDetailPage() {
                         <div className="w-[50px] font-mono text-[9px] text-ink-muted">{p.dataType}</div>
                         <div className="w-[30px]">
                           <button
+                            data-testid={`mc-${p.name}`}
+                            data-mc={p.isMachineCode ? '1' : '0'}
                             onClick={() => toggleMC(p)}
                             className={`inline-block h-3 w-3 border ${p.isMachineCode ? 'bg-amber-400 border-amber-500' : 'bg-white border-border'}`}
                             title={p.isMachineCode ? 'Machine Code (click to unset)' : 'Not MC (click to set)'}
@@ -657,6 +659,7 @@ export default function LakehouseObjectDetailPage() {
                             </span>
                           )}
                           <button
+                            data-testid={`sync-${p.name}`}
                             onClick={() => syncKeywords(p.id)}
                             disabled={!isMapped || !obj?.canonicalQuery || syncingProp === p.id}
                             className={`p-0.5 ${isMapped && obj?.canonicalQuery ? 'text-accent hover:text-accent/80' : 'text-ink-ghost/30 cursor-not-allowed'}`}

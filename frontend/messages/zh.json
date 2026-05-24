@@ -13,9 +13,6 @@
     "submit": "登录",
     "submitting": "登录中...",
     "failed_default": "登录失败",
-    "demo_credentials_title": "演示账号",
-    "demo_username_label": "用户名:",
-    "demo_password_label": "密码:",
     "register_title": "创建账号",
     "register_subtitle": "注册一个新账号",
     "display_name_label": "显示名称",
@@ -137,6 +134,8 @@
     "dataset_testing": "数据集测试",
     "data_flywheel": "数据飞轮",
     "lakehouse_sql": "湖仓 SQL",
+    "objects": "对象",
+    "sql_passthrough": "Ontology SQL 直通",
     "system": "系统",
     "data_sources": "数据源",
     "prompt_engineering": "Prompt 工程",
@@ -323,7 +322,18 @@
         "empty_title_lakehouse": "Lakehouse Agent",
         "empty_title_builder": "本体构造助手",
         "empty_hint_lakehouse": "输入问题，Agent 会翻阅知识手册理解业务后查询数据",
-        "empty_hint_builder": "描述你想建模的业务对象，Agent 会与你共同草拟 OD / Property / Link"
+        "empty_hint_builder": "描述你想建模的业务对象，Agent 会与你共同草拟 OD / Property / Link",
+        "examples_label": "试试这样问",
+        "example_1": "各地区的销售额对比",
+        "example_2": "销量最高的 10 个产品",
+        "example_3": "本月的订单总数"
+      },
+      "dashboard": {
+        "objects": "本体",
+        "objects_active": "{count} 已激活",
+        "keywords": "关键词",
+        "examples": "示例问题",
+        "described": "描述属性占比"
       },
       "ledger": {
         "title": "线程记忆（Memory Ledger）",
@@ -1360,6 +1370,7 @@
     "edge_from": "从",
     "edge_to": "至",
     "delete_link": "删除关联",
+    "delete_hint": "点击关系线即可删除该关联",
     "legend_od": "对象",
     "legend_fact": "事实",
     "legend_prop": "属性",
