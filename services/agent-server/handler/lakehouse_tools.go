@@ -102,6 +102,25 @@ func toolResultToMarkdown(toolName string, _ map[string]interface{}, result M) s
 						sid, sid, sid))
 				}
 
+				// Large result → ALSO instruct the LLM to emit a chart schema at
+				// the END of its answer so the frontend renders a visualization
+				// instead of a giant table. The schema names columns + a chart
+				// type only — never data values; the frontend resolves the data
+				// from THIS result, same invariant as 「tN」. This trigger lives
+				// here (runtime, on the tool result) — NOT in the system prompt —
+				// so charting guidance appears only when a result is actually
+				// large. Gate is len(rows)>20: results >200 are pre-truncated to
+				// a 10-row preview upstream, so len(rows) here is the true count
+				// only within (20,200], which is exactly the chartable band.
+				if sid, _ := result["step_id"].(string); sid != "" && len(rows) > 20 {
+					sb.WriteString(fmt.Sprintf(
+						"# 本结果有 %d 行，表格过长。请在回答【末尾】追加一个图表 schema："+
+							"「chart type=bar from=%s x=<某一列> y=<一或多列,英文逗号分隔> series=<可选分组列>」。"+
+							"type 可选 bar|line|pie|area；列名只能取自：%s。"+
+							"只写列名与图型、绝不写任何数值——前端会用本结果的数据渲染图表。\n",
+						len(rows), sid, strings.Join(cols, "、")))
+				}
+
 				// TOON header
 				colHeader := strings.Join(cols, "|")
 				sb.WriteString(fmt.Sprintf("status: success\nrow_count: %d\nrows[%d|]{%s}:\n", len(rows), len(rows), colHeader))

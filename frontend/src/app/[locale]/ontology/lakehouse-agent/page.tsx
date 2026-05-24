@@ -23,7 +23,8 @@ import { BuilderProposeLinkCard } from '@/components/lakehouse-agent/BuilderProp
 import { PlanGraph, type PlanTrace } from '@/components/lakehouse-agent/PlanGraph'
 import { AnalysisPlan, type AnalysisPlanResult } from '@/components/lakehouse-agent/AnalysisPlan'
 import { MissionLedger, type Mission } from '@/components/lakehouse-agent/MissionLedger'
-import { renderDataTemplates } from '@/components/lakehouse-agent/dataTemplate'
+import { renderDataTemplates, collectStepResults } from '@/components/lakehouse-agent/dataTemplate'
+import { splitAnswerSegments } from '@/components/lakehouse-agent/answerChart'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Link } from '@/i18n/navigation'
@@ -169,6 +170,40 @@ function JsonView({ data, depth = 0 }: { data: unknown; depth?: number }) {
     )
   }
   return <span className="text-gray-500">{String(data)}</span>
+}
+
+// AnswerBody renders an assistant answer, splitting out any 「chart …」 schema
+// the AI emits for a large result. Text runs through renderDataTemplates +
+// markdown as before; each chart schema is drawn as a visualization from its
+// source table's rows (collectStepResults). The tool only fetched the data —
+// the chart is rendered HERE, inside the answer, from the AI's schema; concrete
+// numbers never come from the LLM. If the source rows aren't present yet (mid
+// stream) or can't be found, the raw token is shown as text (graceful).
+function AnswerBody({ content, functionCalls }: {
+  content: string
+  functionCalls: Parameters<typeof renderDataTemplates>[1]
+}) {
+  const segments = useMemo(() => splitAnswerSegments(content || ''), [content])
+  const steps = useMemo(() => collectStepResults(functionCalls), [functionCalls])
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (seg.kind === 'text') {
+          if (!seg.text.trim()) return null
+          return <StreamMarkdown key={i} content={renderDataTemplates(seg.text, functionCalls)} />
+        }
+        const step = steps.get(seg.spec.from)
+        if (!step || step.rows.length === 0) {
+          return <StreamMarkdown key={i} content={seg.raw} />
+        }
+        return (
+          <div key={i} className="my-2">
+            <ResultViewer data={JSON.stringify(step.rows)} chartSpec={seg.spec} />
+          </div>
+        )
+      })}
+    </>
+  )
 }
 
 function StreamMarkdown({ content, className = '' }: { content: unknown; className?: string }) {
@@ -1470,12 +1505,12 @@ function LakehouseAgentChat() {
                         {m.role === 'assistant' && m.content && (
                           isStreamingLast ? (
                             <MotionFade key={`stream-${i}`} className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
+                              <AnswerBody content={m.content} functionCalls={m.functionCalls} />
                               {loading && <StreamingDot />}
                             </MotionFade>
                           ) : (
                             <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
+                              <AnswerBody content={m.content} functionCalls={m.functionCalls} />
                             </div>
                           )
                         )}
