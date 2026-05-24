@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -169,10 +171,32 @@ func EmbedTextsCtx(ctx context.Context, db *sql.DB, texts []string) ([][]float64
 	return embedTextsVia(ctx, client, baseURL, apiKey, modelName, texts)
 }
 
+// Embedding throughput tunables. The per-request input cap guards provider
+// limits on the /embeddings `input` array size; raise EMBED_BATCH_SIZE if the
+// provider accepts larger arrays. Batches run concurrently (bounded) so N texts
+// cost ~one round-trip instead of ⌈N/size⌉ sequential ones.
+const (
+	embedDefaultBatchSize = 32
+	embedMaxConcurrency   = 6
+)
+
+// resolveEmbedBatchSize reads EMBED_BATCH_SIZE (positive int) or falls back to
+// the default. Read per call so an ops change takes effect without a restart.
+func resolveEmbedBatchSize() int {
+	if v := os.Getenv("EMBED_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return embedDefaultBatchSize
+}
+
 // embedTextsVia is the HTTP core of the embedding call, split out so the
 // status-check / body-close behavior is unit-testable against an httptest
 // server without a live DB-resolved config. Truncates each text to 500 chars,
-// batches ≤4, and fails loud on any non-2xx batch.
+// splits into batches of resolveEmbedBatchSize() inputs, runs the batches
+// concurrently (bounded by embedMaxConcurrency), and fails loud on any non-2xx
+// batch — returning (nil, err), never a partial/zero-vector slice.
 func embedTextsVia(ctx context.Context, client *http.Client, baseURL, apiKey, modelName string, texts []string) ([][]float64, error) {
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
@@ -185,62 +209,106 @@ func embedTextsVia(ctx context.Context, client *http.Client, baseURL, apiKey, mo
 	}
 
 	allVecs := make([][]float64, len(truncated))
+	if len(truncated) == 0 {
+		return allVecs, nil
+	}
 
-	for start := 0; start < len(truncated); start += 4 {
-		end := start + 4
+	batchSize := resolveEmbedBatchSize()
+
+	// Cancel sibling batches as soon as one fails — fail-loud without burning
+	// the rest of the calls.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, embedMaxConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for start := 0; start < len(truncated); start += batchSize {
+		end := start + batchSize
 		if end > len(truncated) {
 			end = len(truncated)
 		}
-		batch := truncated[start:end]
-
-		reqBody := M{"model": modelName, "input": batch}
-		reqBytes, _ := json.Marshal(reqBody)
-		url := BuildURL(baseURL, "/embeddings")
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
-		if err != nil {
-			return nil, fmt.Errorf("embedding request build failed: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-
-		resp, err := doWithRetry(ctx, client, req)
-		if err != nil {
-			return nil, fmt.Errorf("embedding request failed: %w", err)
-		}
-		// Defer-style close inside the loop: close before returning on error and
-		// after decoding on success. A function literal keeps the close paired
-		// with this iteration's response (defer would pile up across batches).
-		func() {
-			defer resp.Body.Close()
-			// Fail loud on non-2xx — do NOT decode a body that isn't a real
-			// embedding payload and silently hand back zero vectors.
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-				err = fmt.Errorf("embedding returned %d: %s", resp.StatusCode, string(body))
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			// Bounded concurrency; bail out early if a sibling already failed.
+			select {
+			case sem <- struct{}{}:
+			case <-cctx.Done():
 				return
 			}
-			var result struct {
-				Data []struct {
-					Embedding []float64 `json:"embedding"`
-					Index     int       `json:"index"`
-				} `json:"data"`
-			}
-			if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
-				err = fmt.Errorf("embedding decode failed: %w", decErr)
+			defer func() { <-sem }()
+
+			vecs, err := embedOneBatch(cctx, client, baseURL, apiKey, modelName, truncated[start:end])
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
 				return
 			}
-			for _, d := range result.Data {
-				allVecs[start+d.Index] = d.Embedding
+			// Disjoint index ranges per batch — safe to write without locking.
+			for i, v := range vecs {
+				allVecs[start+i] = v
 			}
-		}()
-		if err != nil {
-			return nil, err
-		}
+		}(start, end)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return allVecs, nil
+}
+
+// embedOneBatch sends a single /embeddings request for one batch and returns the
+// per-input vectors (indexed within the batch). Fails loud on non-2xx and always
+// closes the response body.
+func embedOneBatch(ctx context.Context, client *http.Client, baseURL, apiKey, modelName string, batch []string) ([][]float64, error) {
+	reqBody := M{"model": modelName, "input": batch}
+	reqBytes, _ := json.Marshal(reqBody)
+	url := BuildURL(baseURL, "/embeddings")
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("embedding request build failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	return allVecs, nil
+	resp, err := doWithRetry(ctx, client, req)
+	if err != nil {
+		return nil, fmt.Errorf("embedding request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Fail loud on non-2xx — do NOT decode a body that isn't a real embedding
+	// payload and silently hand back zero vectors.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return nil, fmt.Errorf("embedding returned %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+	}
+	if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
+		return nil, fmt.Errorf("embedding decode failed: %w", decErr)
+	}
+	vecs := make([][]float64, len(batch))
+	for _, d := range result.Data {
+		if d.Index >= 0 && d.Index < len(vecs) {
+			vecs[d.Index] = d.Embedding
+		}
+	}
+	return vecs, nil
 }
 
 // CallChatLLM makes a non-streaming LLM call and returns the content (think tags stripped).

@@ -94,8 +94,34 @@
     "elapsed": "已用 {duration}",
     "took": "耗时 {duration}"
   },
+  "command": {
+    "placeholder": "跳转到…（页面 / 工具）",
+    "empty": "没有匹配项",
+    "hint": "跳转"
+  },
+  "workbench": {
+    "tab_diagnose": "诊断",
+    "tab_graph": "图谱",
+    "tab_mission": "任务",
+    "diag_empty_title": "提问后，这里显示它是怎么被理解的",
+    "diag_empty_hint": "分词 → 召回 → 本体映射，帮你定位到出错的“地址”",
+    "diag_question_label": "当前问题",
+    "diag_tokens_label": "分词（当前问题）",
+    "diag_rerun": "重新诊断",
+    "diag_rerun_loading": "诊断中…",
+    "diag_involved_label": "本体映射（命中的对象）",
+    "diag_fix_tokens": "改触发词 / 分词",
+    "diag_fix_ontology": "改本体描述",
+    "diag_fail": "诊断失败",
+    "diag_no_question": "先在左侧提一个问题",
+    "history_open_full": "完整历史",
+    "history_empty": "暂无历史会话",
+    "history_no_title": "未命名会话"
+  },
   "nav": {
     "data_assets": "数据资产",
+    "mode_ingest": "接入",
+    "mode_workbench": "工作台",
     "lakehouse": "湖仓",
     "er_diagram": "ER 图",
     "property_graph": "属性图",

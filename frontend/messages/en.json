@@ -94,8 +94,34 @@
     "elapsed": "{duration} elapsed",
     "took": "Took {duration}"
   },
+  "command": {
+    "placeholder": "Jump to… (page / tool)",
+    "empty": "No matches",
+    "hint": "Jump"
+  },
+  "workbench": {
+    "tab_diagnose": "Diagnose",
+    "tab_graph": "Graph",
+    "tab_mission": "Mission",
+    "diag_empty_title": "Ask a question — this shows how it was understood",
+    "diag_empty_hint": "Tokens → recall → ontology mapping — pinpoint the wrong 'address'",
+    "diag_question_label": "Current question",
+    "diag_tokens_label": "Tokenization (current question)",
+    "diag_rerun": "Re-diagnose",
+    "diag_rerun_loading": "Diagnosing…",
+    "diag_involved_label": "Ontology mapping (matched objects)",
+    "diag_fix_tokens": "Fix triggers / tokens",
+    "diag_fix_ontology": "Fix ontology",
+    "diag_fail": "Diagnose failed",
+    "diag_no_question": "Ask a question on the left first",
+    "history_open_full": "Full history",
+    "history_empty": "No conversations yet",
+    "history_no_title": "Untitled"
+  },
   "nav": {
     "data_assets": "Data Assets",
+    "mode_ingest": "Ingest",
+    "mode_workbench": "Workbench",
     "lakehouse": "Lakehouse",
     "er_diagram": "ER Diagram",
     "property_graph": "Property Graph",

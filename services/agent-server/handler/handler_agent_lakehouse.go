@@ -582,6 +582,11 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 			// Render with ledger-aware formatter: "🧠 线程记忆" header + body +
 			// optional "📚 线程其它记忆" orphan footer.
 			recallContextMD = ledger.FormatContextWithLedger(recallResult, tokens, userQuestion, l, l.TurnCount)
+
+			// Stream the 分词 + full recall to the frontend so the workbench's
+			// 任务 / 诊断 panels render straight from the SSE stream — no extra
+			// client-side HTTP round-trip for the same data.
+			sendSSEFull("recall", M{"tokens": tokens, "recall": recallResult})
 		}
 
 		// Builder ledger — loaded for builder threads (parallel to the query ledger block above).

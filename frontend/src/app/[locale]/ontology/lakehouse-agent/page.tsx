@@ -14,7 +14,7 @@ import { llmDisplay } from '@/lib/llmDisplay'
 import { CyberLoader } from '@/components/ui/CyberLoader'
 import {
   Send, Bot, User, ChevronDown, ChevronRight, BookOpen, FileText, Database, Play,
-  Maximize2, Minimize2, Link2, GitBranch, Check, X, Square, Brain
+  Maximize2, Minimize2, Link2, GitBranch, Check, X, Square, Brain, History, ExternalLink
 } from 'lucide-react'
 import { ResultViewer } from '@/components/ui/ResultViewer'
 import { BuilderProposeOdCard } from '@/components/lakehouse-agent/BuilderProposeOdCard'
@@ -23,12 +23,15 @@ import { BuilderProposeLinkCard } from '@/components/lakehouse-agent/BuilderProp
 import { PlanGraph, type PlanTrace } from '@/components/lakehouse-agent/PlanGraph'
 import { AnalysisPlan, type AnalysisPlanResult } from '@/components/lakehouse-agent/AnalysisPlan'
 import { MissionLedger, type Mission } from '@/components/lakehouse-agent/MissionLedger'
-import { renderDataTemplates } from '@/components/lakehouse-agent/dataTemplate'
+import { renderDataTemplates, collectStepResults } from '@/components/lakehouse-agent/dataTemplate'
+import { splitAnswerSegments } from '@/components/lakehouse-agent/answerChart'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Link } from '@/i18n/navigation'
 import type { OntKnowledge, OntCausality, OntObjectType, OntLinkType, OntLearnedFact, OntFactLink, LLMConfig, LLMRoleBinding } from '@/types/api'
 import { OntologyGraph, type GraphHighlight, type GraphLayoutMode } from '@/components/ui/OntologyGraph'
+import { DiagnosePanel } from '@/components/lakehouse-agent/DiagnosePanel'
+import type { RecallResult } from '@/components/lakehouse-agent/RecallDiagnostics'
 import {
   MotionGroup,
   MotionGroupItem,
@@ -167,6 +170,40 @@ function JsonView({ data, depth = 0 }: { data: unknown; depth?: number }) {
     )
   }
   return <span className="text-gray-500">{String(data)}</span>
+}
+
+// AnswerBody renders an assistant answer, splitting out any 「chart …」 schema
+// the AI emits for a large result. Text runs through renderDataTemplates +
+// markdown as before; each chart schema is drawn as a visualization from its
+// source table's rows (collectStepResults). The tool only fetched the data —
+// the chart is rendered HERE, inside the answer, from the AI's schema; concrete
+// numbers never come from the LLM. If the source rows aren't present yet (mid
+// stream) or can't be found, the raw token is shown as text (graceful).
+function AnswerBody({ content, functionCalls }: {
+  content: string
+  functionCalls: Parameters<typeof renderDataTemplates>[1]
+}) {
+  const segments = useMemo(() => splitAnswerSegments(content || ''), [content])
+  const steps = useMemo(() => collectStepResults(functionCalls), [functionCalls])
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (seg.kind === 'text') {
+          if (!seg.text.trim()) return null
+          return <StreamMarkdown key={i} content={renderDataTemplates(seg.text, functionCalls)} />
+        }
+        const step = steps.get(seg.spec.from)
+        if (!step || step.rows.length === 0) {
+          return <StreamMarkdown key={i} content={seg.raw} />
+        }
+        return (
+          <div key={i} className="my-2">
+            <ResultViewer data={JSON.stringify(step.rows)} chartSpec={seg.spec} />
+          </div>
+        )
+      })}
+    </>
+  )
 }
 
 function StreamMarkdown({ content, className = '' }: { content: unknown; className?: string }) {
@@ -594,6 +631,7 @@ function StreamingDot() {
 
 function LakehouseAgentChat() {
   const t = useTranslations('agent.main')
+  const tw = useTranslations('workbench')
   const industrial = useStyleMode().mode === 'industrial'
   const searchParams = useSearchParams()
   const { currentProject } = useProject()
@@ -670,6 +708,27 @@ function LakehouseAgentChat() {
 
   const [graphFullscreen, setGraphFullscreen] = useState(false)
   const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-od')
+  // Right pane tabs. 任务 (mission/reachability + the question's live 分词) is the
+  // default and leads, since the agent forcibly tokenizes + judges reachability
+  // for every question as it answers; 诊断 / 图谱 follow.
+  const [panelTab, setPanelTab] = useState<'mission' | 'diagnose' | 'graph'>('mission')
+  // 分词 + 召回 for the current turn, delivered by the agent's 'recall' SSE event
+  // (not a client-side HTTP call). Feeds both the 任务 and 诊断 panels.
+  const [streamRecall, setStreamRecall] = useState<{ tokens: string[]; recall: RecallResult } | null>(null)
+  // History preview drawer — pick a past thread without leaving the workbench.
+  type HistoryThread = { id: string; title: string; agentType?: 'lakehouse' | 'builder'; updatedAt: string }
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyThreads, setHistoryThreads] = useState<HistoryThread[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const openHistory = async () => {
+    setHistoryOpen(true)
+    setHistoryLoading(true)
+    try {
+      const res = await api<{ data: HistoryThread[] }>(`/ontology/lakehouse-agent-threads?projectId=${currentProject?.id}`)
+      setHistoryThreads(res.data || [])
+    } catch { /* ignore — drawer shows empty state */ }
+    finally { setHistoryLoading(false) }
+  }
 
   // Agent LLM binding — 让用户在顶部直接切换 Agent 用的模型，
   // 写入 /llm-role-binding（roleName=agent）。下一轮发送即生效。
@@ -761,6 +820,7 @@ function LakehouseAgentChat() {
   const loadThread = useCallback(async (id: string) => {
     if (!id) return
     setLoadingThread(true)
+    setStreamRecall(null)
     try {
       const res = await api<{
         id: string
@@ -832,6 +892,7 @@ function LakehouseAgentChat() {
   const startNewThread = () => {
     setThreadId('')
     setMessages([])
+    setStreamRecall(null)
     setBranchStack([])
     setThreadStatus('active')
     setAmbiguousKeyword('')
@@ -847,6 +908,7 @@ function LakehouseAgentChat() {
     if (!messageText) setInput('')
     setLoading(true)
     setGraphHighlight(null)
+    setStreamRecall(null)
 
     const assistantIdx = newMessages.length
     setMessages(prev => [...prev, { role: 'assistant', content: '', functionCalls: [] }])
@@ -946,6 +1008,10 @@ function LakehouseAgentChat() {
             } else if (evt.type === 'done') {
               if (evt.promptTokens) current = { ...current, promptTokens: evt.promptTokens as number, completionTokens: evt.completionTokens as number, totalTokens: evt.totalTokens as number }
               if (evt.modelName) current = { ...current, modelName: evt.modelName as string }
+            } else if (evt.type === 'recall') {
+              // 分词 + 召回 straight from the agent's pipeline — populates the
+              // 任务/诊断 panels without any extra client HTTP call.
+              setStreamRecall({ tokens: (evt.tokens as string[]) || [], recall: evt.recall as RecallResult })
             }
             setMessages(prev => {
               const n = [...prev]
@@ -996,6 +1062,17 @@ function LakehouseAgentChat() {
   const toggleTool = (key: string) => setExpandedTools(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const toggleThinking = (idx: number) => setExpandedThinking(prev => { const n = new Set(prev); n.has(idx) ? n.delete(idx) : n.add(idx); return n })
 
+  // Current question's 分词 — taken straight from the agent's 'recall' SSE event
+  // (no extra HTTP). strongHit = the token matched at least one keyword.
+  // MUST stay ABOVE the early return below: putting a hook after the
+  // `if (loadingThread)` return changes the hook count between renders and
+  // crashes with React #300 when a thread loads.
+  const currentTurnTokens = useMemo(() => {
+    if (!streamRecall) return []
+    const td = streamRecall.recall?.tokenDetails || {}
+    return streamRecall.tokens.map(t => ({ token: t, strongHit: (td[t]?.length ?? 0) > 0 }))
+  }, [streamRecall])
+
   if (loadingThread) return <div className="flex h-64 items-center justify-center"><CyberLoader /></div>
 
   // Last streaming message (for fade-in during active SSE)
@@ -1004,7 +1081,7 @@ function LakehouseAgentChat() {
   return (
     <div className="flex flex-col overflow-hidden h-full">
       {/* Header */}
-      <div className={`flex items-center justify-between px-4 py-2.5 flex-shrink-0 bg-white ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-200'}`}>
+      <div className={`flex h-14 items-center justify-between px-4 flex-shrink-0 bg-white ${industrial ? 'border-b-2 border-ink' : 'border-b border-gray-200'}`}>
         <div className="flex items-center gap-3">
           {industrial ? (
             // min-width pins the title cell so the [QUERY|BUILDER] toggle to its
@@ -1125,15 +1202,99 @@ function LakehouseAgentChat() {
             {graphFullscreen ? t('header.graph_exit_fullscreen') : t('header.graph_fullscreen')}
           </Button>
           <Button variant="ghost" size="sm" onClick={startNewThread}>{t('header.new_thread')}</Button>
-          <Link href={`/ontology/lakehouse-agent/history?mode=${mode}`} className="border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-500 hover:text-gray-800 hover:border-gray-400 transition-colors">{t('header.history')}</Link>
+          <button onClick={openHistory} className="border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-500 hover:text-gray-800 hover:border-gray-400 transition-colors">{t('header.history')}</button>
         </div>
       </div>
 
-      {/* Body: Graph + Chat */}
-      <div className="flex flex-1 min-h-0">
-        {/* Lakehouse / builder left pane — Graph + Od list. */}
+      {/* Body: Chat (primary, left) + diagnostics panel (right). flex-row-reverse
+          keeps the chat — where you act — on the left while the panel's DOM stays
+          after it; the panel opens on the 诊断 tab (graph / mission one click away). */}
+      <div className="flex flex-row-reverse flex-1 min-h-0">
+        {/* History panel — PUSHES the workbench left (not an overlay): in
+            flex-row-reverse, being the first DOM child renders it on the far
+            right, and the flex-1 chat shrinks to make room. Pick a past thread
+            in place; the panel stays open so you can browse. */}
+        {historyOpen && (
+          <div className="flex w-[320px] flex-shrink-0 flex-col overflow-hidden border-l border-gray-200 bg-white">
+            <div className="flex h-14 flex-shrink-0 items-center justify-between border-b border-gray-200 bg-gray-50 px-3">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-gray-600" />
+                <span className="text-sm font-semibold text-gray-800">{t('header.history')}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Link
+                  href={`/ontology/lakehouse-agent/history?mode=${mode}`}
+                  onClick={() => setHistoryOpen(false)}
+                  className="inline-flex items-center gap-1 rounded border border-transparent px-2 py-1 text-[10px] text-gray-500 hover:border-gray-200 hover:bg-white hover:text-blue-600"
+                  title={tw('history_open_full')}
+                >
+                  <ExternalLink className="h-3 w-3" />{tw('history_open_full')}
+                </Link>
+                <button onClick={() => setHistoryOpen(false)} className="p-1 text-gray-400 hover:text-gray-700" title={t('ledger.close')}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {historyLoading && <div className="p-4 text-sm text-gray-500">…</div>}
+              {!historyLoading && historyThreads.filter(th => (th.agentType || 'lakehouse') === mode).length === 0 && (
+                <div className="p-4 text-sm text-gray-500">{tw('history_empty')}</div>
+              )}
+              {!historyLoading && (
+                <div className="divide-y divide-gray-100">
+                  {historyThreads
+                    .filter(th => (th.agentType || 'lakehouse') === mode)
+                    .map(th => (
+                      <button
+                        key={th.id}
+                        onClick={() => { void loadThread(th.id) }}
+                        className={`flex w-full flex-col items-start gap-0.5 px-4 py-2.5 text-left transition-colors hover:bg-gray-50 ${th.id === threadId ? 'bg-gray-50' : ''}`}
+                      >
+                        <span className="w-full truncate text-sm text-gray-800">{th.title || tw('history_no_title')}</span>
+                        <span className="text-[11px] tabular-nums text-gray-400">{new Date(th.updatedAt).toLocaleString('zh-CN')}</span>
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {/* Right pane — tabbed: 诊断 (default) / 图谱 / 任务. */}
         {(
-        <div className={`${graphFullscreen ? 'w-full' : 'w-[55%]'} border-r border-gray-200 flex flex-col overflow-hidden`}>
+        <div className={`${graphFullscreen ? 'w-full' : 'w-[46%]'} border-l border-gray-200 flex flex-col overflow-hidden`}>
+          {/* Panel tab bar */}
+          <div className={`flex items-center gap-0 px-2 flex-shrink-0 bg-white ${industrial ? 'border-b border-ink' : 'border-b border-gray-200'}`}>
+            {([
+              ['mission', tw('tab_mission')],
+              ['diagnose', tw('tab_diagnose')],
+              ['graph', tw('tab_graph')],
+            ] as const).map(([key, label]) => {
+              const active = panelTab === key
+              return (
+                <button
+                  key={key}
+                  onClick={() => setPanelTab(key)}
+                  className={`-mb-px h-9 px-3 border-b-2 transition-colors ${
+                    industrial ? 'font-mono text-[11px] uppercase tracking-[0.12em]' : 'text-xs'
+                  } ${active ? 'border-ink font-semibold text-ink' : 'border-transparent text-gray-500 hover:text-ink'}`}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* 诊断 tab — diagnose-first default. */}
+          {panelTab === 'diagnose' && (
+            <DiagnosePanel
+              streamRecall={streamRecall}
+              graphHighlight={graphHighlight}
+            />
+          )}
+
+          {/* 图谱 tab */}
+          {panelTab === 'graph' && (
+          <>
           {/* Graph toolbar */}
           <div className="flex items-center gap-3 px-3 py-1.5 border-b border-gray-200 bg-gray-50 flex-shrink-0">
             <div className="flex gap-3">
@@ -1186,20 +1347,25 @@ function LakehouseAgentChat() {
             highlight={graphHighlight}
             layoutMode={graphLayoutMode}
           />
+          </>
+          )}
 
-          {/* 任务可达器 (MissionAct) — bottom half of the left pane. Shows the
-              current mission's full detail inline; history opens a modal. */}
-          {!graphFullscreen && (
-            <div className="flex-1 flex flex-col min-h-0">
-              <MissionLedger missions={missions} onRefresh={() => refetchMissions(threadId)} />
+          {/* 任务 tab — the mission ledger (任务可达器). The current question's 分词
+              is rendered inside the mission card, directly under the question
+              (passed as `tokens`), surfaced live from the ledger as the agent
+              runs — no manual trigger. */}
+          {panelTab === 'mission' && (
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <MissionLedger missions={missions} tokens={currentTurnTokens} onRefresh={() => refetchMissions(threadId)} />
             </div>
           )}
         </div>
         )}
 
-        {/* Right: AI Chat — visible unless graph is fullscreen. */}
+        {/* Chat — the primary column (left). Hidden only when the panel is
+            fullscreened. */}
         {!graphFullscreen && (
-          <div className="w-[45%] flex flex-col overflow-hidden bg-white">
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white">
             {/* Plan strip */}
             {todoItems.length > 0 && (
               <div className="border-b border-gray-200 px-3 py-2 flex-shrink-0 bg-gray-50">
@@ -1339,12 +1505,12 @@ function LakehouseAgentChat() {
                         {m.role === 'assistant' && m.content && (
                           isStreamingLast ? (
                             <MotionFade key={`stream-${i}`} className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
+                              <AnswerBody content={m.content} functionCalls={m.functionCalls} />
                               {loading && <StreamingDot />}
                             </MotionFade>
                           ) : (
                             <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 text-gray-800 text-sm leading-relaxed shadow-sm border border-gray-100">
-                              <StreamMarkdown content={renderDataTemplates(m.content, m.functionCalls)} />
+                              <AnswerBody content={m.content} functionCalls={m.functionCalls} />
                             </div>
                           )
                         )}
@@ -1419,11 +1585,12 @@ function LakehouseAgentChat() {
               <div ref={bottomRef} />
             </div>
 
-            {/* Input */}
-            <div className="flex gap-2 px-4 py-3 border-t border-gray-200 flex-shrink-0 bg-white">
+            {/* Input — bar height matches the sidebar footer (user/logout) row
+                so the bottom gridline aligns left-to-right. */}
+            <div className="flex h-14 items-center gap-2 px-4 border-t border-gray-200 flex-shrink-0 bg-white">
               <input
                 ref={chatInputRef}
-                className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:border-gray-400 focus:outline-none disabled:bg-gray-50 disabled:cursor-not-allowed transition-colors"
+                className="h-9 flex-1 border border-gray-200 rounded-xl px-4 text-sm focus:border-gray-400 focus:outline-none disabled:bg-gray-50 disabled:cursor-not-allowed transition-colors"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
