@@ -61,6 +61,90 @@ test('resolveReference: WHERE on unknown filter column → null', () => {
   assert.equal(resolveReference("sum(t1.amount WHERE region='x')", m), null)
 })
 
+// ── multi-equality WHERE (AND) ───────────────────────────────────────────
+// Mirrors the real e2e bug: agent emits
+//   「sum(t1.qty WHERE GEO=t1.GEO[i] AND MONTH=t1.MONTH[j])」
+// for a row-locator over two grouping dimensions. The single-equality form
+// can't address one cell of a (GEO × MONTH) cross — only the AND-conjoined
+// form can.
+const andFcs = [
+  {
+    result: {
+      step_id: 't1',
+      execution_result: JSON.stringify([
+        { GEO: 'PRC',  MONTH: '2026-01', qty: 100 },
+        { GEO: 'PRC',  MONTH: '2026-02', qty: 50 },
+        { GEO: 'EMEA', MONTH: '2026-01', qty: 80 },
+        { GEO: 'EMEA', MONTH: '2026-02', qty: 30 },
+      ]),
+    },
+  },
+]
+
+test('resolveReference: WHERE A AND B (two cell refs)', () => {
+  const m = collectStepResults(andFcs)
+  // PRC × 2026-02 → 50
+  assert.equal(
+    resolveReference('sum(t1.qty WHERE GEO=t1.GEO[1] AND MONTH=t1.MONTH[1])', m),
+    '50',
+  )
+})
+
+test('resolveReference: WHERE A AND B (literals)', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='EMEA' AND MONTH='2026-01')", m),
+    '80',
+  )
+})
+
+test('resolveReference: WHERE A AND B AND C — ≥3 equalities still work', () => {
+  const triFcs = [{ result: { step_id: 't1', execution_result: JSON.stringify([
+    { a: '1', b: '1', c: '1', v: 10 },
+    { a: '1', b: '1', c: '2', v: 99 },
+    { a: '1', b: '2', c: '1', v: 7 },
+  ]) } }]
+  const m = collectStepResults(triFcs)
+  assert.equal(resolveReference("sum(t1.v WHERE a='1' AND b='1' AND c='1')", m), '10')
+})
+
+test('resolveReference: case-insensitive AND splitter', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='PRC' and MONTH='2026-01')", m),
+    '100',
+  )
+})
+
+test('resolveReference: AND with one unknown filter col → null', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='PRC' AND ZONE='APAC')", m),
+    null,
+  )
+})
+
+test('resolveReference: AND with broken cell ref aborts whole expr', () => {
+  const m = collectStepResults(andFcs)
+  // out-of-range index on the second clause's cell ref → null, not silent skip
+  assert.equal(
+    resolveReference('sum(t1.qty WHERE GEO=t1.GEO[0] AND MONTH=t1.MONTH[99])', m),
+    null,
+  )
+})
+
+test('resolveReference: AND inside arithmetic expression', () => {
+  const m = collectStepResults(andFcs)
+  // (PRC,Jan)=100 + (EMEA,Jan)=80 = 180
+  assert.equal(
+    resolveReference(
+      "sum(t1.qty WHERE GEO='PRC' AND MONTH='2026-01') + sum(t1.qty WHERE GEO='EMEA' AND MONTH='2026-01')",
+      m,
+    ),
+    '180',
+  )
+})
+
 test('renderDataTemplates: WHERE refs substitute per row', () => {
   const text = '上海「sum(t1.amount WHERE city=\'上海\')」、北京「sum(t1.amount WHERE city=\'北京\')」'
   const out = renderDataTemplates(text, fcs)

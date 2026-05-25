@@ -13,12 +13,18 @@
 //                                            to a scalar
 //
 // An <expr> is built from:
-//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE fcol=<val>)
+//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE clause)
 //                       agg ∈ sum|avg|count|min|max
+//                       clause is one of:
+//                         fcol=<val>                              — single equality
+//                         fcol1=<val1> AND fcol2=<val2> [AND ...] — n equalities AND'd
 //                       <val> is either a literal ('上海') or a cell ref
 //                       tN.col[i] — a cell ref pulls the filter value out of
 //                       real data, so it is never a literal the LLM typed
-//                       (and therefore never mistyped / hallucinated)
+//                       (and therefore never mistyped / hallucinated). Each
+//                       AND-conjoined equality is applied in order; rows must
+//                       match every clause. OR / ranges / other operators are
+//                       not supported.
 //   - numeric literals
 //   - operators + - * /  and parentheses
 //
@@ -55,8 +61,19 @@ const AGGS: Record<string, Agg> = {
 const REF_RE = /「([^」]+)」/g
 // agg( … ) — the inner part is parsed separately by INNER_RE.
 const SCALAR_RE = /^([a-zA-Z_]+)\(\s*(.+?)\s*\)$/
-// tN.column  with an optional  WHERE fcol = 'value'  clause (= or ==).
-const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(\S+?)\s*==?\s*(.+?))?$/i
+// tN.column  with an optional  WHERE <clause>  ; <clause> is one or more
+// `fcol = value` equalities AND'd together (= or ==). The whole clause is
+// captured raw and split + parsed by resolveAggAtom — keeping the regex
+// simple sidesteps the impossible job of recognising AND boundaries inside
+// values that may themselves contain spaces, brackets, or quotes.
+const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(.+))?$/i
+// One equality within a WHERE clause: fcol = value or fcol == value.
+const EQ_RE = /^(\S+?)\s*==?\s*(.+)$/
+// WHERE clause splitter: ` AND ` (case-insensitive). Whitespace either side is
+// required, so an `AND` inside a value (e.g. an enum literal 'AND'-ROAD) is not
+// split — values with whitespace would already need quoting, which today's
+// callers don't do. If quoting is added later, parse must too.
+const AND_SPLIT_RE = /\s+AND\s+/i
 // tN
 const TABLE_RE = /^(t\d+)$/
 // tN.col[i] — one cell: column `col`, row i (0-based) of step tN.
@@ -256,7 +273,13 @@ function resolveAtom(refText: string, steps: Map<string, StepResult>): number | 
   return null
 }
 
-/** resolveAggAtom handles the agg(tN.col [WHERE fcol=val]) form. */
+/**
+ * resolveAggAtom handles the agg(tN.col [WHERE clause]) form. The clause is
+ * one or more `fcol = value` equalities AND'd together. Each value is either
+ * a cell ref tN.col[i] (preferred — pulled from real data, so never typed)
+ * or a quoted literal. Any cell ref that fails to resolve aborts the whole
+ * reference (null), rather than silently dropping to a literal lookup.
+ */
 function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>): number | null {
   const agg = AGGS[scalar[1].toLowerCase()]
   if (!agg) return null
@@ -264,19 +287,27 @@ function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>
   if (!inner) return null
   const stepId = inner[1]
   const column = inner[2].trim()
-  const filterCol = inner[3]?.trim()
-  // The filter value is either a cell ref (tN.col[i] — resolved from real
-  // data) or a quoted literal. A cell ref that fails to resolve aborts the
-  // whole reference (null) rather than degrading to a literal lookup.
-  let filterVal: string | undefined
-  if (inner[4] !== undefined) {
-    const rawVal = inner[4].trim()
-    if (CELL_RE.test(rawVal)) {
-      const cell = resolveCellRef(rawVal, steps)
-      if (cell === null) return null
-      filterVal = cell
-    } else {
-      filterVal = stripQuotes(rawVal)
+  const whereClause = inner[3]?.trim()
+
+  // Parse the WHERE clause into a list of (filterCol, filterVal) pairs.
+  // Empty clause (no WHERE) → empty list, aggregate runs over all rows.
+  type Filter = { col: string; val: string }
+  const filters: Filter[] = []
+  if (whereClause) {
+    for (const rawEq of whereClause.split(AND_SPLIT_RE)) {
+      const eq = rawEq.trim().match(EQ_RE)
+      if (!eq) return null
+      const fcol = eq[1].trim()
+      const rawVal = eq[2].trim()
+      let val: string
+      if (CELL_RE.test(rawVal)) {
+        const cell = resolveCellRef(rawVal, steps)
+        if (cell === null) return null
+        val = cell
+      } else {
+        val = stripQuotes(rawVal)
+      }
+      filters.push({ col: fcol, val })
     }
   }
 
@@ -284,11 +315,11 @@ function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>
   if (!step) return null
 
   let rows = step.rows
-  if (filterCol && filterVal !== undefined) {
+  for (const f of filters) {
     if (rows.length === 0) return null
-    const fc = resolveColumn(Object.keys(rows[0]), filterCol)
+    const fc = resolveColumn(Object.keys(rows[0]), f.col)
     if (!fc) return null
-    rows = rows.filter(r => String(r[fc] ?? '') === filterVal)
+    rows = rows.filter(r => String(r[fc] ?? '') === f.val)
   }
   const res = aggregate(rows, agg, column)
   return res.ok ? res.value : null
