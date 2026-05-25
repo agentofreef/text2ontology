@@ -61,6 +61,90 @@ test('resolveReference: WHERE on unknown filter column → null', () => {
   assert.equal(resolveReference("sum(t1.amount WHERE region='x')", m), null)
 })
 
+// ── multi-equality WHERE (AND) ───────────────────────────────────────────
+// Mirrors the real e2e bug: agent emits
+//   「sum(t1.qty WHERE GEO=t1.GEO[i] AND MONTH=t1.MONTH[j])」
+// for a row-locator over two grouping dimensions. The single-equality form
+// can't address one cell of a (GEO × MONTH) cross — only the AND-conjoined
+// form can.
+const andFcs = [
+  {
+    result: {
+      step_id: 't1',
+      execution_result: JSON.stringify([
+        { GEO: 'PRC',  MONTH: '2026-01', qty: 100 },
+        { GEO: 'PRC',  MONTH: '2026-02', qty: 50 },
+        { GEO: 'EMEA', MONTH: '2026-01', qty: 80 },
+        { GEO: 'EMEA', MONTH: '2026-02', qty: 30 },
+      ]),
+    },
+  },
+]
+
+test('resolveReference: WHERE A AND B (two cell refs)', () => {
+  const m = collectStepResults(andFcs)
+  // PRC × 2026-02 → 50
+  assert.equal(
+    resolveReference('sum(t1.qty WHERE GEO=t1.GEO[1] AND MONTH=t1.MONTH[1])', m),
+    '50',
+  )
+})
+
+test('resolveReference: WHERE A AND B (literals)', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='EMEA' AND MONTH='2026-01')", m),
+    '80',
+  )
+})
+
+test('resolveReference: WHERE A AND B AND C — ≥3 equalities still work', () => {
+  const triFcs = [{ result: { step_id: 't1', execution_result: JSON.stringify([
+    { a: '1', b: '1', c: '1', v: 10 },
+    { a: '1', b: '1', c: '2', v: 99 },
+    { a: '1', b: '2', c: '1', v: 7 },
+  ]) } }]
+  const m = collectStepResults(triFcs)
+  assert.equal(resolveReference("sum(t1.v WHERE a='1' AND b='1' AND c='1')", m), '10')
+})
+
+test('resolveReference: case-insensitive AND splitter', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='PRC' and MONTH='2026-01')", m),
+    '100',
+  )
+})
+
+test('resolveReference: AND with one unknown filter col → null', () => {
+  const m = collectStepResults(andFcs)
+  assert.equal(
+    resolveReference("sum(t1.qty WHERE GEO='PRC' AND ZONE='APAC')", m),
+    null,
+  )
+})
+
+test('resolveReference: AND with broken cell ref aborts whole expr', () => {
+  const m = collectStepResults(andFcs)
+  // out-of-range index on the second clause's cell ref → null, not silent skip
+  assert.equal(
+    resolveReference('sum(t1.qty WHERE GEO=t1.GEO[0] AND MONTH=t1.MONTH[99])', m),
+    null,
+  )
+})
+
+test('resolveReference: AND inside arithmetic expression', () => {
+  const m = collectStepResults(andFcs)
+  // (PRC,Jan)=100 + (EMEA,Jan)=80 = 180
+  assert.equal(
+    resolveReference(
+      "sum(t1.qty WHERE GEO='PRC' AND MONTH='2026-01') + sum(t1.qty WHERE GEO='EMEA' AND MONTH='2026-01')",
+      m,
+    ),
+    '180',
+  )
+})
+
 test('renderDataTemplates: WHERE refs substitute per row', () => {
   const text = '上海「sum(t1.amount WHERE city=\'上海\')」、北京「sum(t1.amount WHERE city=\'北京\')」'
   const out = renderDataTemplates(text, fcs)
@@ -203,4 +287,116 @@ test('rowsToMarkdownTable: 1x1 result renders as a bare number', () => {
 test('formatNumber: thousands + decimals', () => {
   assert.equal(formatNumber(8380820), '8,380,820')
   assert.equal(formatNumber(1234.5), '1,234.5')
+})
+
+// ── strip duplicate hand-typed tables ────────────────────────────────────
+// LLM is told never to transcribe cells by hand. When it relapses, the user
+// sees both the LLM's hand-typed table (numbers possibly hallucinated) AND
+// the canonical 「tN」-rendered table. The strip pass deletes the former.
+
+test('renderDataTemplates: strips hand-typed table when a 「tN」 exists', () => {
+  const text = `观察到：
+
+| city | amount |
+| --- | --- |
+| 上海 | 1 |
+| 北京 | 2 |
+| 成都 | 3 |
+
+完整数据：「t1」`
+  const out = renderDataTemplates(text, fcs)
+  // Hand-typed values must be gone — those numbers (1/2/3) are not real.
+  assert.ok(!out.includes('| 上海 | 1 |'))
+  assert.ok(!out.includes('| 北京 | 2 |'))
+  // The 「t1」 expansion still produced the real table with real numbers.
+  assert.ok(out.includes('上海'))
+  assert.ok(out.includes('2,735,766'))
+})
+
+test('renderDataTemplates: keeps hand-typed table when no resolvable 「tN」', () => {
+  // No 「tN」 reference at all → strip doesn't fire (the LLM may have a
+  // legitimate reason to write a literal table).
+  const text = `分类表：
+
+| key | val |
+| --- | --- |
+| a | 1 |
+
+完。`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| a | 1 |'))
+})
+
+test('renderDataTemplates: strips multiple hand-typed tables', () => {
+  const text = `第一份：
+
+| x | y |
+| --- | --- |
+| 1 | 2 |
+
+第二份：
+
+| u | v |
+| --- | --- |
+| 7 | 8 |
+
+真实结果：「t1」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(!out.includes('| 1 | 2 |'))
+  assert.ok(!out.includes('| 7 | 8 |'))
+  // canonical from 「t1」 still present
+  assert.ok(out.includes('2,735,766'))
+})
+
+test('renderDataTemplates: ignores stray pipe-containing sentences', () => {
+  // Not a markdown table (no `---` separator line) — must not be stripped.
+  const text = `结果：a | b | c 然后……「t1」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('a | b | c'))
+})
+
+test('renderDataTemplates: inline 「tN」 gets blank-line padding for markdown', () => {
+  // "完整数据：「t1」trailing" → without padding, the table header glues onto
+  // "完整数据：" and the next text glues onto the last row. markdown then
+  // parses the whole thing as one paragraph and the table fails to render.
+  // Padding with \n\n on both sides forces a proper block boundary.
+  const text = '完整数据：「t1」 后续文本'
+  const out = renderDataTemplates(text, fcs)
+  // Table header line must NOT be glued to the preceding text.
+  assert.ok(!/完整数据：\| city/.test(out), 'table must not be glued to leading text')
+  // It must be preceded by a blank line.
+  assert.ok(/完整数据：\n\n\| city/.test(out), 'padding must precede the table')
+  // The trailing text must NOT be on the same line as the last table row.
+  assert.ok(!/872,018 \| 后续文本/.test(out), 'trailing text must not be glued to table')
+  // Last row must be followed by a blank line before the trailing text.
+  assert.ok(/872,018 \|\n\n 后续文本/.test(out), 'padding must follow the table')
+})
+
+test('renderDataTemplates: scalar 「sum(...)」 stays inline (no padding)', () => {
+  // Single-line scalar substitutions don't need block-level separation.
+  // Padding them would split a sentence — confirm we only pad multi-line.
+  const text = '总营收「sum(t1.amount)」元。'
+  const out = renderDataTemplates(text, fcs)
+  assert.equal(out, '总营收5,581,132元。')
+})
+
+test('renderDataTemplates: 「tN」 at start of string also pads', () => {
+  // Edge: at offset 0, leading \n\n is harmless (markdown ignores leading
+  // blanks). Confirm rendering still succeeds.
+  const text = '「t1」'
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| city | amount |'))
+  // Padded form: starts with \n\n then the table.
+  assert.ok(out.startsWith('\n\n| city | amount |'))
+})
+
+test('renderDataTemplates: unresolvable 「tN」 disarms the strip', () => {
+  // Hand-typed table stays because 「t9」 (unknown) can't render anything.
+  const text = `| k | v |
+| --- | --- |
+| only | table |
+
+「t9」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| only | table |'))
 })

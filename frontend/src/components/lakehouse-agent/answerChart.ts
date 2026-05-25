@@ -14,6 +14,18 @@
 
 export type ChartType = 'bar' | 'line' | 'pie' | 'area'
 
+/**
+ * One literal equality filter applied to source rows before plotting.
+ * `col` is resolved via ResultViewer's tolerant key matcher (same as x/y/series)
+ * so case / whitespace / underscore drift is forgiven. `val` is matched as a
+ * trimmed, case-insensitive string against the resolved column's value.
+ * Multi-filter is AND'd (every row must satisfy every entry).
+ */
+export interface ChartFilter {
+  col: string
+  val: string
+}
+
 export interface ChartSpec {
   type: ChartType
   /** Step id of the source table, e.g. "t1" — resolved via collectStepResults. */
@@ -24,6 +36,15 @@ export interface ChartSpec {
   y: string[]
   /** Optional grouping column → one series per distinct value (single-y only). */
   series?: string
+  /**
+   * Optional row pre-filter. Lets the LLM scope a chart to one slice of the
+   * source table without an extra query. Multi-clause: a value semicolon-
+   * separated list of `col=val` pairs is AND'd. Unrecognised columns are
+   * skipped silently (mirrors the resolveColumn-level forgiveness elsewhere).
+   * Empty result-set after filter falls back to "no chart" gracefully —
+   * better than a misleading empty chart.
+   */
+  filter?: ChartFilter[]
 }
 
 export type AnswerSegment =
@@ -35,7 +56,27 @@ export type AnswerSegment =
 // becomes a chart once the 」 arrives.
 const CHART_TOKEN_RE = /「\s*chart\b[^」]*」/g
 
-const KNOWN_KEYS = ['type', 'from', 'x', 'y', 'series'] as const
+// ```chart\nchart … \n``` — markdown-fence variant. LLMs trained on lots of
+// markdown habitually wrap any "config-looking" block in a triple-backtick
+// fence; rewriting these to the canonical 「chart …」 token at parse time
+// keeps the downstream tokeniser single-pattern. Fence language tag is
+// optional (`` ``` `` or `` ```chart ``); the body's first non-blank line
+// MUST start with `chart ` for the rewrite to fire — guards against
+// stealing a code sample that just happens to be inside a fence.
+const FENCED_CHART_RE = /```(?:chart)?\s*\n(chart\b[\s\S]+?)\n?```/g
+
+// normalizeFencedCharts rewrites every ```chart … ``` fence in `s` to the
+// canonical 「chart …」 token so the rest of the parser sees one shape.
+// Body whitespace is collapsed to single spaces so a multi-line key=value
+// block (also a common LLM habit) folds into the single-line form the
+// tokeniser expects.
+function normalizeFencedCharts(s: string): string {
+  return s.replace(FENCED_CHART_RE, (_, body) => {
+    return '「' + body.replace(/\s+/g, ' ').trim() + '」'
+  })
+}
+
+const KNOWN_KEYS = ['type', 'from', 'x', 'y', 'series', 'filter'] as const
 
 /**
  * parseChartToken parses the inside of a 「chart …」 token into a ChartSpec, or
@@ -69,7 +110,26 @@ export function parseChartToken(token: string): ChartSpec | null {
     typeRaw === 'line' || typeRaw === 'pie' || typeRaw === 'area' ? typeRaw : 'bar'
 
   const series = get('series') || undefined
-  return { type, from, x, y, series }
+
+  // filter=COL1=VAL1[;COL2=VAL2[;...]] — semicolon separates clauses so the
+  // common value-containing-comma case (e.g. enum list, English prose) stays
+  // unambiguous against `y=a,b,c`. Each clause splits on the FIRST `=`, so
+  // values that themselves contain `=` are preserved verbatim.
+  const filterRaw = get('filter')
+  let filter: ChartFilter[] | undefined
+  if (filterRaw) {
+    const clauses: ChartFilter[] = []
+    for (const part of filterRaw.split(';')) {
+      const eq = part.indexOf('=')
+      if (eq < 0) continue
+      const col = part.slice(0, eq).trim()
+      const val = part.slice(eq + 1).trim()
+      if (col && val) clauses.push({ col, val })
+    }
+    if (clauses.length > 0) filter = clauses
+  }
+
+  return { type, from, x, y, series, filter }
 }
 
 /**
@@ -80,21 +140,26 @@ export function parseChartToken(token: string): ChartSpec | null {
  * than a blank or wrong chart).
  */
 export function splitAnswerSegments(content: string): AnswerSegment[] {
-  if (!content || content.indexOf('「') < 0) {
-    return [{ kind: 'text', text: content }]
+  // Pre-normalise ```chart … ``` markdown fences to the canonical 「chart …」
+  // token so the rest of the segmenter only needs to know one shape. This
+  // also catches a common streamed-typo case: the LLM emits a fence even
+  // when the prompt asks for the full-width token form.
+  const normalized = normalizeFencedCharts(content)
+  if (!normalized || normalized.indexOf('「') < 0) {
+    return [{ kind: 'text', text: normalized }]
   }
   const out: AnswerSegment[] = []
   let last = 0
-  for (const m of content.matchAll(CHART_TOKEN_RE)) {
+  for (const m of normalized.matchAll(CHART_TOKEN_RE)) {
     const start = m.index ?? 0
     const raw = m[0]
     const spec = parseChartToken(raw)
     if (!spec) continue // leave unparseable token inside its surrounding text
-    if (start > last) out.push({ kind: 'text', text: content.slice(last, start) })
+    if (start > last) out.push({ kind: 'text', text: normalized.slice(last, start) })
     out.push({ kind: 'chart', spec, raw })
     last = start + raw.length
   }
-  if (last < content.length) out.push({ kind: 'text', text: content.slice(last) })
-  if (out.length === 0) out.push({ kind: 'text', text: content })
+  if (last < normalized.length) out.push({ kind: 'text', text: normalized.slice(last) })
+  if (out.length === 0) out.push({ kind: 'text', text: normalized })
   return out
 }

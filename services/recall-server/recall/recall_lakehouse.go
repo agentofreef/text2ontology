@@ -117,13 +117,31 @@ func BuildLakehouseContext(ctx context.Context, db *sql.DB, projectID string, to
 		allHits = append(allHits, tr.lhHits...)
 	}
 
+	// ── Step 1.55: Lineage normalisation for value-aliases ──
+	// A single business value (e.g. an SKU code) often lives in one canonical
+	// property and is denormalised down ont_causality(join_key) edges into N
+	// downstream copies. Pre-normalisation, the same token EXACT-matches all N
+	// copies and downstream consumers see N "candidates" for one datum. Walking
+	// each hit up the join_key DAG to its root collapses the duplicates onto
+	// the canonical Od, so the LLM gets a single anchor and the query planner
+	// is free to JOIN downstream wherever the metric actually lives.
+	//
+	// Column-name aliases (is_column_name=true) are untouched: those identify
+	// the column itself, not a value stored in it.
+	//
+	// Runs BEFORE Step 1.6 so the EXACT disambiguator only sees the post-
+	// normalised cardinality (most "ambiguous" cases collapse here, leaving
+	// 1.6 to handle genuinely cross-lineage collisions).
+	lineage := buildPropertyLineage(db, projectID)
+	allHits = normalizeValueAliasHits(allHits, lineage)
+
 	// ── Step 1.6: EXACT-tier disambiguation cascade ──
-	// When a single token produces N>1 EXACT hits across different properties:
+	// Defensive fallback for genuine cross-lineage collisions that survived
+	// Step 1.55 (e.g. ontology missing the join_key edge):
 	//   1. Prefer candidates whose Od is already pinned by ANOTHER single-hit
 	//      token (using existing recall context to narrow scope)
 	//   2. Else if the candidate Ods are connected by an ont_causality(join_key)
 	//      edge, keep only the "1" side (dimension); drop the "N" side (fact).
-	//      Convention: from_od of the join_key causality is the "1" side.
 	//   3. Else keep all — leaves it for the existing ambiguity detector.
 	// FUZZY and VEC tier hits are unaffected.
 	allHits = applyExactDisambiguation(db, projectID, allHits)

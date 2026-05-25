@@ -32,8 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # - pandas / pbixray: PBIX 解析（pbix_to_csv.py + pbix_extract.py 必需）
 # 用 tsinghua 镜像 + retries 应对 daocloud / 国内网络 hash mismatch
 RUN pip install --no-cache-dir --retries 5 \
-    --index-url https://pypi.tuna.tsinghua.edu.cn/simple/ \
-    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
     xlrd openpyxl pandas pbixray
 COPY services/collector-server/scripts/ /app/scripts/
 ENV PBIX_SCRIPTS_DIR=/app/scripts

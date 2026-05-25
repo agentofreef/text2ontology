@@ -228,8 +228,9 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 				line += fmt.Sprintf("（属性: `%s`", c.PropertyName)
 				if c.PropertyDesc != "" {
 					pd := c.PropertyDesc
-					if len([]rune(pd)) > 40 {
-						pd = string([]rune(pd)[:40]) + "..."
+					limit := ambigPropDescLen()
+					if len([]rune(pd)) > limit {
+						pd = string([]rune(pd)[:limit]) + "..."
 					}
 					line += ": " + pd
 				}
@@ -620,7 +621,7 @@ func formatOdBlock(sb *strings.Builder, blk OdBlock, showMatchDetail bool, fullD
 			if !matchedNames[name] {
 				desc := ""
 				if d, ok := blk.AllPropDescs[name]; ok && d != "" {
-					desc = truncRunes(d, 15)
+					desc = truncRunes(d, unmatchedPropDescLen())
 				}
 				unmatchedRows = append(unmatchedRows, [2]string{name, desc})
 			}

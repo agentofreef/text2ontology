@@ -13,12 +13,18 @@
 //                                            to a scalar
 //
 // An <expr> is built from:
-//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE fcol=<val>)
+//   - aggregate atoms:  agg(tN.column)  or  agg(tN.column WHERE clause)
 //                       agg ∈ sum|avg|count|min|max
+//                       clause is one of:
+//                         fcol=<val>                              — single equality
+//                         fcol1=<val1> AND fcol2=<val2> [AND ...] — n equalities AND'd
 //                       <val> is either a literal ('上海') or a cell ref
 //                       tN.col[i] — a cell ref pulls the filter value out of
 //                       real data, so it is never a literal the LLM typed
-//                       (and therefore never mistyped / hallucinated)
+//                       (and therefore never mistyped / hallucinated). Each
+//                       AND-conjoined equality is applied in order; rows must
+//                       match every clause. OR / ranges / other operators are
+//                       not supported.
 //   - numeric literals
 //   - operators + - * /  and parentheses
 //
@@ -55,8 +61,19 @@ const AGGS: Record<string, Agg> = {
 const REF_RE = /「([^」]+)」/g
 // agg( … ) — the inner part is parsed separately by INNER_RE.
 const SCALAR_RE = /^([a-zA-Z_]+)\(\s*(.+?)\s*\)$/
-// tN.column  with an optional  WHERE fcol = 'value'  clause (= or ==).
-const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(\S+?)\s*==?\s*(.+?))?$/i
+// tN.column  with an optional  WHERE <clause>  ; <clause> is one or more
+// `fcol = value` equalities AND'd together (= or ==). The whole clause is
+// captured raw and split + parsed by resolveAggAtom — keeping the regex
+// simple sidesteps the impossible job of recognising AND boundaries inside
+// values that may themselves contain spaces, brackets, or quotes.
+const INNER_RE = /^(t\d+)\.(\S+?)(?:\s+WHERE\s+(.+))?$/i
+// One equality within a WHERE clause: fcol = value or fcol == value.
+const EQ_RE = /^(\S+?)\s*==?\s*(.+)$/
+// WHERE clause splitter: ` AND ` (case-insensitive). Whitespace either side is
+// required, so an `AND` inside a value (e.g. an enum literal 'AND'-ROAD) is not
+// split — values with whitespace would already need quoting, which today's
+// callers don't do. If quoting is added later, parse must too.
+const AND_SPLIT_RE = /\s+AND\s+/i
 // tN
 const TABLE_RE = /^(t\d+)$/
 // tN.col[i] — one cell: column `col`, row i (0-based) of step tN.
@@ -256,7 +273,13 @@ function resolveAtom(refText: string, steps: Map<string, StepResult>): number | 
   return null
 }
 
-/** resolveAggAtom handles the agg(tN.col [WHERE fcol=val]) form. */
+/**
+ * resolveAggAtom handles the agg(tN.col [WHERE clause]) form. The clause is
+ * one or more `fcol = value` equalities AND'd together. Each value is either
+ * a cell ref tN.col[i] (preferred — pulled from real data, so never typed)
+ * or a quoted literal. Any cell ref that fails to resolve aborts the whole
+ * reference (null), rather than silently dropping to a literal lookup.
+ */
 function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>): number | null {
   const agg = AGGS[scalar[1].toLowerCase()]
   if (!agg) return null
@@ -264,19 +287,27 @@ function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>
   if (!inner) return null
   const stepId = inner[1]
   const column = inner[2].trim()
-  const filterCol = inner[3]?.trim()
-  // The filter value is either a cell ref (tN.col[i] — resolved from real
-  // data) or a quoted literal. A cell ref that fails to resolve aborts the
-  // whole reference (null) rather than degrading to a literal lookup.
-  let filterVal: string | undefined
-  if (inner[4] !== undefined) {
-    const rawVal = inner[4].trim()
-    if (CELL_RE.test(rawVal)) {
-      const cell = resolveCellRef(rawVal, steps)
-      if (cell === null) return null
-      filterVal = cell
-    } else {
-      filterVal = stripQuotes(rawVal)
+  const whereClause = inner[3]?.trim()
+
+  // Parse the WHERE clause into a list of (filterCol, filterVal) pairs.
+  // Empty clause (no WHERE) → empty list, aggregate runs over all rows.
+  type Filter = { col: string; val: string }
+  const filters: Filter[] = []
+  if (whereClause) {
+    for (const rawEq of whereClause.split(AND_SPLIT_RE)) {
+      const eq = rawEq.trim().match(EQ_RE)
+      if (!eq) return null
+      const fcol = eq[1].trim()
+      const rawVal = eq[2].trim()
+      let val: string
+      if (CELL_RE.test(rawVal)) {
+        const cell = resolveCellRef(rawVal, steps)
+        if (cell === null) return null
+        val = cell
+      } else {
+        val = stripQuotes(rawVal)
+      }
+      filters.push({ col: fcol, val })
     }
   }
 
@@ -284,11 +315,11 @@ function resolveAggAtom(scalar: RegExpMatchArray, steps: Map<string, StepResult>
   if (!step) return null
 
   let rows = step.rows
-  if (filterCol && filterVal !== undefined) {
+  for (const f of filters) {
     if (rows.length === 0) return null
-    const fc = resolveColumn(Object.keys(rows[0]), filterCol)
+    const fc = resolveColumn(Object.keys(rows[0]), f.col)
     if (!fc) return null
-    rows = rows.filter(r => String(r[fc] ?? '') === filterVal)
+    rows = rows.filter(r => String(r[fc] ?? '') === f.val)
   }
   const res = aggregate(rows, agg, column)
   return res.ok ? res.value : null
@@ -453,9 +484,56 @@ export function resolveReference(inner: string, steps: Map<string, StepResult>):
 }
 
 /**
+ * MD_TABLE_RE matches a complete markdown table block: header row + separator
+ * row + at least one body row. The separator row's `---` cells are what tells
+ * us this is a real markdown table (not a stray `|`-containing sentence).
+ * Captured: leading newline (or start), then the whole block.
+ *
+ * Used by stripDuplicateTables to detect LLM-hand-typed tables that duplicate
+ * data already available via a 「tN」 reference.
+ */
+const MD_TABLE_RE = /(^|\n)((?:[ \t]*\|[^\n]+\|[ \t]*\n)(?:[ \t]*\|[\s\-:|]+\|[ \t]*\n)(?:[ \t]*\|[^\n]+\|[ \t]*\n?)+)/g
+
+/**
+ * stripDuplicateTables removes LLM-hand-typed markdown tables from an answer
+ * when there's already a resolvable 「tN」 reference that will render the
+ * canonical data table. This is policy enforcement: the LLM is told never to
+ * transcribe table cells by hand (numbers it types are at risk of being
+ * hallucinated), but it relapses. Rather than only nagging in the prompt, we
+ * silently delete the duplicate so the user only ever sees the one true
+ * rendering — the 「tN」 placeholder later expanded by resolveReference.
+ *
+ * Conservative trigger: only fires when at least one 「tN」 in the same answer
+ * resolves to a real step. If the answer has no resolvable reference, every
+ * hand-typed table is kept (the LLM has no alternative anyway).
+ *
+ * Edge cases — accepts as a known tradeoff for code simplicity:
+ *   - A legitimate hand-written comparison table that isn't a duplicate of
+ *     any tool result will be stripped if any 「tN」 also exists in the
+ *     answer. Real-world rare; user opted into this policy to stop the
+ *     numerically-unreliable transcription habit.
+ *   - The freshly-rendered table that 「tN」 expands to is NOT affected
+ *     because stripping runs BEFORE expansion (operator ordering matters).
+ */
+function stripDuplicateTables(text: string, steps: Map<string, StepResult>): string {
+  if (steps.size === 0) return text
+  // Is there any 「tN」 in this text that we can actually expand?
+  let hasResolvableRef = false
+  for (const m of text.matchAll(/「(t\d+)」/g)) {
+    if (steps.has(m[1])) { hasResolvableRef = true; break }
+  }
+  if (!hasResolvableRef) return text
+  return text.replace(MD_TABLE_RE, (_, leadingNL) => leadingNL)
+}
+
+/**
  * renderDataTemplates rewrites every 「…」 reference in `text` into its resolved
  * value (scalar number or markdown table). Unresolvable references are left
  * verbatim. The output is markdown, ready for the existing markdown renderer.
+ *
+ * Before substitution, hand-typed markdown tables that duplicate data already
+ * exposed by a 「tN」 reference are stripped — see stripDuplicateTables for
+ * why and the failure mode that justifies the policy.
  */
 export function renderDataTemplates(
   text: string,
@@ -464,8 +542,18 @@ export function renderDataTemplates(
   if (!text || text.indexOf('「') < 0) return text
   const steps = collectStepResults(functionCalls)
   if (steps.size === 0) return text
-  return text.replace(REF_RE, (raw, inner) => {
+  const cleaned = stripDuplicateTables(text, steps)
+  return cleaned.replace(REF_RE, (raw, inner) => {
     const resolved = resolveReference(inner, steps)
-    return resolved ?? raw
+    if (resolved === null) return raw
+    // Multi-line resolutions (currently: the whole-table markdown form) must
+    // be set off by blank lines on both sides, otherwise the markdown renderer
+    // glues the table header onto the preceding paragraph and the whole block
+    // degrades to inline text. Single-line resolutions (scalar numbers, 1x1
+    // table) substitute inline unchanged.
+    if (resolved.indexOf('\n') >= 0) {
+      return '\n\n' + resolved + '\n\n'
+    }
+    return resolved
   })
 }

@@ -90,6 +90,42 @@ var allowedAggregators = map[string]bool{
 // 指标 on the OD. Default on; set USE_PURE_METRIC=0 to disable (A/B / debug).
 var pureMetricEnabled = envFlagDefaultOn("USE_PURE_METRIC")
 
+// propertyOnOtherODs returns the names of every OTHER OD (other than
+// `excludeOD`, project-scoped) that carries a property whose name matches
+// `propName` byte-for-byte. Empty result on lookup error or no match.
+//
+// Purpose: when validation fails because a referenced property name doesn't
+// live on the primary OD the LLM chose, this lookup tells us where the name
+// DOES live, so the error hint can name a concrete retry path instead of
+// just listing the primary OD's columns. Universal — does not hardcode any
+// OD name, works for any property/OD combination in any project.
+func propertyOnOtherODs(ctx context.Context, db *sql.DB, projectID, propName, excludeOD string) []string {
+	if db == nil || strings.TrimSpace(propName) == "" {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT o.name
+		FROM ont_property p
+		JOIN ont_object_type o ON o.id = p.object_type_id
+		WHERE p.project_id = $1 AND p.name = $2 AND o.name <> $3
+		  AND COALESCE(o.mark, true) = true
+		ORDER BY o.name`,
+		projectID, propName, excludeOD,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // composeError builds the common error payload shape so the LLM can
 // pattern-match on err.code. Mirrors strict-mode smartquery's error format.
 func composeError(detail string, hint string) M {
@@ -325,9 +361,21 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			fmt.Sprintf("metric arg %q crosses OD (qualified form)", metricArg),
 			"metric arg 必须是主 OD 上的 property，跨 OD 聚合请联系运营加 derived metric")
 	} else if !primary[metricArg] {
+		// Did-You-Mean: the most common cause of this error is the LLM
+		// transcribing a property name from a sibling OD (e.g. `MTM_NUMBER`
+		// lives on EARLY_ORDER, not MTM). Without a pointer the next retry
+		// just bounces against the same primary OD. Universal lookup — no
+		// hardcoded OD list — finds wherever the name actually lives and
+		// nudges the LLM toward the right primary_od.
+		hint := "available on " + odName + ": " + strings.Join(sortedKeys(primary), ", ")
+		if otherODs := propertyOnOtherODs(ctx, db, projectID, metricArg, odName); len(otherODs) > 0 {
+			hint += fmt.Sprintf(
+				"; the property %q exists on OD %s — if that is what you meant, retry the call with odName=%q",
+				metricArg, strings.Join(otherODs, " / "), otherODs[0])
+		}
 		return composeError(
 			fmt.Sprintf("metric arg %q is not a property of primary OD %q", metricArg, odName),
-			"available: "+strings.Join(sortedKeys(primary), ", "))
+			hint)
 	}
 
 	// Path A — pure-metric gate (col-family, USE_PURE_METRIC). The aggregated
@@ -546,6 +594,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		"groupBy":           spec.GroupBy,
 		"orderBy":           spec.OrderBy,
 		"limit":             spec.Limit,
+		"ontology_sql":      result.OntologySQL,
 		"generated_sql":     result.SQL,
 		"execution_status":  execStatus,
 		"execution_error":   result.ErrorMessage,

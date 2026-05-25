@@ -115,9 +115,12 @@ func toolResultToMarkdown(toolName string, _ map[string]interface{}, result M) s
 				if sid, _ := result["step_id"].(string); sid != "" && len(rows) > 20 {
 					sb.WriteString(fmt.Sprintf(
 						"# 本结果有 %d 行，表格过长。请在回答【末尾】追加一个图表 schema："+
-							"「chart type=bar from=%s x=<某一列> y=<一或多列,英文逗号分隔> series=<可选分组列>」。"+
+							"「chart type=bar from=%s x=<某一列> y=<一或多列,英文逗号分隔> series=<可选分组列> filter=<可选,列=值;列=值>」。"+
 							"type 可选 bar|line|pie|area；列名只能取自：%s。"+
-							"只写列名与图型、绝不写任何数值——前端会用本结果的数据渲染图表。\n",
+							"filter 是**画图前**对源行的过滤，支持 1~N 个 列=值 等式用分号 ; 串联（AND），值写**字面量**"+
+							"（如 filter=ORDER_TYPE=Real Order;GEO=EMEA），用于把图聚焦到某个切片，避免一张图把"+
+							"几条无关曲线挤在一起。需要对比多个切片时则不用 filter，改让 series 承担分组。"+
+							"只写列名/图型/筛选字面量，绝不写任何聚合后的数值——前端会用本结果的数据渲染图表。\n",
 						len(rows), sid, strings.Join(cols, "、")))
 				}
 

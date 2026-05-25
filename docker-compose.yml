@@ -39,6 +39,12 @@ x-app-env: &app-env
   CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:28080}
   OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
   OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.25}
+  # Outbound LLM TLS:
+  #   LLM_CA_CERT=/path/to/ca.pem      → trust a private CA (additive, safe)
+  #   LLM_TLS_INSECURE_SKIP_VERIFY=true → disable verification entirely
+  #     (intra-net / self-signed dev only — NEVER set true with public providers)
+  LLM_CA_CERT: ${LLM_CA_CERT:-}
+  LLM_TLS_INSECURE_SKIP_VERIFY: ${LLM_TLS_INSECURE_SKIP_VERIFY:-false}
 
 services:
   # ── Single external ingress ────────────────────────────────────────────────
