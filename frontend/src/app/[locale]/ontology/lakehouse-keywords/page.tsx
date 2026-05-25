@@ -50,6 +50,7 @@ interface TreeProp {
   id: string
   name: string
   dataType: string
+  isMachineCode: boolean
   colCount: number
   valCount: number
 }
@@ -187,13 +188,14 @@ export default function LakehouseKeywordsPage() {
 
   // ── Summary + tree ──
   const [tree, setTree] = useState<TreeOd[]>([])
-  useEffect(() => {
+  const refreshSummaryTree = useCallback(() => {
     if (!currentProject) return
     api<Summary>(`/connector/pbit/lakehouse-keywords/summary?projectId=${currentProject.id}`)
       .then(setSummary).catch(() => {})
     api<{ ods: TreeOd[] }>(`/connector/pbit/lakehouse-keywords/tree?projectId=${currentProject.id}`)
       .then(res => setTree(res.ods || [])).catch(() => setTree([]))
   }, [currentProject])
+  useEffect(() => { refreshSummaryTree() }, [refreshSummaryTree])
 
   // ── Vector status + compute ──
   const [vecStatus, setVecStatus] = useState<VectorStatus | null>(null)
@@ -425,6 +427,44 @@ export default function LakehouseKeywordsPage() {
       loadPropKeywords(propId)
     } catch { msg.error(t('toggle_failed')) }
   }, [invalidatePropCache, loadPropKeywords, msg])
+
+  // ── Enable / Enable-as-MC a property's keywords ─────────────────
+  // 启用 = sync the full distinct value set (with the >200 confirmation gate);
+  // 启用MC = flip the property to machine-code and re-sync to ≤5 sampled values
+  // + the column name. Both ride the same backend endpoint, which does a
+  // DELETE-then-INSERT for the property (so excess keywords are pruned).
+  const [enablingProp, setEnablingProp] = useState<string | null>(null)
+  const enableProp = useCallback(async (propId: string, mc: boolean, force = false) => {
+    if (!currentProject) return
+    setEnablingProp(propId)
+    try {
+      const res = await api<{ success?: boolean; keywordCount?: number; error?: string; needsConfirmation?: boolean; distinctCount?: number; propertyName?: string }>(
+        `/connector/pbit/sync-property-keywords`,
+        { method: 'POST', body: { propertyId: propId, projectId: currentProject.id, machineCode: mc, force } },
+      )
+      if (res.needsConfirmation) {
+        setEnablingProp(null)
+        if (confirm(t('confirm_enable', { name: res.propertyName ?? '', count: res.distinctCount ?? 0 }))) {
+          enableProp(propId, mc, true)
+        }
+        return
+      }
+      if (res.success) {
+        msg.success(t('enable_done', { count: res.keywordCount ?? 0 }))
+        invalidatePropCache(propId)
+        loadPropKeywords(propId)
+        refreshSummaryTree()
+        fetchKwData()
+        loadVecStatus() // MC excludes keywords from vectorization → refresh the "需要计算" count
+      } else {
+        msg.error(res.error || t('enable_failed'))
+      }
+    } catch (e) {
+      msg.error(e instanceof Error ? e.message : t('enable_failed'))
+    } finally {
+      setEnablingProp(null)
+    }
+  }, [currentProject, t, msg, invalidatePropCache, loadPropKeywords, refreshSummaryTree, fetchKwData, loadVecStatus])
 
   // ── Bulk handlers ───────────────────────────────────────────────
   const handleBulkUpdate = async (ids: string[], field: BulkUpdateField, value: boolean, clear: () => void) => {
@@ -1074,6 +1114,34 @@ export default function LakehouseKeywordsPage() {
                                           style={{ overflow: 'hidden' }}
                                           className="space-y-3 px-3 py-3 pl-14"
                                         >
+                                          {/* Enable 语义 / MC — the active mode is INHERITED from the OD
+                                              definition's is_machine_code; clicking re-syncs in that mode
+                                              (启用语义 = full distinct set, 启用MC = ≤5 sampled + column name). */}
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => enableProp(prop.id, false)}
+                                              disabled={enablingProp === prop.id}
+                                              aria-pressed={!prop.isMachineCode}
+                                              className={`rounded-md border px-2.5 py-1 text-[11px] font-medium outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                                                !prop.isMachineCode ? 'border-ink bg-ink text-white' : 'border-border bg-white text-ink hover:border-ink'
+                                              }`}
+                                            >
+                                              {enablingProp === prop.id ? t('enabling') : `${t('enable_full')}${!prop.isMachineCode ? t('current_tag') : ''}`}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => enableProp(prop.id, true)}
+                                              disabled={enablingProp === prop.id}
+                                              aria-pressed={prop.isMachineCode}
+                                              className={`rounded-md border border-amber-500 px-2.5 py-1 text-[11px] font-medium outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                                                prop.isMachineCode ? 'bg-amber-400 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+                                              }`}
+                                            >
+                                              {enablingProp === prop.id ? t('enabling') : `${t('enable_mc')}${prop.isMachineCode ? t('current_tag') : ''}`}
+                                            </button>
+                                            <span className="text-[11px] text-ink-ghost">{t('enable_hint')}</span>
+                                          </div>
                                           {isLoading && !cached && (
                                             <InlineLoader text={t('loading')} />
                                           )}

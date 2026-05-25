@@ -1236,6 +1236,11 @@ func handleSyncPropertyKeywords(db *sql.DB) http.HandlerFunc {
 			PropertyId string `json:"propertyId"`
 			ProjectId  string `json:"projectId"`
 			Force      bool   `json:"force"`
+			// MachineCode, when non-nil, flips the property's is_machine_code flag
+			// before syncing (true → ≤5 sampled values, false → full distinct set).
+			// Lets callers like the keywords page do "启用 / 启用MC" in one atomic
+			// call without a full-property PUT. nil = keep the current flag.
+			MachineCode *bool `json:"machineCode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonResp(w, 400, map[string]string{"error": "decode body: " + err.Error()})
@@ -1257,6 +1262,15 @@ func handleSyncPropertyKeywords(db *sql.DB) http.HandlerFunc {
 		if sourceColumn == "" {
 			jsonResp(w, 400, map[string]string{"error": "property has no source_column mapping"})
 			return
+		}
+
+		// Optional MC override: update ONLY is_machine_code (never touches the
+		// property's other fields), then let the rest of the handler treat the
+		// new flag as authoritative — so "启用MC" prunes to ≤5 and "启用" restores
+		// the full set, all via this one endpoint.
+		if req.MachineCode != nil {
+			isMC = *req.MachineCode
+			db.Exec(`UPDATE ont_property SET is_machine_code=$2, updated_at=now() WHERE id=$1`, req.PropertyId, isMC) //nolint:errcheck
 		}
 
 		// Load canonical_query from the object.
@@ -1741,13 +1755,14 @@ func handleLakehouseKeywordsTree(db *sql.DB) http.HandlerFunc {
 			       p.id::text AS prop_id,
 			       COALESCE(p.name,'')      AS prop_name,
 			       COALESCE(p.data_type,'') AS data_type,
+			       COALESCE(p.is_machine_code, false) AS is_mc,
 			       COUNT(*) FILTER (WHERE COALESCE(lk.is_column_name, false))     AS col_count,
 			       COUNT(*) FILTER (WHERE NOT COALESCE(lk.is_column_name, false)) AS val_count
 			FROM lakehouse_keyword lk
 			JOIN ont_object_type o ON o.id = lk.object_type_id AND o.mark = true
 			JOIN ont_property    p ON p.id = lk.property_id
 			WHERE lk.project_id = $1
-			GROUP BY o.name, p.id, p.name, p.data_type
+			GROUP BY o.name, p.id, p.name, p.data_type, p.is_machine_code
 			ORDER BY o.name, p.name`, projectID)
 		if err != nil {
 			jsonResp(w, 500, map[string]string{"error": err.Error()})
@@ -1756,11 +1771,12 @@ func handleLakehouseKeywordsTree(db *sql.DB) http.HandlerFunc {
 		defer rows.Close()
 
 		type propEntry struct {
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-			DataType string `json:"dataType"`
-			ColCount int    `json:"colCount"`
-			ValCount int    `json:"valCount"`
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			DataType      string `json:"dataType"`
+			IsMachineCode bool   `json:"isMachineCode"`
+			ColCount      int    `json:"colCount"`
+			ValCount      int    `json:"valCount"`
 		}
 		type odEntry struct {
 			Name      string      `json:"name"`
@@ -1775,7 +1791,8 @@ func handleLakehouseKeywordsTree(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var odName, propID, propName, dataType string
 			var colCount, valCount int
-			if err := rows.Scan(&odName, &propID, &propName, &dataType, &colCount, &valCount); err != nil {
+			var isMC bool
+			if err := rows.Scan(&odName, &propID, &propName, &dataType, &isMC, &colCount, &valCount); err != nil {
 				continue
 			}
 			i, ok := odIdx[odName]
@@ -1785,7 +1802,7 @@ func handleLakehouseKeywordsTree(db *sql.DB) http.HandlerFunc {
 				ods = append(ods, odEntry{Name: odName})
 			}
 			ods[i].Props = append(ods[i].Props, propEntry{
-				ID: propID, Name: propName, DataType: dataType,
+				ID: propID, Name: propName, DataType: dataType, IsMachineCode: isMC,
 				ColCount: colCount, ValCount: valCount,
 			})
 			ods[i].ColCount += colCount

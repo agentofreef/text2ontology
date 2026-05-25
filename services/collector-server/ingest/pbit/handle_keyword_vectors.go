@@ -52,7 +52,9 @@ func RecomputeVectorsForProject(ctx context.Context, db *sql.DB, projectID strin
 
 	log.Printf("[pbitlakehouse] auto vector compute: embedding %d rows (project=%s)", len(jobs), projectID)
 
-	const batchSize = 32
+	// One chunk per EmbedTexts call fans out into (batch × concurrency) parallel
+	// /embeddings requests, instead of one sequential batch at a time.
+	batchSize := llmclient.EmbedChunkSize()
 	embedded, failed := 0, 0
 	for start := 0; start < len(jobs); start += batchSize {
 		// Respect context cancellation between batches.
@@ -250,7 +252,9 @@ func handleComputeVectors(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		const batchSize = 32
+		// One chunk per EmbedTexts call fans out into (batch × concurrency)
+		// parallel /embeddings requests; SSE progress is still reported per chunk.
+		batchSize := llmclient.EmbedChunkSize()
 		done, failed := 0, 0
 		for start := 0; start < total; start += batchSize {
 			end := start + batchSize

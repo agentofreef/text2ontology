@@ -191,6 +191,28 @@ func resolveEmbedBatchSize() int {
 	return embedDefaultBatchSize
 }
 
+// resolveEmbedMaxConcurrency reads EMBED_MAX_CONCURRENCY (positive int) or falls
+// back to the default. Read per call so an ops change takes effect without a
+// restart (dial it up for a beefier embedding server, down to 1 to serialize).
+func resolveEmbedMaxConcurrency() int {
+	if v := os.Getenv("EMBED_MAX_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return embedMaxConcurrency
+}
+
+// EmbedChunkSize is the recommended number of texts to hand a single EmbedTexts
+// call so its internal batching fully engages the bounded concurrency:
+// one chunk = (batch size) × (max concurrency), i.e. that many texts fan out
+// into N parallel /embeddings requests instead of running one batch at a time.
+// Callers looping over a large backlog should chunk by this for max throughput
+// while keeping per-chunk progress granularity.
+func EmbedChunkSize() int {
+	return resolveEmbedBatchSize() * resolveEmbedMaxConcurrency()
+}
+
 // embedTextsVia is the HTTP core of the embedding call, split out so the
 // status-check / body-close behavior is unit-testable against an httptest
 // server without a live DB-resolved config. Truncates each text to 500 chars,
@@ -220,7 +242,7 @@ func embedTextsVia(ctx context.Context, client *http.Client, baseURL, apiKey, mo
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sem := make(chan struct{}, embedMaxConcurrency)
+	sem := make(chan struct{}, resolveEmbedMaxConcurrency())
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
