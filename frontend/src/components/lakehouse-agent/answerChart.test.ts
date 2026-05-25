@@ -58,6 +58,55 @@ test('splitAnswerSegments: ``` fence whose body is NOT chart is left alone', () 
   assert.ok(out[0].kind === 'text' && out[0].text.includes('const x = 1'))
 })
 
+test('parseChartToken: single filter clause', () => {
+  const text = '前文「chart type=line from=t1 x=MONTH y=Total_ORDER_QUANTITY series=GEO filter=ORDER_TYPE=Real Order」后文'
+  const out = splitAnswerSegments(text)
+  const chart = out.find(s => s.kind === 'chart')
+  assert.ok(chart && chart.kind === 'chart')
+  if (chart && chart.kind === 'chart') {
+    assert.ok(chart.spec.filter)
+    assert.equal(chart.spec.filter!.length, 1)
+    assert.equal(chart.spec.filter![0].col, 'ORDER_TYPE')
+    // value preserves internal space
+    assert.equal(chart.spec.filter![0].val, 'Real Order')
+  }
+})
+
+test('parseChartToken: multi filter clauses (AND)', () => {
+  const text = '「chart type=bar from=t1 x=GEO y=qty filter=ORDER_TYPE=Real Order;GEO=EMEA」'
+  const out = splitAnswerSegments(text)
+  const chart = out.find(s => s.kind === 'chart')
+  assert.ok(chart && chart.kind === 'chart')
+  if (chart && chart.kind === 'chart') {
+    assert.equal(chart.spec.filter!.length, 2)
+    assert.deepEqual(chart.spec.filter![0], { col: 'ORDER_TYPE', val: 'Real Order' })
+    assert.deepEqual(chart.spec.filter![1], { col: 'GEO', val: 'EMEA' })
+  }
+})
+
+test('parseChartToken: no filter → spec.filter is undefined', () => {
+  const text = '「chart type=bar from=t1 x=GEO y=qty series=ORDER_TYPE」'
+  const out = splitAnswerSegments(text)
+  const chart = out.find(s => s.kind === 'chart')
+  assert.ok(chart && chart.kind === 'chart')
+  if (chart && chart.kind === 'chart') {
+    assert.equal(chart.spec.filter, undefined)
+  }
+})
+
+test('parseChartToken: empty filter value clauses are dropped', () => {
+  // Trailing semicolon + clause with no value must not crash; result drops the
+  // empty clause but keeps the valid one.
+  const text = '「chart type=bar from=t1 x=GEO y=qty filter=ORDER_TYPE=Real Order;」'
+  const out = splitAnswerSegments(text)
+  const chart = out.find(s => s.kind === 'chart')
+  assert.ok(chart && chart.kind === 'chart')
+  if (chart && chart.kind === 'chart') {
+    assert.equal(chart.spec.filter!.length, 1)
+    assert.equal(chart.spec.filter![0].col, 'ORDER_TYPE')
+  }
+})
+
 test('splitAnswerSegments: multi-line fenced chart with split key=value pairs', () => {
   // LLMs sometimes break each key=value onto its own line. Whitespace
   // collapse in the rewrite must fold these back into one line for the

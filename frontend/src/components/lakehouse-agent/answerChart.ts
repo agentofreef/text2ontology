@@ -14,6 +14,18 @@
 
 export type ChartType = 'bar' | 'line' | 'pie' | 'area'
 
+/**
+ * One literal equality filter applied to source rows before plotting.
+ * `col` is resolved via ResultViewer's tolerant key matcher (same as x/y/series)
+ * so case / whitespace / underscore drift is forgiven. `val` is matched as a
+ * trimmed, case-insensitive string against the resolved column's value.
+ * Multi-filter is AND'd (every row must satisfy every entry).
+ */
+export interface ChartFilter {
+  col: string
+  val: string
+}
+
 export interface ChartSpec {
   type: ChartType
   /** Step id of the source table, e.g. "t1" — resolved via collectStepResults. */
@@ -24,6 +36,15 @@ export interface ChartSpec {
   y: string[]
   /** Optional grouping column → one series per distinct value (single-y only). */
   series?: string
+  /**
+   * Optional row pre-filter. Lets the LLM scope a chart to one slice of the
+   * source table without an extra query. Multi-clause: a value semicolon-
+   * separated list of `col=val` pairs is AND'd. Unrecognised columns are
+   * skipped silently (mirrors the resolveColumn-level forgiveness elsewhere).
+   * Empty result-set after filter falls back to "no chart" gracefully —
+   * better than a misleading empty chart.
+   */
+  filter?: ChartFilter[]
 }
 
 export type AnswerSegment =
@@ -55,7 +76,7 @@ function normalizeFencedCharts(s: string): string {
   })
 }
 
-const KNOWN_KEYS = ['type', 'from', 'x', 'y', 'series'] as const
+const KNOWN_KEYS = ['type', 'from', 'x', 'y', 'series', 'filter'] as const
 
 /**
  * parseChartToken parses the inside of a 「chart …」 token into a ChartSpec, or
@@ -89,7 +110,26 @@ export function parseChartToken(token: string): ChartSpec | null {
     typeRaw === 'line' || typeRaw === 'pie' || typeRaw === 'area' ? typeRaw : 'bar'
 
   const series = get('series') || undefined
-  return { type, from, x, y, series }
+
+  // filter=COL1=VAL1[;COL2=VAL2[;...]] — semicolon separates clauses so the
+  // common value-containing-comma case (e.g. enum list, English prose) stays
+  // unambiguous against `y=a,b,c`. Each clause splits on the FIRST `=`, so
+  // values that themselves contain `=` are preserved verbatim.
+  const filterRaw = get('filter')
+  let filter: ChartFilter[] | undefined
+  if (filterRaw) {
+    const clauses: ChartFilter[] = []
+    for (const part of filterRaw.split(';')) {
+      const eq = part.indexOf('=')
+      if (eq < 0) continue
+      const col = part.slice(0, eq).trim()
+      const val = part.slice(eq + 1).trim()
+      if (col && val) clauses.push({ col, val })
+    }
+    if (clauses.length > 0) filter = clauses
+  }
+
+  return { type, from, x, y, series, filter }
 }
 
 /**

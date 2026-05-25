@@ -107,9 +107,33 @@ export function ResultViewer({ data, maxRows = 50, initialMode, chartSpec }: Res
   const [mode, setMode] = useState<ViewMode>(specType ?? (initialMode || 'table'))
   const isArea = chartSpec?.type === 'area' && mode === 'line'
 
+  // Apply chartSpec.filter to source rows before plotting. Each clause names
+  // a column (tolerantly resolved) and a literal value; rows must satisfy
+  // every clause (AND). Mismatched columns skip silently — same forgiveness
+  // posture as x/y/series resolution above. The table view (when toggled
+  // off-chart) keeps showing every row, on the principle that filter is a
+  // chart-specific scoping hint, not a global slice of the result.
+  const filteredChartRows = useMemo(() => {
+    if (!parsed) return null
+    if (!chartSpec?.filter || chartSpec.filter.length === 0) return parsed.rows
+    const clauses: Array<{ key: string; val: string }> = []
+    for (const f of chartSpec.filter) {
+      const k = resolveKey(f.col)
+      if (!k) continue // unknown column — drop the clause, don't drop all rows
+      clauses.push({ key: k, val: f.val.trim().toLowerCase() })
+    }
+    if (clauses.length === 0) return parsed.rows
+    return parsed.rows.filter(r => clauses.every(c => {
+      const v = r[c.key]
+      const sv = v === null || v === undefined ? '' : String(v).trim().toLowerCase()
+      return sv === c.val
+    }))
+  }, [parsed, chartSpec, resolveKey])
+
   const chartOption = useMemo(() => {
     if (!parsed || !resolved || !hasChart) return {}
-    const { rows } = parsed
+    const rows = filteredChartRows ?? parsed.rows
+    if (rows.length === 0) return {}
     const { xKey, yKeys, seriesKey } = resolved
     const labels = rows.map(r => String(r[xKey] ?? ''))
 
