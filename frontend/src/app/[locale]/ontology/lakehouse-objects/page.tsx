@@ -44,7 +44,7 @@ export default function LakehouseObjectsPage() {
       {/* Floating, collapsible object panel — sits on a layer above the graph
           (top-left; the graph's own toolbar is right-aligned so they don't
           collide). Collapses to just its header bar ("收上去"). */}
-      <div className="absolute left-3 top-3 z-20 flex max-h-[62vh] w-[300px] flex-col border border-border bg-white">
+      <div className="absolute left-3 top-3 z-20 flex max-h-[62vh] w-[600px] flex-col border border-border bg-white">
         <button
           type="button"
           onClick={() => setPanelOpen((o) => !o)}
