@@ -265,6 +265,65 @@ BEGIN
   END IF;
 END $$;
 
+-- 11. Per-project proj_* schemas: self-healing owner + reader grants.
+-- The normal path is collector_server_user creates these dynamically
+-- (CREATE SCHEMA proj_<hex>) and pgschema.CreateSchemaWithGrants emits the
+-- exact same set of grants below inline at creation time. But that path is
+-- bypassed by anything that materialises a proj_* schema outside the
+-- collector code: pg_dump restore with --no-owner --no-privileges, manual
+-- psql, cross-environment migration, etc. Those schemas land owned by the
+-- restoring superuser with zero grants, so lakehouse-sql-server /
+-- agent-server / recall-server / backend-api see "relation does not exist"
+-- the first time they touch a table in the schema (PG returns that — not
+-- "permission denied" — when the role has no USAGE on the containing
+-- schema, and the symptom is indistinguishable from a missing table).
+--
+-- Run every db-migrate boot — idempotent, cheap, and closes the loop so any
+-- environment booted from a raw dump is self-healing on first migrate. New
+-- PBIX imports are unaffected: collector's runtime grants still fire at
+-- CREATE SCHEMA time; this block is the safety net for schemas that
+-- arrived by other means.
+DO $$
+DECLARE
+  s text;
+  r record;
+  readers constant text := 'lakehouse_sql_server_user, agent_server_user, recall_server_user, backend_api_user';
+  reowned int := 0;
+  granted int := 0;
+BEGIN
+  FOR s IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'proj_%' LOOP
+    -- (a) Reown the schema + its objects to collector_server_user so future
+    --     collector writes don't trip "permission denied for schema".
+    IF (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = s) <> 'collector_server_user' THEN
+      EXECUTE format('ALTER SCHEMA %I OWNER TO collector_server_user', s);
+      FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = s LOOP
+        EXECUTE format('ALTER TABLE %I.%I OWNER TO collector_server_user', s, r.tablename);
+      END LOOP;
+      FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = s LOOP
+        EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO collector_server_user', s, r.sequencename);
+      END LOOP;
+      reowned := reowned + 1;
+    END IF;
+
+    -- (b) Reader grants — matches pgschema.CreateSchemaWithGrants exactly.
+    --     USAGE on the schema, SELECT on every existing table, default-SELECT
+    --     for tables collector_server_user creates later, sequence read.
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %s', s, readers);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %s', s, readers);
+    EXECUTE format('GRANT SELECT, USAGE ON ALL SEQUENCES IN SCHEMA %I TO %s', s, readers);
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE collector_server_user IN SCHEMA %I GRANT SELECT ON TABLES TO %s',
+      s, readers);
+    granted := granted + 1;
+  END LOOP;
+  IF reowned > 0 THEN
+    RAISE NOTICE 'proj_* self-heal: reowned % schemas to collector_server_user', reowned;
+  END IF;
+  IF granted > 0 THEN
+    RAISE NOTICE 'proj_* self-heal: refreshed reader grants on % schemas', granted;
+  END IF;
+END $$;
+
 COMMIT;
 
 -- Verification (optional manual; also run by scripts/check-runtime-grants.sh):
