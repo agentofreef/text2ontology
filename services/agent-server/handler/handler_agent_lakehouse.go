@@ -53,14 +53,19 @@ const lookupToolDescription = `查询本体定义 + 业务关键词。
 // LLM never builds spec — that path is closed.
 const smartqueryToolDescription = `执行数据查询，返回表格结果。两种用法，二选一：
 
+⚠ **odName 始终必填**（无论 Mode A / Mode B），缺失会被拒绝并返回 ODNAME_REQUIRED。
+   Mode A 时 odName 也要带——填该 intent 在 🎯 小节标注的 OD 名；保持显式让前端可以
+   稳定渲染"对象"列，也让人复盘 LLM 选择路径时一目了然。
+
 【Mode A · 预设】命中现成指标时——把口径交给人工策展好的指标。
-  形式：{"intent":"指标名","params":{...}}
+  形式：{"odName":"对应OD","intent":"指标名","params":{...}}
+  odName — 必填。须等于该 intent 在 🎯 小节标注的 OD（不一致会报 OD_INTENT_MISMATCH）。
   intent — 从 context 顶部「🎯 查询指标（Metric）」小节里选一个 name。
   params — 按该指标的 parameters schema 填；用户没提的省略走默认。
            未声明的 key → PARAM_UNKNOWN；类型不符 → PARAM_TYPE_ERROR。
-  例："Top 5 摇滚乐手" → {"intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
-      "各 Geo 订单分布" → {"intent":"Order.Quantity.Distribution","params":{}}
-  Mode A 下不要再填 odName/metric/filters/groupBy —— 这些由指标提供（填了会被忽略）。
+  例："Top 5 摇滚乐手" → {"odName":"SALE","intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
+      "各 Geo 订单分布" → {"odName":"EARLY_ORDER","intent":"Order.Quantity.Distribution","params":{}}
+  Mode A 下不要再填 metric/filters/groupBy —— 这些由指标提供（填了会被忽略）。
 
 【Mode B · 自由组合】没有现成指标完全匹配时——自己从目录 token 拼一次查询。
   形式：{"odName":"主OD","metric":"sum(列)","filters":[...],"groupBy":[...],"orderBy":[...],"limit":N}
@@ -919,7 +924,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					},
 				}},
 				{Name: "smartquery", Description: smartqueryToolDescription, Parameters: M{
-					"type": "object",
+					"type":     "object",
+					"required": []string{"odName"},
 					"properties": M{
 						// Mode A — curated preset: pass intent (+params).
 						"intent": M{
@@ -931,8 +937,13 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 							"description":          "Mode A 用：按指标的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。指标没声明的 key 会被拒绝。",
 							"additionalProperties": true,
 						},
-						// Mode B — catalog-bound composition (no intent).
-						"odName": M{"type": "string", "description": "Mode B 用：主 OD 名（单个）。例 \"EARLY_ORDER\""},
+						// odName — ALWAYS required, both modes. Mode A must still
+						// name the primary OD (must equal the OD that the named
+						// intent is curated on); Mode B names the OD to compose
+						// against. Empty/missing → ODNAME_REQUIRED error (no
+						// silent fall-through that would let the UI render the
+						// OD column as empty).
+						"odName": M{"type": "string", "description": "**必填**。主 OD 名（单个）。Mode A：必须等于所选 intent 在 🎯 小节标注的 OD（同名一致即可）。Mode B：要查询的主 OD。例：\"EARLY_ORDER\" / \"MTM\" / \"PRODUCT\"。"},
 						"metric": M{"type": "string", "description": "Mode B 用：聚合表达式 func(arg)。func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。⚠ 不接受 count(*)（JOIN 双重计数），用 count(<id列>)"},
 						"filters": M{"type": "array", "items": M{
 							"type":     "object",
@@ -2455,6 +2466,18 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	// (These used to be two separate tools — smartquery vs compose_query.
 	// Merging removes the LLM's "preset vs compose" tool-choice dithering;
 	// both paths end at QuerySpec → Execute.)
+	// odName is mandatory in both modes — keeps the call-graph explicit and
+	// prevents the UI from rendering an empty "对象" cell (which masked the
+	// fact that the LLM had silently picked a wrong primary OD). Refused here
+	// before either path so Mode A and Mode B share the same gate.
+	requestedOD := strings.TrimSpace(StrVal(args, "odName"))
+	if requestedOD == "" {
+		return M{
+			"error": "ODNAME_REQUIRED: smartquery 必须显式指定主 OD（odName 字段）。Mode A 时填该 intent 在 🎯 小节标注的 OD；Mode B 时填要查询的主 OD。不要漏填——UI 会把这个值直接呈现为「对象」列。",
+			"code":  "ODNAME_REQUIRED",
+		}
+	}
+
 	intentName, _ := args["intent"].(string)
 	intentName = strings.TrimSpace(intentName)
 	if intentName == "" {
@@ -2468,6 +2491,27 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 				"INTENT_NOT_FOUND: 未找到名为 %q 的指标 (project_id=%s)。可用指标名见 context 顶部 🎯 小节；如该查询场景未配置指标，请告知用户当前不支持。",
 				intentName, projectID),
 			"code": "INTENT_NOT_FOUND",
+		}
+	}
+
+	// OD_INTENT_MISMATCH: ensure the LLM-picked odName is one of the ODs this
+	// intent is curated on. Without this check the call would succeed with the
+	// intent's OD silently overriding odName, hiding the mismatch.
+	if len(objectNames) > 0 {
+		matched := false
+		for _, on := range objectNames {
+			if strings.EqualFold(strings.TrimSpace(on), requestedOD) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return M{
+				"error": fmt.Sprintf("OD_INTENT_MISMATCH: odName=%q 与 intent %q 的 OD 不一致（intent 实际定义在 %s）。请把 odName 改成其中之一再重试。",
+					requestedOD, intentName, strings.Join(objectNames, " / ")),
+				"code": "OD_INTENT_MISMATCH",
+				"hint": fmt.Sprintf("retry with odName=%q", objectNames[0]),
+			}
 		}
 	}
 

@@ -511,9 +511,23 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
                   )}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] text-gray-400">{t('tool_card.label_object')}</span>
-                    {(Array.isArray(fc.arguments.objects) ? fc.arguments.objects : []).map((o: string, oi: number) => (
-                      <span key={oi} className="bg-gray-800 text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{o}</span>
-                    ))}
+                    {(() => {
+                      // smartquery schema's primary OD field is `odName` (single
+                      // string). Legacy callers used `objects` (array). Read both
+                      // so the chip row never goes empty when only one form is
+                      // present; render as the same gray pill row either way.
+                      const ods: string[] = []
+                      const single = fc.arguments.odName
+                      if (typeof single === 'string' && single.trim()) ods.push(single.trim())
+                      if (Array.isArray(fc.arguments.objects)) {
+                        for (const o of fc.arguments.objects) {
+                          if (typeof o === 'string' && o.trim() && !ods.includes(o.trim())) ods.push(o.trim())
+                        }
+                      }
+                      return ods.map((o, oi) => (
+                        <span key={oi} className="bg-gray-800 text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{o}</span>
+                      ))
+                    })()}
                     {fc.arguments.metric ? <><span className="text-[10px] text-gray-400 ml-1">{t('tool_card.label_metric')}</span><Badge variant="accent">{String(fc.arguments.metric)}</Badge></> : null}
                   </div>
                   {(Array.isArray(fc.arguments.groupBy) ? fc.arguments.groupBy as string[] : []).length > 0 && (
