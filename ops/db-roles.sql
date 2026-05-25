@@ -90,7 +90,8 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type', 'ont_alias',
     'ont_knowledge', 'ont_topic', 'ont_knowledge_definition', 'ont_knowledge_example',
     'ont_causality', 'ont_learned_fact', 'ont_fact_definition', 'ont_fact_link',
-    'lakehouse_keyword', 'lakehouse_metric_intent', 'ont_query_log',
+    'lakehouse_keyword', 'lakehouse_keyword_alias_vector', 'lakehouse_metric_intent',
+    'ont_query_log',
     'ont_lakehouse_sql_log', 'ont_sql_passthrough_log'
   ], 'backend_api_user');
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT',

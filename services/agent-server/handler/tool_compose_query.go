@@ -594,6 +594,7 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		"groupBy":           spec.GroupBy,
 		"orderBy":           spec.OrderBy,
 		"limit":             spec.Limit,
+		"ontology_sql":      result.OntologySQL,
 		"generated_sql":     result.SQL,
 		"execution_status":  execStatus,
 		"execution_error":   result.ErrorMessage,
