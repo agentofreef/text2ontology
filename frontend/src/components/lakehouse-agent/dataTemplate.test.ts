@@ -288,3 +288,80 @@ test('formatNumber: thousands + decimals', () => {
   assert.equal(formatNumber(8380820), '8,380,820')
   assert.equal(formatNumber(1234.5), '1,234.5')
 })
+
+// ── strip duplicate hand-typed tables ────────────────────────────────────
+// LLM is told never to transcribe cells by hand. When it relapses, the user
+// sees both the LLM's hand-typed table (numbers possibly hallucinated) AND
+// the canonical 「tN」-rendered table. The strip pass deletes the former.
+
+test('renderDataTemplates: strips hand-typed table when a 「tN」 exists', () => {
+  const text = `观察到：
+
+| city | amount |
+| --- | --- |
+| 上海 | 1 |
+| 北京 | 2 |
+| 成都 | 3 |
+
+完整数据：「t1」`
+  const out = renderDataTemplates(text, fcs)
+  // Hand-typed values must be gone — those numbers (1/2/3) are not real.
+  assert.ok(!out.includes('| 上海 | 1 |'))
+  assert.ok(!out.includes('| 北京 | 2 |'))
+  // The 「t1」 expansion still produced the real table with real numbers.
+  assert.ok(out.includes('上海'))
+  assert.ok(out.includes('2,735,766'))
+})
+
+test('renderDataTemplates: keeps hand-typed table when no resolvable 「tN」', () => {
+  // No 「tN」 reference at all → strip doesn't fire (the LLM may have a
+  // legitimate reason to write a literal table).
+  const text = `分类表：
+
+| key | val |
+| --- | --- |
+| a | 1 |
+
+完。`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| a | 1 |'))
+})
+
+test('renderDataTemplates: strips multiple hand-typed tables', () => {
+  const text = `第一份：
+
+| x | y |
+| --- | --- |
+| 1 | 2 |
+
+第二份：
+
+| u | v |
+| --- | --- |
+| 7 | 8 |
+
+真实结果：「t1」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(!out.includes('| 1 | 2 |'))
+  assert.ok(!out.includes('| 7 | 8 |'))
+  // canonical from 「t1」 still present
+  assert.ok(out.includes('2,735,766'))
+})
+
+test('renderDataTemplates: ignores stray pipe-containing sentences', () => {
+  // Not a markdown table (no `---` separator line) — must not be stripped.
+  const text = `结果：a | b | c 然后……「t1」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('a | b | c'))
+})
+
+test('renderDataTemplates: unresolvable 「tN」 disarms the strip', () => {
+  // Hand-typed table stays because 「t9」 (unknown) can't render anything.
+  const text = `| k | v |
+| --- | --- |
+| only | table |
+
+「t9」`
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| only | table |'))
+})

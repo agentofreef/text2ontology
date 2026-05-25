@@ -35,6 +35,26 @@ export type AnswerSegment =
 // becomes a chart once the 」 arrives.
 const CHART_TOKEN_RE = /「\s*chart\b[^」]*」/g
 
+// ```chart\nchart … \n``` — markdown-fence variant. LLMs trained on lots of
+// markdown habitually wrap any "config-looking" block in a triple-backtick
+// fence; rewriting these to the canonical 「chart …」 token at parse time
+// keeps the downstream tokeniser single-pattern. Fence language tag is
+// optional (`` ``` `` or `` ```chart ``); the body's first non-blank line
+// MUST start with `chart ` for the rewrite to fire — guards against
+// stealing a code sample that just happens to be inside a fence.
+const FENCED_CHART_RE = /```(?:chart)?\s*\n(chart\b[\s\S]+?)\n?```/g
+
+// normalizeFencedCharts rewrites every ```chart … ``` fence in `s` to the
+// canonical 「chart …」 token so the rest of the parser sees one shape.
+// Body whitespace is collapsed to single spaces so a multi-line key=value
+// block (also a common LLM habit) folds into the single-line form the
+// tokeniser expects.
+function normalizeFencedCharts(s: string): string {
+  return s.replace(FENCED_CHART_RE, (_, body) => {
+    return '「' + body.replace(/\s+/g, ' ').trim() + '」'
+  })
+}
+
 const KNOWN_KEYS = ['type', 'from', 'x', 'y', 'series'] as const
 
 /**
@@ -80,21 +100,26 @@ export function parseChartToken(token: string): ChartSpec | null {
  * than a blank or wrong chart).
  */
 export function splitAnswerSegments(content: string): AnswerSegment[] {
-  if (!content || content.indexOf('「') < 0) {
-    return [{ kind: 'text', text: content }]
+  // Pre-normalise ```chart … ``` markdown fences to the canonical 「chart …」
+  // token so the rest of the segmenter only needs to know one shape. This
+  // also catches a common streamed-typo case: the LLM emits a fence even
+  // when the prompt asks for the full-width token form.
+  const normalized = normalizeFencedCharts(content)
+  if (!normalized || normalized.indexOf('「') < 0) {
+    return [{ kind: 'text', text: normalized }]
   }
   const out: AnswerSegment[] = []
   let last = 0
-  for (const m of content.matchAll(CHART_TOKEN_RE)) {
+  for (const m of normalized.matchAll(CHART_TOKEN_RE)) {
     const start = m.index ?? 0
     const raw = m[0]
     const spec = parseChartToken(raw)
     if (!spec) continue // leave unparseable token inside its surrounding text
-    if (start > last) out.push({ kind: 'text', text: content.slice(last, start) })
+    if (start > last) out.push({ kind: 'text', text: normalized.slice(last, start) })
     out.push({ kind: 'chart', spec, raw })
     last = start + raw.length
   }
-  if (last < content.length) out.push({ kind: 'text', text: content.slice(last) })
-  if (out.length === 0) out.push({ kind: 'text', text: content })
+  if (last < normalized.length) out.push({ kind: 'text', text: normalized.slice(last) })
+  if (out.length === 0) out.push({ kind: 'text', text: normalized })
   return out
 }

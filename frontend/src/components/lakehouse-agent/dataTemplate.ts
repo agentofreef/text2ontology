@@ -484,9 +484,56 @@ export function resolveReference(inner: string, steps: Map<string, StepResult>):
 }
 
 /**
+ * MD_TABLE_RE matches a complete markdown table block: header row + separator
+ * row + at least one body row. The separator row's `---` cells are what tells
+ * us this is a real markdown table (not a stray `|`-containing sentence).
+ * Captured: leading newline (or start), then the whole block.
+ *
+ * Used by stripDuplicateTables to detect LLM-hand-typed tables that duplicate
+ * data already available via a 「tN」 reference.
+ */
+const MD_TABLE_RE = /(^|\n)((?:[ \t]*\|[^\n]+\|[ \t]*\n)(?:[ \t]*\|[\s\-:|]+\|[ \t]*\n)(?:[ \t]*\|[^\n]+\|[ \t]*\n?)+)/g
+
+/**
+ * stripDuplicateTables removes LLM-hand-typed markdown tables from an answer
+ * when there's already a resolvable 「tN」 reference that will render the
+ * canonical data table. This is policy enforcement: the LLM is told never to
+ * transcribe table cells by hand (numbers it types are at risk of being
+ * hallucinated), but it relapses. Rather than only nagging in the prompt, we
+ * silently delete the duplicate so the user only ever sees the one true
+ * rendering — the 「tN」 placeholder later expanded by resolveReference.
+ *
+ * Conservative trigger: only fires when at least one 「tN」 in the same answer
+ * resolves to a real step. If the answer has no resolvable reference, every
+ * hand-typed table is kept (the LLM has no alternative anyway).
+ *
+ * Edge cases — accepts as a known tradeoff for code simplicity:
+ *   - A legitimate hand-written comparison table that isn't a duplicate of
+ *     any tool result will be stripped if any 「tN」 also exists in the
+ *     answer. Real-world rare; user opted into this policy to stop the
+ *     numerically-unreliable transcription habit.
+ *   - The freshly-rendered table that 「tN」 expands to is NOT affected
+ *     because stripping runs BEFORE expansion (operator ordering matters).
+ */
+function stripDuplicateTables(text: string, steps: Map<string, StepResult>): string {
+  if (steps.size === 0) return text
+  // Is there any 「tN」 in this text that we can actually expand?
+  let hasResolvableRef = false
+  for (const m of text.matchAll(/「(t\d+)」/g)) {
+    if (steps.has(m[1])) { hasResolvableRef = true; break }
+  }
+  if (!hasResolvableRef) return text
+  return text.replace(MD_TABLE_RE, (_, leadingNL) => leadingNL)
+}
+
+/**
  * renderDataTemplates rewrites every 「…」 reference in `text` into its resolved
  * value (scalar number or markdown table). Unresolvable references are left
  * verbatim. The output is markdown, ready for the existing markdown renderer.
+ *
+ * Before substitution, hand-typed markdown tables that duplicate data already
+ * exposed by a 「tN」 reference are stripped — see stripDuplicateTables for
+ * why and the failure mode that justifies the policy.
  */
 export function renderDataTemplates(
   text: string,
@@ -495,7 +542,8 @@ export function renderDataTemplates(
   if (!text || text.indexOf('「') < 0) return text
   const steps = collectStepResults(functionCalls)
   if (steps.size === 0) return text
-  return text.replace(REF_RE, (raw, inner) => {
+  const cleaned = stripDuplicateTables(text, steps)
+  return cleaned.replace(REF_RE, (raw, inner) => {
     const resolved = resolveReference(inner, steps)
     return resolved ?? raw
   })
