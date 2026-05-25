@@ -355,6 +355,41 @@ test('renderDataTemplates: ignores stray pipe-containing sentences', () => {
   assert.ok(out.includes('a | b | c'))
 })
 
+test('renderDataTemplates: inline 「tN」 gets blank-line padding for markdown', () => {
+  // "完整数据：「t1」trailing" → without padding, the table header glues onto
+  // "完整数据：" and the next text glues onto the last row. markdown then
+  // parses the whole thing as one paragraph and the table fails to render.
+  // Padding with \n\n on both sides forces a proper block boundary.
+  const text = '完整数据：「t1」 后续文本'
+  const out = renderDataTemplates(text, fcs)
+  // Table header line must NOT be glued to the preceding text.
+  assert.ok(!/完整数据：\| city/.test(out), 'table must not be glued to leading text')
+  // It must be preceded by a blank line.
+  assert.ok(/完整数据：\n\n\| city/.test(out), 'padding must precede the table')
+  // The trailing text must NOT be on the same line as the last table row.
+  assert.ok(!/872,018 \| 后续文本/.test(out), 'trailing text must not be glued to table')
+  // Last row must be followed by a blank line before the trailing text.
+  assert.ok(/872,018 \|\n\n 后续文本/.test(out), 'padding must follow the table')
+})
+
+test('renderDataTemplates: scalar 「sum(...)」 stays inline (no padding)', () => {
+  // Single-line scalar substitutions don't need block-level separation.
+  // Padding them would split a sentence — confirm we only pad multi-line.
+  const text = '总营收「sum(t1.amount)」元。'
+  const out = renderDataTemplates(text, fcs)
+  assert.equal(out, '总营收5,581,132元。')
+})
+
+test('renderDataTemplates: 「tN」 at start of string also pads', () => {
+  // Edge: at offset 0, leading \n\n is harmless (markdown ignores leading
+  // blanks). Confirm rendering still succeeds.
+  const text = '「t1」'
+  const out = renderDataTemplates(text, fcs)
+  assert.ok(out.includes('| city | amount |'))
+  // Padded form: starts with \n\n then the table.
+  assert.ok(out.startsWith('\n\n| city | amount |'))
+})
+
 test('renderDataTemplates: unresolvable 「tN」 disarms the strip', () => {
   // Hand-typed table stays because 「t9」 (unknown) can't render anything.
   const text = `| k | v |

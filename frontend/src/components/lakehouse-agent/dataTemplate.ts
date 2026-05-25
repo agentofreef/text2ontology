@@ -545,6 +545,15 @@ export function renderDataTemplates(
   const cleaned = stripDuplicateTables(text, steps)
   return cleaned.replace(REF_RE, (raw, inner) => {
     const resolved = resolveReference(inner, steps)
-    return resolved ?? raw
+    if (resolved === null) return raw
+    // Multi-line resolutions (currently: the whole-table markdown form) must
+    // be set off by blank lines on both sides, otherwise the markdown renderer
+    // glues the table header onto the preceding paragraph and the whole block
+    // degrades to inline text. Single-line resolutions (scalar numbers, 1x1
+    // table) substitute inline unchanged.
+    if (resolved.indexOf('\n') >= 0) {
+      return '\n\n' + resolved + '\n\n'
+    }
+    return resolved
   })
 }
