@@ -846,12 +846,9 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 你只负责"指哪个数"，不负责"报数"。非数值的结论 / 解读文字照常正常写，**只有数字和表格用引用**。
 ` + capabilityGapPromptSection() + `
 ` + xmlToolSection + `
-## 日期参考
+## 日期参考（用户说"上个月/上季度"等相对时间时，转成下方对应的绝对日期范围再写到 filters 里）
 
-- 今天: ` + time.Now().Format("2006-01-02") + `
-- 去年同期: ` + time.Now().AddDate(-1, 0, 0).Format("2006-01-02") + `
-- 最近6个月: ` + time.Now().AddDate(0, -6, 0).Format("2006-01-02") + ` ~ ` + time.Now().Format("2006-01-02") + `
-` + dataCoverageLine
+` + buildDateReferenceBlock() + dataCoverageLine
 
 		// ── Metric-first steering (USE_METRIC_FIRST) ──
 		// Prefer Mode B (自由组合): take the metric's canonical_metric and write
@@ -1574,7 +1571,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				// ── Native tool_call path ──
 				content, toolCalls, usage, err := llmclient.DoChatWithTools(
 					baseURL, apiKey,
-					M{"model": modelName, "messages": llmMessages, "max_tokens": 4096, "temperature": 0.1},
+					M{"model": modelName, "messages": llmMessages, "temperature": 0.1},
 					v2Tools, "", vendor,
 				)
 				if err != nil {
@@ -1591,7 +1588,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					// No native tool call — re-stream. But check streamed content for XML tool calls too.
 					streamedFinal, sUsage, sErr := llmclient.DoChatStreamCallback(
 						baseURL, apiKey,
-						M{"model": modelName, "messages": llmMessages, "max_tokens": 4096, "temperature": 0.1, "_vendor": vendor},
+						M{"model": modelName, "messages": llmMessages, "temperature": 0.1, "_vendor": vendor},
 						func(token string) { sendSSE("token", token) },
 						func(thinking string) { roundThinking += thinking; sendSSE("thinking", thinking) },
 					)
@@ -1728,7 +1725,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 				// ── XML fallback path (streaming) ──
 				streamedContent, sUsage, sErr := llmclient.DoChatStreamCallback(
 					baseURL, apiKey,
-					M{"model": modelName, "messages": llmMessages, "max_tokens": 4096, "temperature": 0.1, "_vendor": vendor},
+					M{"model": modelName, "messages": llmMessages, "temperature": 0.1, "_vendor": vendor},
 					func(token string) { sendSSE("token", token) },
 					func(thinking string) { roundThinking += thinking; sendSSE("thinking", thinking) },
 				)
@@ -4457,3 +4454,53 @@ func handleLakehouseAgentThreadByID(db *sql.DB) http.HandlerFunc {
 		JsonResp(w, resp)
 	}
 }
+
+// buildDateReferenceBlock formats the date anchors injected into the agent's
+// system prompt. The LLM uses these to resolve relative phrases ("上个月",
+// "近一个季度", "去年同期") into absolute YYYY-MM-DD bounds that smartquery can
+// filter on. Two flavours of "last quarter" are exposed because users mean
+// either of them at random:
+//
+//   - 上个日历季度 — the previous fixed quarter (Q1/Q2/Q3/Q4 boundaries)
+//   - 近一个季度 — rolling 3 months back from today
+//
+// Same pattern for "上个月" (calendar-aligned) vs "近一个月" (rolling 30 days).
+// Keeping both spellings prevents the LLM from guessing which the user meant.
+func buildDateReferenceBlock() string {
+	now := time.Now()
+	loc := now.Location()
+	fmtD := "2006-01-02"
+
+	// Calendar boundaries — anchored to local time.
+	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+	lastMonthEnd := firstOfThisMonth.AddDate(0, 0, -1)
+	lastMonthStart := time.Date(lastMonthEnd.Year(), lastMonthEnd.Month(), 1, 0, 0, 0, 0, loc)
+
+	// Current quarter start month: 1, 4, 7, or 10.
+	curQuarterStartMonth := time.Month(((int(now.Month())-1)/3)*3 + 1)
+	curQuarterStart := time.Date(now.Year(), curQuarterStartMonth, 1, 0, 0, 0, 0, loc)
+	prevQuarterEnd := curQuarterStart.AddDate(0, 0, -1)
+	prevQuarterStart := time.Date(prevQuarterEnd.Year(),
+		time.Month(((int(prevQuarterEnd.Month())-1)/3)*3+1), 1, 0, 0, 0, 0, loc)
+
+	// Rolling windows (count back from today).
+	rolling30Start := now.AddDate(0, -1, 0)
+	rolling90Start := now.AddDate(0, -3, 0)
+	rolling180Start := now.AddDate(0, -6, 0)
+	rolling365Start := now.AddDate(-1, 0, 0)
+
+	var b strings.Builder
+	b.WriteString("- 今天: " + now.Format(fmtD) + "\n")
+	b.WriteString("- 昨天: " + now.AddDate(0, 0, -1).Format(fmtD) + "\n")
+	b.WriteString("- 本月开始: " + firstOfThisMonth.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 上个月（日历）: " + lastMonthStart.Format(fmtD) + " ~ " + lastMonthEnd.Format(fmtD) + "\n")
+	b.WriteString("- 近一个月（滚动30天）: " + rolling30Start.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 本季度开始: " + curQuarterStart.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 上个季度（日历）: " + prevQuarterStart.Format(fmtD) + " ~ " + prevQuarterEnd.Format(fmtD) + "\n")
+	b.WriteString("- 近一个季度（滚动90天）: " + rolling90Start.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 最近6个月（滚动180天）: " + rolling180Start.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 近一年（滚动365天）: " + rolling365Start.Format(fmtD) + " ~ " + now.Format(fmtD) + "\n")
+	b.WriteString("- 去年同期（同一日）: " + now.AddDate(-1, 0, 0).Format(fmtD) + "\n")
+	return b.String()
+}
+
