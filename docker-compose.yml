@@ -349,6 +349,11 @@ services:
     mem_limit: 1g
     cpus: '1.0'
     pids_limit: 512
+    # pgvector HNSW index builds (and parallel maintenance) use POSIX shared
+    # memory; Docker's 64MB default /dev/shm is too small and makes a bulk
+    # `pg_restore` fail the vector-index creation. Give it real room so a full
+    # dump restores cleanly on any host.
+    shm_size: '1gb'
     # max_connections raised from the default 100 to cover the 6-service pool
     # budget (6 × srvkit MaxOpen 20 = 120) plus headroom for psql/maintenance.
     command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
