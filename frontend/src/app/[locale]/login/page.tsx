@@ -57,7 +57,7 @@ export default function LoginPageMinimal() {
     setLoading(false)
 
     if (result.success) {
-      router.push('/ontology/lakehouse-agent')
+      router.push('/ontology/lakehouse-agent?mode=lakehouse')
     } else {
       setError(result.error || (mode === 'signin' ? t('failed_default') : t('register_failed')))
     }

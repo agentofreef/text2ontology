@@ -10,7 +10,7 @@ export default function LocaleHome() {
 
   useEffect(() => {
     if (!isLoading) {
-      router.replace(user ? '/ontology/lakehouse-agent' : '/login')
+      router.replace(user ? '/ontology/lakehouse-agent?mode=lakehouse' : '/login')
     }
   }, [user, isLoading, router])
 
