@@ -1006,8 +1006,158 @@ func handleValidateSQL(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// ─── canonical query construction (duplicate-safe) ──────────────────────────
+//
+// Canonical wraps the user's semantic SQL into a derived table and re-projects
+// each ontology property to its declared name. The semantic SQL can legally
+// emit duplicate output column names (e.g. `SELECT T1.*, T2.*, T3."SS update"`
+// where T1 already has a `"SS update"` column): PG accepts duplicate names in
+// a top-level SELECT result set, which is why validate-sql passes. The
+// wrapping `SELECT od."colname" ...` then has to resolve names on the derived
+// table and bails with `column reference ... is ambiguous`.
+//
+// Fix — probe the semantic SQL's actual output columns with `LIMIT 0`, then
+// give the derived table positional aliases `(_c1, _c2, ..., _cN)` so every
+// column has a unique name regardless of duplicates upstream. Property
+// resolution maps each property's source_column to the FIRST matching
+// position (case/whitespace/underscore-folded key) and emits
+// `od._cN AS "<propName>"`. Names never collide because we never reference
+// the original (possibly duplicated) names from the wrapping SELECT.
+
+type canonicalPropMapping struct {
+	name      string
+	sourceCol string
+}
+
+// normalizeCanonicalKey folds case, whitespace, and underscores into a single
+// equivalence class so "SS update", "SS_update", "ss  update" all collapse to
+// the same key. Mirrors normalizeColKey in
+// services/lakehouse-sql-server/lakehouse/column_probe.go.
+func normalizeCanonicalKey(s string) string {
+	s = strings.TrimSpace(s)
+	var sb strings.Builder
+	prevSep := false
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '_' {
+			if !prevSep {
+				sb.WriteRune('_')
+				prevSep = true
+			}
+			continue
+		}
+		sb.WriteRune(r)
+		prevSep = false
+	}
+	return strings.ToUpper(strings.Trim(sb.String(), "_"))
+}
+
+// buildAlignedCanonical assembles the canonical query for an object using
+// the positional-alias strategy. Must run inside a tx that already has
+// SET LOCAL search_path applied — the LIMIT 0 probe needs it to resolve
+// unqualified table references inside the semantic SQL.
+//
+// Returns (canonical, mapped, unmapped, err). `unmapped` lists property names
+// that either had no source_column or whose source_column didn't match any
+// semantic output column (after normalization).
+func buildAlignedCanonical(tx *sql.Tx, objectID string) (string, []canonicalPropMapping, []string, error) {
+	var semanticSQL string
+	if err := tx.QueryRow(`SELECT COALESCE(semantic_sql,'') FROM ont_object_type WHERE id=$1`, objectID).Scan(&semanticSQL); err != nil {
+		return "", nil, nil, fmt.Errorf("read object: %w", err)
+	}
+	semanticSQL = strings.TrimSpace(semanticSQL)
+	for strings.HasSuffix(semanticSQL, ";") {
+		semanticSQL = strings.TrimSpace(strings.TrimSuffix(semanticSQL, ";"))
+	}
+	if semanticSQL == "" {
+		return "", nil, nil, fmt.Errorf("semantic_sql is empty")
+	}
+
+	propRows, err := tx.Query(`SELECT name, COALESCE(source_column,'') FROM ont_property WHERE object_type_id=$1 ORDER BY name`, objectID)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("query properties: %w", err)
+	}
+	var props []canonicalPropMapping
+	for propRows.Next() {
+		var pm canonicalPropMapping
+		if scanErr := propRows.Scan(&pm.name, &pm.sourceCol); scanErr != nil {
+			propRows.Close()
+			return "", nil, nil, scanErr
+		}
+		props = append(props, pm)
+	}
+	propRows.Close()
+
+	var mapped []canonicalPropMapping
+	var unmapped []string
+	for _, p := range props {
+		if p.sourceCol != "" {
+			mapped = append(mapped, p)
+		} else {
+			unmapped = append(unmapped, p.name)
+		}
+	}
+
+	if len(mapped) == 0 {
+		return fmt.Sprintf(`SELECT od.* FROM (%s) AS od`, semanticSQL), mapped, unmapped, nil
+	}
+
+	probeRows, err := tx.Query(fmt.Sprintf("SELECT * FROM (%s) AS __probe LIMIT 0", semanticSQL))
+	if err != nil {
+		return "", mapped, unmapped, fmt.Errorf("probe semantic columns: %w", err)
+	}
+	realCols, colsErr := probeRows.Columns()
+	probeRows.Close()
+	if colsErr != nil {
+		return "", mapped, unmapped, fmt.Errorf("probe columns: %w", colsErr)
+	}
+	if len(realCols) == 0 {
+		return "", mapped, unmapped, fmt.Errorf("semantic SQL has no output columns")
+	}
+
+	// First-occurrence index — deterministic for duplicates and matches PG's
+	// "first column wins" semantics on SELECT *.
+	indexByKey := make(map[string]int, len(realCols))
+	for i, c := range realCols {
+		k := normalizeCanonicalKey(c)
+		if _, exists := indexByKey[k]; !exists {
+			indexByKey[k] = i
+		}
+	}
+
+	posAliases := make([]string, len(realCols))
+	for i := range realCols {
+		posAliases[i] = fmt.Sprintf("_c%d", i+1)
+	}
+	posListQuoted := make([]string, len(posAliases))
+	for i, a := range posAliases {
+		posListQuoted[i] = `"` + a + `"`
+	}
+
+	var selectParts []string
+	var resolvedMapped []canonicalPropMapping
+	for _, p := range mapped {
+		idx, ok := indexByKey[normalizeCanonicalKey(p.sourceCol)]
+		if !ok {
+			unmapped = append(unmapped, p.name)
+			continue
+		}
+		selectParts = append(selectParts, fmt.Sprintf(`od."%s" AS %q`, posAliases[idx], p.name))
+		resolvedMapped = append(resolvedMapped, p)
+	}
+	if len(selectParts) == 0 {
+		return fmt.Sprintf(`SELECT od.* FROM (%s) AS od`, semanticSQL), nil, unmapped, nil
+	}
+
+	canonical := fmt.Sprintf(`SELECT %s FROM (%s) AS od(%s)`,
+		strings.Join(selectParts, ", "),
+		semanticSQL,
+		strings.Join(posListQuoted, ", "))
+	return canonical, resolvedMapped, unmapped, nil
+}
+
 // ─── POST /api/pbit-lakehouse/solidify-sql ──────────────────────────────────
-// Stores the canonical query (without LIMIT) after successful validation.
+// Persists the canonical query built by buildAlignedCanonical so downstream
+// consumers (sync-property-keywords, ResolveQuery) see the duplicate-safe form.
 
 func handleSolidifySQL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1035,70 +1185,39 @@ func handleSolidifySQL(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Read semantic_sql.
-		var semanticSQL string
-		if err := db.QueryRow(`SELECT COALESCE(semantic_sql,'') FROM ont_object_type WHERE id=$1`, req.ObjectId).Scan(&semanticSQL); err != nil {
-			jsonResp(w, 404, map[string]string{"error": "object not found"})
+		var lakehouseSchema string
+		_ = db.QueryRow(`SELECT COALESCE(lakehouse_schema,'') FROM project WHERE id=$1`, req.ProjectId).Scan(&lakehouseSchema)
+
+		tx, txErr := db.Begin()
+		if txErr != nil {
+			jsonResp(w, 500, map[string]string{"error": "begin tx: " + txErr.Error()})
 			return
 		}
-		if semanticSQL == "" {
-			jsonResp(w, 400, map[string]string{"error": "semantic_sql is empty"})
-			return
+		defer tx.Rollback() //nolint:errcheck
+
+		if lakehouseSchema != "" {
+			if _, spErr := tx.Exec(fmt.Sprintf(`SET LOCAL search_path TO %s, public`, pq.QuoteIdentifier(lakehouseSchema))); spErr != nil {
+				jsonResp(w, 500, map[string]string{"error": "set search_path: " + spErr.Error()})
+				return
+			}
 		}
 
-		// Read properties with source_column mapping.
-		propRows, err := db.Query(`SELECT name, COALESCE(source_column,'') FROM ont_property WHERE object_type_id=$1 ORDER BY name`, req.ObjectId)
+		canonicalQuery, mapped, unmapped, err := buildAlignedCanonical(tx, req.ObjectId)
 		if err != nil {
-			jsonResp(w, 500, map[string]string{"error": "query properties: " + err.Error()})
+			jsonResp(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
-		defer propRows.Close()
-		type propMapping struct {
-			name      string
-			sourceCol string
-		}
-		var props []propMapping
-		for propRows.Next() {
-			var pm propMapping
-			propRows.Scan(&pm.name, &pm.sourceCol)
-			props = append(props, pm)
-		}
 
-		// Build canonical query: only include properties with mapped source_column.
-		// SELECT od."source_col" AS "prop_name", ... FROM (semantic_sql) AS od
-		var mapped []propMapping
-		var unmapped []string
-		for _, p := range props {
-			if p.sourceCol != "" {
-				mapped = append(mapped, p)
-			} else {
-				unmapped = append(unmapped, p.name)
-			}
-		}
-
-		var selectCols string
-		if len(mapped) == 0 {
-			selectCols = "od.*"
-		} else {
-			parts := make([]string, len(mapped))
-			for i, p := range mapped {
-				if p.sourceCol == p.name {
-					parts[i] = fmt.Sprintf("od.%q", p.sourceCol)
-				} else {
-					parts[i] = fmt.Sprintf("od.%q AS %q", p.sourceCol, p.name)
-				}
-			}
-			selectCols = strings.Join(parts, ", ")
-		}
-		canonicalQuery := fmt.Sprintf(`SELECT %s FROM (%s) AS od`, selectCols, semanticSQL)
-
-		// Store canonical_query + validated_at.
-		_, err = db.Exec(`UPDATE ont_object_type SET canonical_query=$1, validated_at=now(),
+		if _, err := tx.Exec(`UPDATE ont_object_type SET canonical_query=$1, validated_at=now(),
 			user_edited_fields = (SELECT ARRAY(SELECT DISTINCT unnest(user_edited_fields || ARRAY['canonical_query']::text[]))),
 			updated_at=now() WHERE id=$2`,
-			canonicalQuery, req.ObjectId)
-		if err != nil {
+			canonicalQuery, req.ObjectId); err != nil {
 			jsonResp(w, 500, map[string]string{"error": "update canonical_query: " + err.Error()})
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			jsonResp(w, 500, map[string]string{"error": "commit: " + err.Error()})
 			return
 		}
 
@@ -1109,14 +1228,20 @@ func handleSolidifySQL(db *sql.DB) http.HandlerFunc {
 		}
 		if len(unmapped) > 0 {
 			resp["unmapped"] = unmapped
-			resp["warning"] = fmt.Sprintf("%d properties have no source_column mapping: %s", len(unmapped), strings.Join(unmapped, ", "))
+			resp["warning"] = fmt.Sprintf("%d properties unmapped (no source_column or no semantic output match): %s", len(unmapped), strings.Join(unmapped, ", "))
 		}
 		jsonResp(w, 200, resp)
 	}
 }
 
 // ─── POST /api/pbit-lakehouse/test-canonical ────────────────────────────────
-// Executes the stored canonical_query with LIMIT 10 to verify it works.
+// Rebuilds the canonical query fresh from semantic_sql + properties (via
+// buildAlignedCanonical) and runs `SELECT * FROM (canonical) cq LIMIT 10`.
+// We do NOT trust the stored canonical_query — it may have been written by
+// a prior solidify that used a different algorithm, which is exactly how a
+// passing validate-sql can coexist with a failing test-canonical. Always
+// rebuilding keeps the invariant "validate ok → test ok" intact, and we
+// persist the fresh canonical so downstream consumers benefit too.
 
 func handleTestCanonical(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1144,18 +1269,6 @@ func handleTestCanonical(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var canonicalQuery string
-		if err := db.QueryRow(`SELECT COALESCE(canonical_query,'') FROM ont_object_type WHERE id=$1`, req.ObjectId).Scan(&canonicalQuery); err != nil {
-			jsonResp(w, 404, map[string]string{"error": "object not found"})
-			return
-		}
-		if canonicalQuery == "" {
-			jsonResp(w, 400, map[string]string{"error": "no canonical_query — run SOLIDIFY first"})
-			return
-		}
-
-		testQuery := fmt.Sprintf(`SELECT * FROM (%s) AS cq LIMIT 10`, canonicalQuery)
-
 		var lakehouseSchema string
 		_ = db.QueryRow(`SELECT COALESCE(lakehouse_schema,'') FROM project WHERE id=$1`, req.ProjectId).Scan(&lakehouseSchema)
 
@@ -1168,17 +1281,30 @@ func handleTestCanonical(db *sql.DB) http.HandlerFunc {
 
 		if lakehouseSchema != "" {
 			if _, spErr := tx.Exec(fmt.Sprintf(`SET LOCAL search_path TO %s, public`, pq.QuoteIdentifier(lakehouseSchema))); spErr != nil {
-				jsonResp(w, 200, map[string]interface{}{"valid": false, "error": "set search_path: " + spErr.Error(), "query": testQuery})
+				jsonResp(w, 200, map[string]interface{}{"valid": false, "error": "set search_path: " + spErr.Error()})
 				return
 			}
 		}
 
-		rows, err := tx.Query(testQuery)
+		canonicalQuery, _, _, err := buildAlignedCanonical(tx, req.ObjectId)
 		if err != nil {
-			jsonResp(w, 200, map[string]interface{}{"valid": false, "error": err.Error(), "query": testQuery})
+			jsonResp(w, 200, map[string]interface{}{"valid": false, "error": err.Error()})
 			return
 		}
-		defer rows.Close()
+
+		// Refresh the stored canonical so sync-property-keywords + ResolveQuery
+		// stop seeing stale, duplicate-unsafe SQL. Non-fatal on failure.
+		if _, refreshErr := tx.Exec(`UPDATE ont_object_type SET canonical_query=$1, updated_at=now() WHERE id=$2`,
+			canonicalQuery, req.ObjectId); refreshErr != nil {
+			log.Printf("test-canonical: refresh canonical_query failed: %v", refreshErr)
+		}
+
+		testQuery := fmt.Sprintf(`SELECT * FROM (%s) AS cq LIMIT 10`, canonicalQuery)
+		rows, qErr := tx.Query(testQuery)
+		if qErr != nil {
+			jsonResp(w, 200, map[string]interface{}{"valid": false, "error": qErr.Error(), "query": testQuery})
+			return
+		}
 
 		cols, _ := rows.Columns()
 		var sampleRows []map[string]interface{}
@@ -1188,7 +1314,7 @@ func handleTestCanonical(db *sql.DB) http.HandlerFunc {
 			for i := range vals {
 				ptrs[i] = &vals[i]
 			}
-			rows.Scan(ptrs...)
+			rows.Scan(ptrs...) //nolint:errcheck
 			row := map[string]interface{}{}
 			for i, col := range cols {
 				v := vals[i]
@@ -1200,8 +1326,13 @@ func handleTestCanonical(db *sql.DB) http.HandlerFunc {
 			}
 			sampleRows = append(sampleRows, row)
 		}
+		rows.Close()
 		if sampleRows == nil {
 			sampleRows = []map[string]interface{}{}
+		}
+
+		if commitErr := tx.Commit(); commitErr != nil {
+			log.Printf("test-canonical: commit refresh failed: %v", commitErr)
 		}
 
 		jsonResp(w, 200, map[string]interface{}{
