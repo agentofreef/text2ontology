@@ -512,21 +512,76 @@ function ToolCard({ fc, expanded, onToggle, onGotoBranch, toolMeta }: { fc: Func
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] text-gray-400">{t('tool_card.label_object')}</span>
                     {(() => {
-                      // smartquery schema's primary OD field is `odName` (single
-                      // string). Legacy callers used `objects` (array). Read both
-                      // so the chip row never goes empty when only one form is
-                      // present; render as the same gray pill row either way.
-                      const ods: string[] = []
-                      const single = fc.arguments.odName
-                      if (typeof single === 'string' && single.trim()) ods.push(single.trim())
+                      // Collect EVERY OD that this smartquery touches, not just
+                      // the primary one. Sources, in order of precedence:
+                      //   1. fc.arguments.odName  — primary OD (string)
+                      //   2. fc.arguments.objects — legacy array form
+                      //   3. fc.arguments.filters[].property   — "MTM.CODE_NAME" → MTM
+                      //      (alt keys: prop / field / column, all checked)
+                      //   4. fc.arguments.groupBy[]            — "PRODUCT.GEN" → PRODUCT
+                      //   5. fc.result?.involved?.odNames      — server-resolved
+                      //      set (most authoritative, comes from the engine after
+                      //      JOIN-path resolution). Merged last so it can confirm
+                      //      / extend, but never silently overrides earlier hits.
+                      // De-dup case-sensitively (OD names are upper-canonical).
+                      // The primary OD is rendered first (dark pill); cross-OD
+                      // mentions render as lighter pills so the eye can tell
+                      // "the OD we aggregate on" from "the OD we filter through".
+                      const primary: string[] = []
+                      const cross: string[] = []
+                      const seen = new Set<string>()
+                      const addPrimary = (s: unknown) => {
+                        if (typeof s !== 'string') return
+                        const t = s.trim()
+                        if (!t || seen.has(t)) return
+                        seen.add(t); primary.push(t)
+                      }
+                      const addCross = (s: unknown) => {
+                        if (typeof s !== 'string') return
+                        const t = s.trim()
+                        if (!t || seen.has(t)) return
+                        seen.add(t); cross.push(t)
+                      }
+                      addPrimary(fc.arguments.odName)
                       if (Array.isArray(fc.arguments.objects)) {
-                        for (const o of fc.arguments.objects) {
-                          if (typeof o === 'string' && o.trim() && !ods.includes(o.trim())) ods.push(o.trim())
+                        for (const o of fc.arguments.objects) addPrimary(o)
+                      }
+                      // Cross-OD references hide inside filters + groupBy values
+                      // that prefix the property with "OD." — pull the prefix.
+                      const filters = Array.isArray(fc.arguments.filters) ? fc.arguments.filters as Array<Record<string, unknown>> : []
+                      for (const f of filters) {
+                        const ref = f?.property ?? f?.prop ?? f?.field ?? f?.column
+                        if (typeof ref === 'string' && ref.includes('.')) {
+                          addCross(ref.split('.')[0])
                         }
                       }
-                      return ods.map((o, oi) => (
-                        <span key={oi} className="bg-gray-800 text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{o}</span>
-                      ))
+                      const groupBy = Array.isArray(fc.arguments.groupBy) ? fc.arguments.groupBy as unknown[] : []
+                      for (const g of groupBy) {
+                        if (typeof g === 'string' && g.includes('.')) {
+                          addCross(g.split('.')[0])
+                        }
+                      }
+                      // Server-resolved involved set (after engine join-path
+                      // resolution). Treat as cross unless we have no primary
+                      // yet — then the first server OD becomes the primary
+                      // chip so the row is never empty.
+                      const involved = (fc.result as { involved?: { odNames?: unknown[] } } | undefined)?.involved?.odNames
+                      if (Array.isArray(involved)) {
+                        for (const o of involved) {
+                          if (primary.length === 0) addPrimary(o)
+                          else addCross(o)
+                        }
+                      }
+                      return (
+                        <>
+                          {primary.map((o, oi) => (
+                            <span key={`p-${oi}`} className="bg-gray-800 text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{o}</span>
+                          ))}
+                          {cross.map((o, oi) => (
+                            <span key={`x-${oi}`} className="bg-gray-100 text-gray-700 border border-gray-300 px-1.5 py-0.5 rounded text-[10px] font-semibold">{o}</span>
+                          ))}
+                        </>
+                      )
                     })()}
                     {fc.arguments.metric ? <><span className="text-[10px] text-gray-400 ml-1">{t('tool_card.label_metric')}</span><Badge variant="accent">{String(fc.arguments.metric)}</Badge></> : null}
                   </div>
