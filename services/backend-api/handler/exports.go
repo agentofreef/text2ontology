@@ -163,16 +163,7 @@ func HandleTokenAnnotations(db *sql.DB) http.HandlerFunc { return handleTokenAnn
 // HandleTokenAnnotationByID returns the token-annotation get/update/delete factory.
 func HandleTokenAnnotationByID(db *sql.DB) http.HandlerFunc { return handleTokenAnnotationByID(db) }
 
-// ── Phase 3 X2 exports (metric-intents + keyword-triage) ───────────────────
-
-// HandleMetricIntents returns the lakehouse_metric_intent list + create factory.
-func HandleMetricIntents(db *sql.DB) http.HandlerFunc { return handleMetricIntents(db) }
-
-// HandleMetricIntentByID returns the metric-intent get/update/delete factory.
-func HandleMetricIntentByID(db *sql.DB) http.HandlerFunc { return handleMetricIntentByID(db) }
-
-// HandleIntentTriggers returns the metric-intent triggers CRUD factory.
-func HandleIntentTriggers(db *sql.DB) http.HandlerFunc { return handleIntentTriggers(db) }
+// ── Phase 3 X2 exports (keyword-triage) ───────────────────────────────────
 
 // HandleTriageQueue returns the keyword-triage queue endpoint.
 func HandleTriageQueue(db *sql.DB) http.HandlerFunc { return handleTriageQueue(db) }

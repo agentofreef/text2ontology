@@ -69,7 +69,7 @@ func handleQueryLogTemplate(db *sql.DB) http.HandlerFunc {
 		writer.Write([]string{"# question", "用户的自然语言问题（必填，唯一标识）"})
 		writer.Write([]string{"# tokens", "分词结果，用 | 分隔（如: X11代|legion|产品）"})
 		writer.Write([]string{"# objects", "对象名，用 | 分隔（如: Order|Product）"})
-		writer.Write([]string{"# metric", "指标，有且只能有一个（如: Order.sum），无则留空"})
+		writer.Write([]string{"# metric", "口径，有且只能有一个（如: Order.sum），无则留空"})
 		writer.Write([]string{"# groupBy", "分组属性，格式 对象名.属性名，用 | 分隔，无则留空"})
 		writer.Write([]string{"# mark", "是否启用为飞轮数据（true/false）"})
 		writer.Write([]string{"# is_example", "是否作为示例问题显示在Agent页面（true/false）"})

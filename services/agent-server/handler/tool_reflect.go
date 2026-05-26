@@ -144,7 +144,7 @@ func runReflectTool(db *sql.DB, args map[string]interface{}) M {
 		if status, _ := resp["execution_status"].(string); status == "success" {
 			return M{
 				"verdict":            "match",
-				"reasoning":          "composite 指标 (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
+				"reasoning":          "composite 口径 (plan-mode) — 输出 step 已成功执行，按授权的 plan 取信。",
 				"missing_dimensions": []string{},
 				"suggested_action":   "answer",
 				"source":             "plan",

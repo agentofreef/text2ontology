@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -175,18 +174,7 @@ func main() {
 	mux.HandleFunc("/internal/backend-api/token-annotations", handler.HandleTokenAnnotations(db))
 	mux.HandleFunc("/internal/backend-api/token-annotations/", handler.HandleTokenAnnotationByID(db))
 
-	// Phase 3 X2: metric-intents + keyword-triage.
-	// The /metric-intents/ by-id + /triggers sub-route are dispatched
-	// by inspecting the path suffix (mirrors the legacy monolith
-	// routing), so we wire a single prefix handler.
-	mux.HandleFunc("/internal/backend-api/metric-intents", handler.HandleMetricIntents(db))
-	mux.HandleFunc("/internal/backend-api/metric-intents/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/triggers") {
-			handler.HandleIntentTriggers(db)(w, r)
-			return
-		}
-		handler.HandleMetricIntentByID(db)(w, r)
-	})
+	// Phase 3 X2: keyword-triage (metric-intents routes removed).
 	mux.HandleFunc("/internal/backend-api/keyword-triage/queue", handler.HandleTriageQueue(db))
 	mux.HandleFunc("/internal/backend-api/keyword-triage/token", handler.HandleTriageToken(db))
 	mux.HandleFunc("/internal/backend-api/keyword-triage/assign", handler.HandleTriageAssign(db))

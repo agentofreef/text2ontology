@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"net/http"
-	"strings"
 
 	"github.com/lakehouse2ontology/services/backend-api/handler"
 )
@@ -71,22 +70,8 @@ func registerPublicAPI(mux *http.ServeMux, db *sql.DB) {
 	mux.HandleFunc("/api/ontology/token-annotations", handler.HandleTokenAnnotations(db))
 	mux.HandleFunc("/api/ontology/token-annotations/", handler.HandleTokenAnnotationByID(db))
 
-	// X2 metric-intents + keyword-triage
-	mux.HandleFunc("/api/ontology/metric-intents", handler.HandleMetricIntents(db))
-	// Bulk operations — registered before the catch-all /metric-intents/{id} dispatcher.
-	mux.HandleFunc("/api/ontology/metric-intents/bulk-impact", handler.HandleMetricIntentsBulkImpact(db))
-	mux.HandleFunc("/api/ontology/metric-intents/bulk-delete", handler.HandleMetricIntentsBulkDelete(db))
-	mux.HandleFunc("/api/ontology/metric-intents/bulk-update", handler.HandleMetricIntentsBulkUpdate(db))
-	mux.HandleFunc("/api/ontology/metric-intents/bulk-create", handler.HandleMetricIntentsBulkCreate(db))
-	mux.HandleFunc("/api/ontology/metric-intents/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/triggers") {
-			handler.HandleIntentTriggers(db)(w, r)
-			return
-		}
-		handler.HandleMetricIntentByID(db)(w, r)
-	})
-	// Unified metric (lakehouse_metric) — coexists with metric-intents during the
-	// compatibility window. Triggers are managed inline via the POST/PUT body.
+	// X2 keyword-triage (metric-intents routes removed — /api/ontology/metric-intents* → 404)
+	// Unified metric (lakehouse_metric).
 	mux.HandleFunc("/api/ontology/lakehouse-metrics", handler.HandleLakehouseMetrics(db))
 	mux.HandleFunc("/api/ontology/lakehouse-metrics/", handler.HandleLakehouseMetricByID(db))
 	mux.HandleFunc("/api/ontology/keyword-triage/queue", handler.HandleTriageQueue(db))

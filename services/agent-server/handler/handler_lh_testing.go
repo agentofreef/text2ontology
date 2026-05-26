@@ -804,7 +804,7 @@ func runLakehouseTestCase(ctx context.Context, db *sql.DB, projectID, suiteID, c
 </function_call>
 
 ### smartquery — 执行数据查询
-{"objects": [...], "metric": "指标名", "groupBy": [...], "filters": [{"prop":"属性名","op":"=","value":"值"}], "orderBy": [...], "limit": N, "displayMode": "table|bar|pie|line"}
+{"objects": [...], "metric": "口径名", "groupBy": [...], "filters": [{"prop":"属性名","op":"=","value":"值"}], "orderBy": [...], "limit": N, "displayMode": "table|bar|pie|line"}
 
 ### lookup — 补充查询本体信息
 {"ontology_name":["Od或Ok名称"],"keyword":["业务词"]}

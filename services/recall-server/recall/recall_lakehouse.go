@@ -1207,11 +1207,11 @@ func fallbackPropertyMatch(db *sql.DB, projectID, token string, result *RecallRe
 	}
 }
 
-// recallMetricIntents looks up lakehouse_keyword rows whose metric_intent_id is
-// non-null, joins to lakehouse_metric_intent, and returns a deduped list of
-// MetricIntent objects. Each intent records every token that hit it. A token
-// hitting an intent is also recorded in matchedTokens so downstream fallback
-// paths (Ok, direct Od, property name) do NOT re-process it.
+// recallMetricIntents looks up lakehouse_keyword rows whose metric_id is
+// non-null, joins to lakehouse_metric (统一口径/口径), and returns a deduped list
+// of MetricIntent objects. Each metric records every token that hit it. A
+// token hitting a metric is also recorded in matchedTokens so downstream
+// fallback paths (Ok, direct Od, property name) do NOT re-process it.
 //
 // Tier rule: if any token hits an intent via EXACT, tier is "EXACT"; else "FUZZY".
 // Order: priority DESC, then first-hit order.
@@ -1319,9 +1319,10 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		             SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
 		             WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))`
 	}
-	// Shared SELECT column list — IDENTICAL column names exist on both
-	// lakehouse_metric_intent (old) and lakehouse_metric (new, unified 指标).
-	// The alias `mi` is reused for both so the scan helper is table-agnostic.
+	// SELECT column list — joined to lakehouse_metric (统一口径/口径) under alias
+	// `mi`. The legacy lakehouse_metric_intent table is no longer consulted; the
+	// agent runtime path is metric-only. The type name MetricIntent below is
+	// kept for source-stability across the agent server.
 	const selectCols = `
 		SELECT DISTINCT
 		    mi.id::text, mi.name, COALESCE(mi.display_name,''),
@@ -1341,22 +1342,9 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		    mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
 		    COALESCE(mi.parameters::text, '[]')`
 
-	// Old table: lakehouse_metric_intent, joined via lk.metric_intent_id.
-	qOld := selectCols + `
-		FROM lakehouse_keyword lk
-		JOIN lakehouse_metric_intent mi ON lk.metric_intent_id = mi.id
-		JOIN ont_object_type o ON mi.object_id = o.id
-		WHERE lk.project_id = $1
-		  AND COALESCE(lk.is_stopword, false) = false
-		  AND COALESCE(mi.mark, true) = true
-		  AND COALESCE(o.mark, true) = true
-		  AND ` + cond + `
-		LIMIT 10`
-
-	// New table: lakehouse_metric (unified 指标), joined via lk.metric_id.
-	// Same column names, same token/guard conditions, PLUS deleted_at IS NULL
-	// (the new table carries a soft-delete column the old one lacks).
-	qNew := selectCols + `
+	// lakehouse_metric (统一口径/口径). Joined via lk.metric_id; soft-deletes
+	// excluded via mi.deleted_at IS NULL.
+	q := selectCols + `
 		FROM lakehouse_keyword lk
 		JOIN lakehouse_metric mi ON lk.metric_id = mi.id
 		JOIN ont_object_type o ON mi.object_id = o.id
@@ -1367,39 +1355,13 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		  AND COALESCE(o.mark, true) = true
 		  AND ` + cond + `
 		LIMIT 10`
-
-	// Collect old-table then new-table matches, then dedup by LOWER(name)
-	// with NEW-TABLE-WINS: a lakehouse_metric row shadows a
-	// lakehouse_metric_intent row of the same name.
-	oldHits := scanMetricIntentRows(db, projectID, qOld, token)
-	newHits := scanMetricIntentRows(db, projectID, qNew, token)
-	byName := map[string]MetricIntent{}
-	var order []string // preserve first-seen order (old then new)
-	for _, mi := range oldHits {
-		k := strings.ToLower(mi.Name)
-		if _, seen := byName[k]; !seen {
-			order = append(order, k)
-		}
-		byName[k] = mi
-	}
-	for _, mi := range newHits {
-		k := strings.ToLower(mi.Name)
-		if _, seen := byName[k]; !seen {
-			order = append(order, k)
-		}
-		byName[k] = mi // new-table wins on collision
-	}
-	out := make([]MetricIntent, 0, len(order))
-	for _, k := range order {
-		out = append(out, byName[k])
-	}
-	return out
+	return scanMetricIntentRows(db, projectID, q, token)
 }
 
-// scanMetricIntentRows runs one already-built SELECT (against either
-// lakehouse_metric_intent or lakehouse_metric — both expose IDENTICAL column
-// names under alias `mi`) and scans each row into a MetricIntent. Factored out
-// so the old-table and new-table queries share one scan/unmarshal path.
+// scanMetricIntentRows runs one already-built SELECT against lakehouse_metric
+// (alias `mi`) and scans each row into a MetricIntent. The Go type name retains
+// the historical "MetricIntent" identifier for source-stability across the
+// agent server.
 func scanMetricIntentRows(db *sql.DB, projectID, query, token string) []MetricIntent {
 	rows, err := db.Query(query, projectID, token)
 	if err != nil {

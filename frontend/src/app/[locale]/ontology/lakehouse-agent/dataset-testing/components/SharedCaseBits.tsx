@@ -183,7 +183,7 @@ export function FunctionCallRound({ fc, defaultOpen }: { fc: FunctionCall; defau
                 ))}
                 {!!fc.arguments.metric && (
                   <>
-                    <span className="font-mono text-[10px] text-ink-ghost ml-1">指标:</span>
+                    <span className="font-mono text-[10px] text-ink-ghost ml-1">口径:</span>
                     <span className="border border-accent text-accent px-1.5 py-0.5 font-mono text-[10px]">
                       {String(fc.arguments.metric)}
                     </span>

@@ -72,7 +72,6 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
         { href: '/ontology/lakehouse',                label: t('lakehouse'),          icon: Database  },
         { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
         { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
-        { href: '/ontology/lakehouse-metric-intents', label: t('metric_intents'),     icon: BarChart3 },
         { href: '/ontology/lakehouse-metrics',        label: t('metrics'),            icon: LineChart },
       ],
     },

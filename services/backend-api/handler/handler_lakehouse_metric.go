@@ -95,7 +95,7 @@ func applyParsedBareSQL(w http.ResponseWriter, db *sql.DB, projectID string, bod
 	if perr != nil {
 		w.WriteHeader(400)
 		JsonResp(w, M{
-			"error": fmt.Sprintf("指标 SQL 解析失败: %v", perr),
+			"error": fmt.Sprintf("口径 SQL 解析失败: %v", perr),
 			"code":  "BARE_SQL_PARSE_FAILED",
 			"hint":  "新模型只接单层聚合 SELECT (无 JOIN/子查询/多聚合)。复杂形态请使用 level='sql' 走 {sys.req/opt} 路径。",
 		})
@@ -173,7 +173,7 @@ func HandleLakehouseMetrics(db *sql.DB) http.HandlerFunc {
 				if vr := validateIntentRemote(r.Context(), buildIntentValidateInput(db, body)); !vr.Ok {
 					w.WriteHeader(400)
 					JsonResp(w, M{
-						"error":  fmt.Sprintf("指标校验失败 (%s)", vr.Code),
+						"error":  fmt.Sprintf("口径校验失败 (%s)", vr.Code),
 						"errors": vr.Errors,
 						"code":   vr.Code,
 					})
@@ -352,7 +352,7 @@ func HandleLakehouseMetricByID(db *sql.DB) http.HandlerFunc {
 				if vr := validateIntentRemote(r.Context(), buildIntentValidateInput(db, body)); !vr.Ok {
 					w.WriteHeader(400)
 					JsonResp(w, M{
-						"error":  fmt.Sprintf("指标校验失败 (%s)", vr.Code),
+						"error":  fmt.Sprintf("口径校验失败 (%s)", vr.Code),
 						"errors": vr.Errors,
 						"code":   vr.Code,
 					})

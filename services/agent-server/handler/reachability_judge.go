@@ -103,9 +103,9 @@ func loadShapeVocab(ctx context.Context, db *sql.DB) []shapeCap {
 // builds on instead of re-parsing the raw question.
 type tokenRole struct {
 	Token   string
-	Role    string   // "指标" | "取值" | "列"
-	Field   string   // "Table.Field" for 取值/列 (empty for 指标)
-	Intents []string // matched intent names for 指标
+	Role    string   // "口径" | "取值" | "列"
+	Field   string   // "Table.Field" for 取值/列 (empty for 口径)
+	Intents []string // matched intent names for 口径
 }
 
 // summarizeRecallResolution derives, from the recall result, what the project's
@@ -138,7 +138,7 @@ func summarizeRecallResolution(rr recall.RecallResult) ([]tokenRole, map[string]
 		}
 	}
 	for tok, names := range metricNames {
-		remember(tok, tokenRole{Token: tok, Role: "指标", Intents: names})
+		remember(tok, tokenRole{Token: tok, Role: "口径", Intents: names})
 	}
 	// Value / column tokens from per-token keyword hits.
 	for tok, hits := range rr.TokenDetails {
@@ -555,9 +555,9 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 			// the vocab, so an unpopulated vocab never gates.
 			if vocabKnown[h.Shape] && !anyCitedIntentServesShape(realCoveredBy, h.Shape, intents, satisfies) {
 				rc.MissingNote = fmt.Sprintf(
-					"已授权指标 (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
+					"已授权口径 (%s) 真实，但没有任何参数声明可服务「%s」形态的能力",
 					strings.Join(realCoveredBy, "、"), h.Shape)
-				blockers = append(blockers, fmt.Sprintf("「%s」需要 %s 形态，但已召回指标的参数无法服务", h.Name, h.Shape))
+				blockers = append(blockers, fmt.Sprintf("「%s」需要 %s 形态，但已召回口径的参数无法服务", h.Name, h.Shape))
 				v.Requirements = append(v.Requirements, rc)
 				continue
 			}
@@ -578,7 +578,7 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 			if h.UncoveredReason != "" {
 				rc.MissingNote = h.UncoveredReason
 			} else {
-				rc.MissingNote = fmt.Sprintf("无已授权指标以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
+				rc.MissingNote = fmt.Sprintf("无已授权口径以「%s」形态显式覆盖「%s」（将在执行阶段解析）", h.Shape, h.Name)
 			}
 		}
 
@@ -607,7 +607,7 @@ func buildVerdictFromLLMHints(ctx context.Context, db *sql.DB, projectID string,
 	// Metric-only gate: refuse the turn only when recall surfaced NO Intent at
 	// all — there is nothing to measure. (See blockers comment above.)
 	if len(intents) == 0 {
-		blockers = append(blockers, "未召回到任何可用于度量的指标 —— 当前本体没有与该指标相关的已授权口径")
+		blockers = append(blockers, "未召回到任何可用于度量的口径 —— 当前本体没有与该口径相关的已授权口径")
 	}
 
 	v.Feasible = len(blockers) == 0 && len(clarifyMsgs) == 0
@@ -700,9 +700,9 @@ func buildVerdictReason(v mission.ReachabilityVerdict, blockers []string) string
 	var sb strings.Builder
 	sb.WriteString("可行")
 	if len(covered) > 0 {
-		sb.WriteString(fmt.Sprintf("：维度（%s）已被已授权指标覆盖", strings.Join(collectNames(covered), "、")))
+		sb.WriteString(fmt.Sprintf("：维度（%s）已被已授权口径覆盖", strings.Join(collectNames(covered), "、")))
 	} else {
-		sb.WriteString("：已召回相关指标")
+		sb.WriteString("：已召回相关口径")
 	}
 	if len(willResolve) > 0 {
 		sb.WriteString(fmt.Sprintf("；筛选/维度（%s）将在执行阶段按 OD 属性 / SmartQuery 解析", strings.Join(collectNames(willResolve), "、")))
@@ -750,18 +750,18 @@ func decomposeQuestion(
 		return zero, fmt.Errorf("no agent LLM config available")
 	}
 
-	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的指标参数表，做三件事：
+	systemPrompt := `你是一个数据可达性裁判。给定用户问题与可用的口径参数表，做三件事：
 
 第一件：把用户这一句里包含的「独立子问题」分出来。一句话里可能并列了多个问题（例如"上海的总营收是多少？外卖占比是多少？"是两个子问题）。每个子问题用一句自然语言描述。如果只有一个问题，就只返回一个。
 第二件：把问题拆解为它所需的数据要素（metric / dimension / filter）。
-第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个指标真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
+第三件：对每个 dimension / filter 要素，**严格基于参数表的 op / type / 描述** 判断有哪个口径真正支持这个要素所要求的"形态"（范围 / 单月前缀 / 等值 ...）。这件事是关键，仅靠 property 名字相同就判可达是错的。
 
-**追问承接**：最新一句可能是**追问**（省略了指标/维度/筛选，靠上文承接）。先结合上述历史把最新问题**补全成完整问题**，再按补全后的完整问题拆解 metric/dimension/filter。例如历史问的是"上海各产品的营收"，最新一句"那 AP 呢？"应补全为"AP 产品的营收"，沿用上文的指标（营收）和维度（产品）。
+**追问承接**：最新一句可能是**追问**（省略了口径/维度/筛选，靠上文承接）。先结合上述历史把最新问题**补全成完整问题**，再按补全后的完整问题拆解 metric/dimension/filter。例如历史问的是"上海各产品的营收"，最新一句"那 AP 呢？"应补全为"AP 产品的营收"，沿用上文的口径（营收）和维度（产品）。
 
-**铁律**：分词与识别一律以下方「召回已解析」小节为准，**禁止你自己重新分词或拆开多词 token**。凡命中 指标/取值/列 的 token 一律 covered=true（本体中确实存在）；只有召回完全没命中、而用户又明显想用作筛选/分组的词，才允许 covered=false。
+**铁律**：分词与识别一律以下方「召回已解析」小节为准，**禁止你自己重新分词或拆开多词 token**。凡命中 口径/取值/列 的 token 一律 covered=true（本体中确实存在）；只有召回完全没命中、而用户又明显想用作筛选/分组的词，才允许 covered=false。
 
 只输出一个 JSON 对象，不要包裹 markdown 代码块，不要输出任何其他文字：
-{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","value":"...","shape":"...","why":"...","covered":true|false,"covered_by":["指标a"],"uncovered_reason":"..."}]}
+{"sub_questions":["子问题1","子问题2"],"requirements":[{"kind":"metric|dimension|filter","name":"...","value":"...","shape":"...","why":"...","covered":true|false,"covered_by":["口径a"],"uncovered_reason":"..."}]}
 
 sub_questions 规则：
 - 每个元素是一句完整的自然语言子问题，尽量保留用户原话里的关键词。
@@ -769,7 +769,7 @@ sub_questions 规则：
 - 最多 6 个。
 
 requirements 字段规则：
-- kind="metric" 表示用户想查询的指标（如销售额、数量）。
+- kind="metric" 表示用户想查询的口径（如销售额、数量）。
 - kind="dimension" 表示用户想按其分组的维度。
 - kind="filter" 表示用户想按其筛选的条件。
 - name：对于 dimension/filter，必须使用下方参数表中真实出现的参数 property 名称；如果整张参数表里没有匹配的 property，用问题中的原始词，并把这一项标为 covered=false。
@@ -780,11 +780,11 @@ requirements 字段规则：
   - filter 用具体形态："等值"/"单值"/"前缀匹配"/"区间"/"年范围"/"月范围"/"日期范围"/"枚举集合" 等。**形态必须精确**，不要笼统写"范围"。
 - why：一句话说明问题为什么需要这个要素。
 - covered（仅 dimension/filter 需要；metric 可省略，等同 true）：
-  - true 仅当存在某个指标的参数同时满足：(a) property 与 name 一致；(b) op/type/描述 表明它能支撑这个 shape。
+  - true 仅当存在某个口径的参数同时满足：(a) property 与 name 一致；(b) op/type/描述 表明它能支撑这个 shape。
   - 例如 shape="年范围" 但参数 op="starts with" 且 描述="YYYY-MM" → 单月前缀，无法直接覆盖年范围 → covered=false。
   - 例如 shape="等值" 且参数 op="=" → 覆盖。
   - 例如 shape="枚举集合" 且参数 type="enum_ref" 且 op="=" → 单次只能选一个枚举值 → 仍是 covered=false（除非问题就是单值）。
-- covered_by：covered=true 时，列出真正满足形态的指标名（必须出现在参数表里）。
+- covered_by：covered=true 时，列出真正满足形态的口径名（必须出现在参数表里）。
 - uncovered_reason：covered=false 时，一句话说明为什么形态对不上（例如"参数仅支持 YYYY-MM 单月前缀，不直接支持 2024-2025 年范围"）。
 - 如果问题只是通用查询（无特定筛选），requirements 只返回 metric 项。
 - requirements 元素不超过 8 个。`
@@ -830,25 +830,25 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vo
 	sb.WriteString(question)
 	if len(roles) > 0 {
 		sb.WriteString("\n\n## 召回已解析（分词器+召回的权威结果 —— 必须以此为准，禁止重新分词）\n")
-		sb.WriteString("下列 token 由系统分词器切分、召回引擎解析。**严禁把多词 token 拆开**，也不要把指标里的词单独抽出来当筛选：\n")
+		sb.WriteString("下列 token 由系统分词器切分、召回引擎解析。**严禁把多词 token 拆开**，也不要把口径里的词单独抽出来当筛选：\n")
 		for _, r := range roles {
 			switch r.Role {
-			case "指标":
-				sb.WriteString(fmt.Sprintf("- 「%s」→ 指标（命中：%s）\n", r.Token, strings.Join(r.Intents, "、")))
+			case "口径":
+				sb.WriteString(fmt.Sprintf("- 「%s」→ 口径（命中：%s）\n", r.Token, strings.Join(r.Intents, "、")))
 			case "取值":
 				sb.WriteString(fmt.Sprintf("- 「%s」→ 取值（字段 %s）\n", r.Token, r.Field))
 			case "列":
 				sb.WriteString(fmt.Sprintf("- 「%s」→ 列/维度（字段 %s）\n", r.Token, r.Field))
 			}
 		}
-		sb.WriteString("角色为 指标/取值/列 的 token 一律 covered=true —— 它们在本体中确实存在。只有用户明显想筛/分组、却在上面**完全没出现**的词，才标 covered=false。\n")
+		sb.WriteString("角色为 口径/取值/列 的 token 一律 covered=true —— 它们在本体中确实存在。只有用户明显想筛/分组、却在上面**完全没出现**的词，才标 covered=false。\n")
 	}
-	sb.WriteString("\n\n## 可用指标参数表（按形态判断可达性时必须以此为准）\n")
+	sb.WriteString("\n\n## 可用口径参数表（按形态判断可达性时必须以此为准）\n")
 	if len(intents) == 0 {
-		sb.WriteString("（无已召回指标）\n")
+		sb.WriteString("（无已召回口径）\n")
 	} else {
 		for _, mi := range intents {
-			sb.WriteString(fmt.Sprintf("### 指标: %s\n", mi.Name))
+			sb.WriteString(fmt.Sprintf("### 口径: %s\n", mi.Name))
 			if len(mi.Parameters) == 0 {
 				sb.WriteString("（无参数）\n")
 				continue
@@ -887,7 +887,7 @@ func buildDecomposeUserPrompt(question string, intents []recall.MetricIntent, vo
 			}
 			sb.WriteString("\n")
 		}
-		sb.WriteString("\n仅当某指标的某个参数声明了 shape_capability 等于该要素 shape 时，才算形态对得上；否则即便 property 名字一致，也要把 covered 置为 false。\n")
+		sb.WriteString("\n仅当某口径的某个参数声明了 shape_capability 等于该要素 shape 时，才算形态对得上；否则即便 property 名字一致，也要把 covered 置为 false。\n")
 	}
 	sb.WriteString("\n请输出 JSON 对象。")
 	return sb.String()

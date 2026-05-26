@@ -71,7 +71,7 @@ func Judge(decomposition []DecompItem, intents []IntentSpec) ReachabilityVerdict
 			rc.Covered = true
 			rc.CoveredBy = covering
 		} else {
-			rc.MissingNote = fmt.Sprintf("没有任何已授权指标提供「%s」这个维度", d.Name)
+			rc.MissingNote = fmt.Sprintf("没有任何已授权口径提供「%s」这个维度", d.Name)
 			v.Feasible = false
 		}
 		v.Requirements = append(v.Requirements, rc)
@@ -100,11 +100,11 @@ func renderReason(v ReachabilityVerdict) string {
 		if len(dims) == 0 {
 			return "可行:问题不涉及需要授权的筛选维度。"
 		}
-		return fmt.Sprintf("可行:问题所需的维度(%s)均被已授权指标覆盖。",
+		return fmt.Sprintf("可行:问题所需的维度(%s)均被已授权口径覆盖。",
 			strings.Join(dims, "、"))
 	}
 	return fmt.Sprintf(
-		"不可行:问题需要按「%s」筛选,但没有任何已授权指标提供这个(些)维度——"+
+		"不可行:问题需要按「%s」筛选,但没有任何已授权口径提供这个(些)维度——"+
 			"因此这个问题的整体回答现在做不到。",
 		strings.Join(uncovered, "、"))
 }

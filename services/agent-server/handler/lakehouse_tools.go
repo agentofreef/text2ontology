@@ -34,11 +34,11 @@ func classifyExecError(raw string) string {
 	case strings.Contains(lower, "circular"):
 		return "循环依赖：查询中存在循环引用，请简化聚合或筛选条件。"
 	case strings.Contains(lower, "a single value"):
-		return "列值不唯一：当前上下文中某属性有多个值，无法确定单一值。请增加 filters 缩小范围，或改用聚合指标。"
+		return "列值不唯一：当前上下文中某属性有多个值，无法确定单一值。请增加 filters 缩小范围，或改用聚合口径。"
 	case strings.Contains(lower, "ambiguous") || strings.Contains(lower, "multiple tables"):
 		return "列引用不明确：属性名在多个数据对象中重复，请在 filters/groupBy 中加上对象前缀（如 Object.Property）。"
 	case strings.Contains(lower, "400") || strings.Contains(lower, "bad request"):
-		return "请求格式错误：API 拒绝了查询请求，可能是参数组合不合法（如空 groupBy + 无指标），请检查 objects/metric/filters 是否完整。"
+		return "请求格式错误：API 拒绝了查询请求，可能是参数组合不合法（如空 groupBy + 无口径），请检查 objects/metric/filters 是否完整。"
 	case strings.Contains(lower, "0 rows") || strings.Contains(lower, "empty"):
 		return "查询返回 0 行：筛选条件过于严格，请确认 filters.value 的值是否存在于数据中（可通过 lookup keyword 查看已知值）。"
 	default:

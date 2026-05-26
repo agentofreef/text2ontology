@@ -247,7 +247,7 @@ func writeRoundArguments(sb *strings.Builder, toolName string, args map[string]i
 			sb.WriteString("对象: " + strings.Join(v, ", ") + "\n")
 		}
 		if v, ok := args["metric"].(string); ok && v != "" {
-			sb.WriteString("指标: " + v + "\n")
+			sb.WriteString("口径: " + v + "\n")
 		}
 		if v := stringSliceFromAny(args["groupBy"]); len(v) > 0 {
 			sb.WriteString("分组: " + strings.Join(v, ", ") + "\n")

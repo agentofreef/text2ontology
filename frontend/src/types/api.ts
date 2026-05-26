@@ -148,7 +148,7 @@ export interface OntLinkType {
   updatedAt: string
 }
 
-// Metric (指标) — lakehouse "query metric shortcut" (Order.Total, Order.Real, ...).
+// Metric (口径) — lakehouse "query metric shortcut" (Order.Total, Order.Real, ...).
 // Maps natural-language trigger terms (via lakehouse_keyword) to a canonical
 // smartquery template so the LLM doesn't have to re-derive filter/groupBy.
 export interface OntMetricIntentFilter {
@@ -186,8 +186,8 @@ export interface OntMetricIntent {
   updatedAt: string
 }
 
-// ─── Unified Metric (指标 — lakehouse_metric) ─────────────────
-// The new first-class "指标" concept (table lakehouse_metric). Coexists with
+// ─── Unified Metric (口径 — lakehouse_metric) ─────────────────
+// The new first-class "口径" concept (table lakehouse_metric). Coexists with
 // OntMetricIntent (lakehouse_metric_intent). Adds typed `parameters` (a metric
 // declares typed params; required ones the agent asks the user about) plus an
 // optional `level` (simple|plan) and advanced raw `plan` object.

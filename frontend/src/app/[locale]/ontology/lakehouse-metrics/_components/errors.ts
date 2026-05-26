@@ -1,5 +1,5 @@
 // extractApiError — turn a thrown api() error into a user-facing message for
-// the 指标 create/update flows. api() attaches `.status` and `.payload` to the
+// the 口径 create/update flows. api() attaches `.status` and `.payload` to the
 // Error, so we can pull the structured backend codes:
 //   400 {code:"NO_TRIGGERS"}        → "触发词不能为空…"
 //   400 {code, errors:[...]}        → joined validation messages

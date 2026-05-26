@@ -300,7 +300,7 @@ export function MetricEditor({ form, setForm, objects, t }: Props) {
           </div>
         )}
 
-        {/* 指标 SQL — 只描述指标本身,单 OD,无 token、无 JOIN、无过滤 */}
+        {/* 口径 SQL — 只描述口径本身,单 OD,无 token、无 JOIN、无过滤 */}
         <Panel title={t('metric_sql')} hint={t('metric_sql_hint')}>
           <SQLEditor
             value={form.querySql}

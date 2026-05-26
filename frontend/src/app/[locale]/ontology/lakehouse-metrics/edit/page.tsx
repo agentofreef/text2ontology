@@ -1,6 +1,6 @@
 'use client'
 
-// 编辑指标（Metric, table lakehouse_metric）— two-pane editor, mirrors /new.
+// 编辑口径（Metric, table lakehouse_metric）— two-pane editor, mirrors /new.
 // GET /ontology/lakehouse-metrics/{id} returns the full record incl querySql +
 // level, so we seed the form directly. Route uses ?id=xxx (not a dynamic [id]
 // segment) because the project ships as a static export (output:'export');

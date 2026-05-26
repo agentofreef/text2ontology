@@ -86,7 +86,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     '/ontology/lakehouse-objects',
     '/ontology/lakehouse-graph',
     '/ontology/lakehouse-keyword-triage',
-    '/ontology/lakehouse-metric-intents',
     '/ontology/lakehouse-metrics',
     '/ontology/er-diagram',
     '/ontology/lakehouse-agent/token-recall',
@@ -104,7 +103,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const isAgentPage =
     fullHeightExactPaths.some((p) => pathname === p) ||
     pathname.startsWith('/ontology/lakehouse-agent/dataset-testing') ||
-    pathname.startsWith('/ontology/lakehouse-metric-intents/') ||
     pathname.startsWith('/ontology/lakehouse-metrics/')
 
   return (

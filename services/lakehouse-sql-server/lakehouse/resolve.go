@@ -789,7 +789,7 @@ func resolveMetricLakehouse(db *sql.DB, projectID, metricPart string, allProps [
 	}
 	return nil, &smartquery.ResolveError{
 		Code:    "METRIC_NOT_FOUND",
-		Message: fmt.Sprintf("指标 %q 未找到对应的属性或预定义指标。可用属性: %v", metricPart, available),
+		Message: fmt.Sprintf("口径 %q 未找到对应的属性或预定义口径。可用属性: %v", metricPart, available),
 		Detail:  map[string]any{"metric": metricPart, "available": available},
 	}
 }

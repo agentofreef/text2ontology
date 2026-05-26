@@ -139,7 +139,7 @@ function CapabilityGapBanner({ reason }: { reason: BlockedReason }) {
       </div>
       {reason.missing_dimension && (
         <div className="text-[11px] text-red-700">
-          需要按【{reason.missing_dimension}】筛选,但没有任何已授权指标提供该维度
+          需要按【{reason.missing_dimension}】筛选,但没有任何已授权口径提供该维度
         </div>
       )}
       {reason.candidates_checked && reason.candidates_checked.length > 0 && (
@@ -165,7 +165,7 @@ function CapabilityGapBanner({ reason }: { reason: BlockedReason }) {
 // ReachabilityBlock is the headline of a mission card — the 任务可达器
 // verdict: can the question be answered from authorized data, and why.
 const REQ_KIND_STYLE: Record<string, { label: string; chip: string }> = {
-  metric:    { label: '指标', chip: 'bg-slate-700 text-white' },
+  metric:    { label: '口径', chip: 'bg-slate-700 text-white' },
   dimension: { label: '维度', chip: 'bg-slate-200 text-slate-700 border border-slate-300' },
   filter:    { label: '筛选', chip: 'bg-amber-100 text-amber-800 border border-amber-300' },
 }
@@ -192,8 +192,8 @@ function RequirementRow({ r }: { r: RequirementCoverage }) {
       {!isMetric && (
         <div className="text-[10px]">
           {r.covered
-            ? <span className="text-emerald-700">由 {(r.covered_by || []).join('、') || '已授权指标'} 覆盖</span>
-            : <span className="text-red-700">{r.missing_note || '无授权指标覆盖'}</span>}
+            ? <span className="text-emerald-700">由 {(r.covered_by || []).join('、') || '已授权口径'} 覆盖</span>
+            : <span className="text-red-700">{r.missing_note || '无授权口径覆盖'}</span>}
         </div>
       )}
     </div>

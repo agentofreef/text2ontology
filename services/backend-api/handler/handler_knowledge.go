@@ -369,7 +369,7 @@ func handleKnowledgeGenerate(db *sql.DB) http.HandlerFunc {
 			if mDisplay != "" {
 				title = mDisplay
 			}
-			summary := "指标: " + title
+			summary := "口径: " + title
 			if mDesc != "" {
 				summary = mDesc
 			}

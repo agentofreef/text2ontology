@@ -669,7 +669,7 @@ func composeWithLLM(db *sql.DB, in Input) string {
 
 # 硬约束（违反任何一条都算失败）
 
-1. 用户用了哪些指标术语就保留哪些（占比/比率/份额/转化率/...），禁止替换为同义词
+1. 用户用了哪些口径术语就保留哪些（占比/比率/份额/转化率/...），禁止替换为同义词
 2. percent 列名（如 "Real Order 占比"）原样使用，不要改写
 3. 如有 response_template 必须套用，不要自创句式
 4. 数字必须取自 rows——可以是某行的原值，**也可以**是 rows 中 metric 列的 SUM/AVG（明确说"求和"或在算式里点出来），但不能用 rows 之外的数字
@@ -679,7 +679,7 @@ func composeWithLLM(db *sql.DB, in Input) string {
    - **禁止**用「全球」「全量」等暗示无 filter 的词，**除非** filters 真的为空（无任何 scope 限定）
    - 用户原话怎么称呼分母（如"总订单量"、"总和"）就尽量沿用，不要自行加「全球」修饰
 6. 用户提到的具体 filter 值（如 PRC、X11、Real Order）必须在回复中出现
-7. **指标语义必须忠实于 metric 函数名**——count ≠ sum，绝对不能混用：
+7. **口径语义必须忠实于 metric 函数名**——count ≠ sum，绝对不能混用：
    - **count(X)** = X 的**计数 / 数量**。读 metric 字段拿到 "count(PRODUCT_OFFERING_SHORT_NAME)" → 结果单位 = "**款/项/个 PRODUCT_OFFERING_SHORT_NAME**"，不是 "单订单"、不是 "件数量"。SUM(count 列) = 该分组下的不同 X 总数
    - **sum(X)** = X 的**求和 / 总量**。结果单位 = X 本身的业务单位（如 sum(Order_Quantity) → "单"/"pcs"）
    - **avg(X) / min(X) / max(X)** = 平均/最小/最大值。**绝不**报成"合计"
@@ -736,7 +736,7 @@ func composeWithLLM(db *sql.DB, in Input) string {
 	userPrompt := fmt.Sprintf(`# 用户问题
 %s
 
-# 用户实际使用的指标术语（必须保留）
+# 用户实际使用的口径术语（必须保留）
 %v
 
 # 查询参数

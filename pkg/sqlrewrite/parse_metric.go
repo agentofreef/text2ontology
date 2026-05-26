@@ -92,17 +92,17 @@ func ParseBareMetricSQL(rawSQL string) (primaryOD, measure string, baseDims []st
 	// FROM must be a single OD: reject JOIN and subqueries in FROM. The
 	// runtime adds cross-OD JOINs from ont_causality at query time.
 	if regexp.MustCompile(`(?i)\bjoin\b`).MatchString(fromText) {
-		return "", "", nil, fmt.Errorf("指标 SQL 不允许 JOIN — 跨 OD 关联由运行时基于本体关系自动生成")
+		return "", "", nil, fmt.Errorf("口径 SQL 不允许 JOIN — 跨 OD 关联由运行时基于本体关系自动生成")
 	}
 	if strings.Contains(fromText, "(") {
-		return "", "", nil, fmt.Errorf("指标 SQL 不支持 FROM 里的子查询/嵌套")
+		return "", "", nil, fmt.Errorf("口径 SQL 不支持 FROM 里的子查询/嵌套")
 	}
 	refs := ExtractReferencedNames(sqlText)
 	if len(refs) == 0 {
 		return "", "", nil, fmt.Errorf("无法解析 FROM 中的 OD 名")
 	}
 	if len(refs) > 1 {
-		return "", "", nil, fmt.Errorf("指标 SQL 必须基于单个 OD,当前引用了: %v", refs)
+		return "", "", nil, fmt.Errorf("口径 SQL 必须基于单个 OD,当前引用了: %v", refs)
 	}
 	primaryOD = refs[0]
 
@@ -134,10 +134,10 @@ func ParseBareMetricSQL(rawSQL string) (primaryOD, measure string, baseDims []st
 		}
 	}
 	if len(aggregates) == 0 {
-		return "", "", nil, fmt.Errorf("指标 SQL 必须至少包含一个聚合(sum/avg/count/min/max/distinct_count)")
+		return "", "", nil, fmt.Errorf("口径 SQL 必须至少包含一个聚合(sum/avg/count/min/max/distinct_count)")
 	}
 	if len(aggregates) > 1 {
-		return "", "", nil, fmt.Errorf("简单指标只允许一个聚合度量,检测到 %d 个: %v", len(aggregates), aggregates)
+		return "", "", nil, fmt.Errorf("简单口径只允许一个聚合度量,检测到 %d 个: %v", len(aggregates), aggregates)
 	}
 	measure = aggregates[0]
 	baseDims = dims

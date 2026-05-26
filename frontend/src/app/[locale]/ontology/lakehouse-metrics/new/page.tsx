@@ -1,6 +1,6 @@
 'use client'
 
-// 新建指标（Metric, table lakehouse_metric）— two-pane editor. Mirrors the
+// 新建口径（Metric, table lakehouse_metric）— two-pane editor. Mirrors the
 // object-detail page chrome: a top bar (back + title + save) over a full-width
 // two-pane MetricEditor. A metric is a parameterized SQL = a virtual table,
 // authored in 结构化 (structured) or SQL mode (the toggle lives in the editor's

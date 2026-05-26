@@ -48,31 +48,31 @@ const lookupToolDescription = `查询本体定义 + 业务关键词。
 
 // smartqueryToolDescription is the LLM-facing description for the
 // `smartquery` tool in **strict mode**. The contract is intentionally tiny:
-// LLM picks a metric (指标) by name and fills its declared params. The server
+// LLM picks a metric (口径) by name and fills its declared params. The server
 // owns metric / groupBy / orderBy / limit / canonical filters / SQL gen.
 // LLM never builds spec — that path is closed.
 const smartqueryToolDescription = `执行数据查询，返回表格结果。两种用法，二选一：
 
 ⚠ **odName 始终必填**（无论 Mode A / Mode B），缺失会被拒绝并返回 ODNAME_REQUIRED。
-   Mode A 时 odName 也要带——填该 intent 在 🎯 小节标注的 OD 名；保持显式让前端可以
+   Mode A 时 odName 也要带——填该 metric 在 🎯 小节标注的 OD 名；保持显式让前端可以
    稳定渲染"对象"列，也让人复盘 LLM 选择路径时一目了然。
 
-【Mode A · 预设】命中现成指标时——把口径交给人工策展好的指标。
-  形式：{"odName":"对应OD","intent":"指标名","params":{...}}
-  odName — 必填。须等于该 intent 在 🎯 小节标注的 OD（不一致会报 OD_INTENT_MISMATCH）。
-  intent — 从 context 顶部「🎯 查询指标（Metric）」小节里选一个 name。
-  params — 按该指标的 parameters schema 填；用户没提的省略走默认。
+【Mode A · 预设】命中现成口径时——把口径交给人工策展好的口径。
+  形式：{"odName":"对应OD","metric":"口径名","params":{...}}
+  odName — 必填。须等于该 metric 在 🎯 小节标注的 OD（不一致会报 OD_INTENT_MISMATCH）。
+  metric — 从 context 顶部「🎯 查询口径（Metric）」小节里选一个 name。
+  params — 按该口径的 parameters schema 填；用户没提的省略走默认。
            未声明的 key → PARAM_UNKNOWN；类型不符 → PARAM_TYPE_ERROR。
-  例："Top 5 摇滚乐手" → {"odName":"SALE","intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
-      "各 Geo 订单分布" → {"odName":"EARLY_ORDER","intent":"Order.Quantity.Distribution","params":{}}
-  Mode A 下不要再填 metric/filters/groupBy —— 这些由指标提供（填了会被忽略）。
+  例："Top 5 摇滚乐手" → {"odName":"SALE","metric":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
+      "各 Geo 订单分布" → {"odName":"EARLY_ORDER","metric":"Order.Quantity.Distribution","params":{}}
+  Mode A 下不要再填 filters/groupBy —— 这些由口径提供（填了会被忽略）。
 
-【Mode B · 自由组合】没有现成指标完全匹配时——自己从目录 token 拼一次查询。
+【Mode B · 自由组合】没有现成口径完全匹配时——自己从目录 token 拼一次查询。
   形式：{"odName":"主OD","metric":"sum(列)","filters":[...],"groupBy":[...],"orderBy":[...],"limit":N}
   odName — 主 OD 名（单个，必填）。
   metric — func(arg)，func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。
            ⚠ 不接受 count(*)（JOIN 下双重计数），用 count(<id列>)。
-           ⚠ 纯指标：arg 必须是某个已授权指标（🎯 小节）用到的度量列。否则别拼无背书的聚合——改用已有指标，或调用 declare_capability_gap。
+           ⚠ 纯口径：arg 必须是某个已授权口径（🎯 小节）用到的度量列。否则别拼无背书的聚合——改用已有口径，或调用 declare_capability_gap。
   filters/groupBy — property 必须是 OD 已有列；跨 OD 用 "OD.Property"（如 PRODUCT.GEN）。
   op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between。
   失败返回 COMPOSE_FAILED + 具体原因（哪个 token 不存在 / op 不允许）。
@@ -81,7 +81,7 @@ const smartqueryToolDescription = `执行数据查询，返回表格结果。两
          "filters":[{"property":"PRODUCT.GEN","op":"=","value":"X11"}],
          "groupBy":["GEO","FISCAL_YEAR"],"orderBy":[{"label":"FISCAL_YEAR","dir":"ASC"}]}
 
-策略：先看 🎯 小节有没有合适指标，有就走 Mode A；没有就直接走 Mode B（不要因为没现成指标就回"无法处理"）。
+策略：先看 🎯 小节有没有合适口径，有就走 Mode A；没有就直接走 Mode B（不要因为没现成口径就回"无法处理"）。
 任一模式都不写 SQL —— 只从已策展的目录里挑/拼。Mode B 限制：暂不支持把 metric 跨 OD（聚合列必须在主 OD 上）。`
 
 // smartqueryExecutor is the cross-service surface of lakehouse.RemoteClient.
@@ -234,7 +234,7 @@ func runSynthesizeTool(db *sql.DB, args map[string]interface{}) M {
 	// keys by lakehouseToolSmartQuery (loop-friendly accessors).
 	resultJSON, _ := resp["execution_result"].(string)
 	pivotedInfo, _ := resp["pivoted"].(M)
-	matchedIntentName, _ := resp["matched_intent"].(string)
+	matchedIntentName, _ := resp["matched_metric"].(string)
 	metric, _ := resp["_spec_metric"].(string)
 	var groupBy []string
 	if gb, ok := resp["_spec_groupBy"].([]string); ok {
@@ -652,20 +652,20 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 </function_call>
 
 ### smartquery — 执行数据查询（严格模式）
-{"intent":"指标名","params":{...}}
+{"metric":"口径名","params":{...}}
 
-intent  从 context 顶部「🎯 查询指标（Metric）」里挑一个 name；未匹配则该查询不在覆盖范围
-params  按指标的 parameters schema 填，常见 key：
+metric  从 context 顶部「🎯 查询口径（Metric）」里挑一个 name；未匹配则该查询不在覆盖范围
+params  按口径的 parameters schema 填，常见 key：
         n        Top N（用户说"Top 5"填 5）
         genre    流派/类别（用户提到具体值时填）
         country  国家/地区（用户提到具体值时填）
-        其它请看 🎯 小节里指标自带的 parameters 列表
+        其它请看 🎯 小节里口径自带的 parameters 列表
 
 例：
-"Top 5 摇滚乐手"  → {"intent":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
-"卖得最好的国家" → {"intent":"Sales.ByCountry","params":{}}
+"Top 5 摇滚乐手"  → {"metric":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
+"卖得最好的国家" → {"metric":"Sales.ByCountry","params":{}}
 
-不要填 metric/groupBy/filters/orderBy/limit —— 由指标决定，多填会被拒绝。
+不要填 groupBy/filters/orderBy/limit —— 由口径决定，多填会被拒绝。
 
 ### lookup — 查本体定义 / 业务关键词（context 不足或确认值映射时）
 {"ontology_name":["Od/Ok 名"], "keyword":["业务术语"]}
@@ -698,7 +698,7 @@ params  按指标的 parameters schema 填，常见 key：
 
 **上下文不足 / 不确定口径**：
 - 先检查【已习得的业务经验】中的经验关键词，调用 lookup 查询相关经验
-- 如果没有匹配的经验，再告知用户未能识别其问题中的具体指标或维度
+- 如果没有匹配的经验，再告知用户未能识别其问题中的具体口径或维度
 
 **用户请求"记住 / 学习 / 总结经验"等**：
 - 查询模式 (Agent) 不负责知识沉淀，只负责回答数据问题
@@ -713,9 +713,9 @@ FULLY_LOADED_ODS_PLACEHOLDER
 ## 查询工具策略
 
 查询只有 smartquery 一个工具，两种模式（调用契约见工具自带说明）：
-- **命中指标** → 带 intent 字段（从 context 顶部「🎯 查询指标」小节挑），套用策展好的口径（Mode A）。
-- **没有合适指标** → 不填 intent，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成指标就回"无法处理"。
-- 只有当问题要测的指标在目录里**完全找不到对应 OD/度量**时，才告知用户"当前查询超出已配置范围"。
+- **命中口径** → 带 metric 字段（从 context 顶部「🎯 查询口径」小节挑），套用策展好的口径（Mode A）。
+- **没有合适口径** → 不填 metric，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成口径就回"无法处理"。
+- 只有当问题要测的口径在目录里**完全找不到对应 OD/度量**时，才告知用户"当前查询超出已配置范围"。
 - **筛选值必须来自 OD Catalog 里该属性的值域**（property 后大括号里列出的那些值）。用户的筛选概念找不到对应字段、映射到多个字段无法确定、或值不在该属性值域内时——**不要臆造映射**（不要把"TBD"硬塞成"Not ready"，也不要在 4 个 readiness 里随便挑一个），改用 declare_capability_gap 声明，或向用户澄清。
 
 ## 歧义处理
@@ -728,13 +728,13 @@ FULLY_LOADED_ODS_PLACEHOLDER
 
 每次 smartquery 后服务端自动调一次 reflect_query_result，结果以 follow-up message 追加进对话。**必须读它**：
 - **verdict=match**：服务端接着自动调 synthesize 给结构化模板，直接据此写中文答复，**不要再调工具**。
-- **verdict=mismatch**：按 follow-up 的 missing_dimensions 补救——优先 re_recall(hints) 找更合适 Intent；仍不行就改用 smartquery **不带 intent 的自由组合模式**（odName+metric+filters+groupBy）补齐缺失维度；再不行就给当前最佳答案 + 一句话说明缺失维度让用户拍板。**最多 2 轮自我修正**，超过就收尾给答案。
+- **verdict=mismatch**：按 follow-up 的 missing_dimensions 补救——优先 re_recall(hints) 找更合适口径；仍不行就改用 smartquery **不带 metric 的自由组合模式**（odName+metric+filters+groupBy）补齐缺失维度；再不行就给当前最佳答案 + 一句话说明缺失维度让用户拍板。**最多 2 轮自我修正**，超过就收尾给答案。
 - **verdict=uncertain**：直接答用户，但回复里含蓄提示结果可能不全。
 **反例**（绝不要做）：reflect 说 mismatch，你照样答用户总数 → 答非所问，不可接受。
 
 ## 错误恢复
 
-工具返回 error code 时，按 error 文案修正后重试（参数类错误改 params；INTENT_NOT_FOUND 核对 🎯 小节里的 name 拼写）。
+工具返回 error code 时，按 error 文案修正后重试（参数类错误改 params；METRIC_NOT_FOUND 核对 🎯 小节里的 name 拼写）。
 **SPEC_VALIDATION_FAILED / 服务端 SQL 报错**：Intent 配置或数据有问题，告知用户并请求指导，**不要**反复重试。
 
 **编号回复规则**：当你给出了编号选项（1. XXX 2. YYY），用户回复纯数字（如 "2"）就是选择该编号，不要再次确认。
@@ -743,7 +743,7 @@ FULLY_LOADED_ODS_PLACEHOLDER
 
 **row_summary**：smartquery 响应里的 row_summary.note 已扣除 0 数据空行；回复"共 X 条/X 个"等数量时**直接读它**，不要自己数表格。
 
-**指标语义**：忠实于 Intent.canonical_metric 的函数名：
+**口径语义**：忠实于 metric 的函数名：
 - sum(X) = 求和（单位 = X 的业务单位）；avg/min/max = 平均/最小/最大；**绝不**报成"合计"
 - 维度名直接读 SQL 列名（结果表头），不擅自翻译
 
@@ -751,7 +751,7 @@ FULLY_LOADED_ODS_PLACEHOLDER
 
 **占比回复双口径**：用户问"占比/比例/份额/贡献/分布"时，回复**同时给出两个口径**：
 1. 分组内占比（横向，本行内部各类别之和=100%）
-2. 占总量的占比（纵向，分母=所有分组该指标合计）
+2. 占总量的占比（纵向，分母=所有分组该口径合计）
 即使用户只问一个方向也补上另一个，并用一句话点明差异。
 
 ## 数据模板：用引用代替数字（必读，回复质量红线）
@@ -861,8 +861,8 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// for genuine pivot needs — this only changes the default steering.
 		if metricFirstEnabled {
 			systemPrompt = strings.Replace(systemPrompt,
-				"- **命中指标** → 带 intent 字段",
-				"- **默认走 Mode B(自由组合)**：从 🎯 小节取该指标的**度量(canonical_metric)**填到 metric，自己写 groupBy/filters；只有确实需要模板自带的 pivot 透视时才用 Mode A(带 intent)。\n- **命中指标** → 带 intent 字段",
+				"- **命中口径** → 带 metric 字段",
+				"- **默认走 Mode B(自由组合)**：从 🎯 小节取该口径的**度量(canonical_metric)**填到 metric，自己写 groupBy/filters；只有确实需要模板自带的 pivot 透视时才用 Mode A(带 metric)。\n- **命中口径** → 带 metric 字段",
 				1)
 		}
 
@@ -928,24 +928,23 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					"type":     "object",
 					"required": []string{"odName"},
 					"properties": M{
-						// Mode A — curated preset: pass intent (+params).
-						"intent": M{
+						// metric — Mode A: curated preset name; Mode B: aggregation expression.
+						"metric": M{
 							"type":        "string",
-							"description": "可选。命中 context 顶部「🎯 查询指标」小节的指标 name 时填它，套用策展好的口径（metric/分组/pivot）。例：Sales.ByArtist / Order.Quantity.Distribution。不填则进入自由组合模式（见下）。",
+							"description": "Mode A 用：口径(metric)名称——命中 context 顶部「🎯 查询口径」小节的 name 时填它，套用策展好的口径（分组/pivot）。例：Sales.ByArtist / Order.Quantity.Distribution。Mode B 用：聚合表达式 func(arg)，func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。⚠ 不接受 count(*)（JOIN 双重计数），用 count(<id列>)。Mode A 与 Mode B 共用此字段；不填则进入自由组合但无聚合（仅 groupBy）。",
 						},
 						"params": M{
 							"type":                 "object",
-							"description":          "Mode A 用：按指标的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。指标没声明的 key 会被拒绝。",
+							"description":          "Mode A 用：按口径的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。口径没声明的 key 会被拒绝。",
 							"additionalProperties": true,
 						},
 						// odName — ALWAYS required, both modes. Mode A must still
 						// name the primary OD (must equal the OD that the named
-						// intent is curated on); Mode B names the OD to compose
+						// metric is curated on); Mode B names the OD to compose
 						// against. Empty/missing → ODNAME_REQUIRED error (no
 						// silent fall-through that would let the UI render the
 						// OD column as empty).
-						"odName": M{"type": "string", "description": "**必填**。主 OD 名（单个）。Mode A：必须等于所选 intent 在 🎯 小节标注的 OD（同名一致即可）。Mode B：要查询的主 OD。例：\"EARLY_ORDER\" / \"MTM\" / \"PRODUCT\"。"},
-						"metric": M{"type": "string", "description": "Mode B 用：聚合表达式 func(arg)。func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。⚠ 不接受 count(*)（JOIN 双重计数），用 count(<id列>)"},
+						"odName": M{"type": "string", "description": "**必填**。主 OD 名（单个）。Mode A：必须等于所选 metric 在 🎯 小节标注的 OD（同名一致即可）。Mode B：要查询的主 OD。例：\"EARLY_ORDER\" / \"MTM\" / \"PRODUCT\"。"},
 						"filters": M{"type": "array", "items": M{
 							"type":     "object",
 							"required": []string{"property", "op"},
@@ -975,7 +974,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					"required": []string{"userQuestion", "smartqueryResp"},
 					"properties": M{
 						"userQuestion":   M{"type": "string", "description": "用户原问题"},
-						"smartqueryArgs": M{"type": "object", "description": "上一次 smartquery 的 args (intent + params)", "additionalProperties": true},
+						"smartqueryArgs": M{"type": "object", "description": "上一次 smartquery 的 args (metric + params)", "additionalProperties": true},
 						"smartqueryResp": M{"type": "object", "description": "上一次 smartquery 的完整 result", "additionalProperties": true},
 					},
 				}},
@@ -2515,24 +2514,24 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	requestedOD := strings.TrimSpace(StrVal(args, "odName"))
 	if requestedOD == "" {
 		return M{
-			"error": "ODNAME_REQUIRED: smartquery 必须显式指定主 OD（odName 字段）。Mode A 时填该 intent 在 🎯 小节标注的 OD；Mode B 时填要查询的主 OD。不要漏填——UI 会把这个值直接呈现为「对象」列。",
+			"error": "ODNAME_REQUIRED: smartquery 必须显式指定主 OD（odName 字段）。Mode A 时填该 metric 在 🎯 小节标注的 OD；Mode B 时填要查询的主 OD。不要漏填——UI 会把这个值直接呈现为「对象」列。",
 			"code":  "ODNAME_REQUIRED",
 		}
 	}
 
-	intentName, _ := args["intent"].(string)
+	intentName, _ := args["metric"].(string)
 	intentName = strings.TrimSpace(intentName)
 	if intentName == "" {
 		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
 	}
 
-	hint, objectNames, intentParams, planJSON, level, querySQL, notFound := lookupIntentByName(db, projectID, intentName)
+	hint, objectNames, intentParams, level, querySQL, notFound := lookupIntentByName(db, projectID, intentName)
 	if notFound {
 		return M{
 			"error": fmt.Sprintf(
-				"INTENT_NOT_FOUND: 未找到名为 %q 的指标 (project_id=%s)。可用指标名见 context 顶部 🎯 小节；如该查询场景未配置指标，请告知用户当前不支持。",
+				"METRIC_NOT_FOUND: 未找到名为 %q 的口径 (project_id=%s)。可用口径名见 context 顶部 🎯 小节；如该查询场景未配置口径，请告知用户当前不支持。",
 				intentName, projectID),
-			"code": "INTENT_NOT_FOUND",
+			"code": "METRIC_NOT_FOUND",
 		}
 	}
 
@@ -2549,7 +2548,7 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		}
 		if !matched {
 			return M{
-				"error": fmt.Sprintf("OD_INTENT_MISMATCH: odName=%q 与 intent %q 的 OD 不一致（intent 实际定义在 %s）。请把 odName 改成其中之一再重试。",
+				"error": fmt.Sprintf("OD_INTENT_MISMATCH: odName=%q 与 metric %q 的 OD 不一致（metric 实际定义在 %s）。请把 odName 改成其中之一再重试。",
 					requestedOD, intentName, strings.Join(objectNames, " / ")),
 				"code": "OD_INTENT_MISMATCH",
 				"hint": fmt.Sprintf("retry with odName=%q", objectNames[0]),
@@ -2573,7 +2572,7 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	if level == "sql" {
 		if strings.TrimSpace(querySQL) == "" {
 			return M{
-				"error": fmt.Sprintf("SQL_METRIC_EMPTY: 指标 %q 标记为 SQL 模式但未配置 query_sql。请在指标编辑器中补全 SQL 后重试。", intentName),
+				"error": fmt.Sprintf("SQL_METRIC_EMPTY: 口径 %q 标记为 SQL 模式但未配置 query_sql。请在口径编辑器中补全 SQL 后重试。", intentName),
 				"code":  "SQL_METRIC_EMPTY",
 			}
 		}
@@ -2676,76 +2675,14 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 			"displayMode":       "table",
 			"sql_mode":          true,
 			"total_rows":        totalRows,
-			"matched_intent":    hint.Name,
-			"matched_intent_id": hint.IntentID,
+			"matched_metric":    hint.Name,
+			"matched_metric_id": hint.IntentID,
 			"involved": M{
 				"kind":         "smartquery",
 				"odNames":      objectNames,
 				"propertyKeys": []M{},
 			},
 		}
-	}
-
-	// Composite Intent (spec .omc/specs/plan-mode-composite-intent.md): when
-	// the Intent carries a plan, dispatch to the deterministic plan executor
-	// instead of the single-query path. LLM tool surface is unchanged —
-	// it still called smartquery({intent, params}) — only the server-side
-	// dispatch differs. Most response fields that the single-query path
-	// builds (bound_spec, pivot, keyword corrections, joinPath) are
-	// inapplicable to a plan, so we return a minimal compatible shape.
-	if isPlanIntent(planJSON) {
-		rawParams, _ := args["params"].(map[string]interface{})
-		stringParams := make(map[string]string, len(rawParams))
-		for k, v := range rawParams {
-			if v == nil {
-				continue
-			}
-			stringParams[k] = fmt.Sprint(v)
-		}
-		_ = intentParams // plan params live inside plan JSON; Intent.parameters is irrelevant here
-		res := smartqueryExec(db).ExecutePlan(ctx, planJSON, stringParams, projectID)
-		execStatus := "error"
-		if res.ExecutionOK {
-			execStatus = "success"
-		}
-		go func() {
-			q := userQuestion
-			if q == "" {
-				q = fmt.Sprintf("[LH PLAN] %s", hint.Name)
-			}
-			db.Exec(`INSERT INTO ont_query_log (project_id, user_question,
-				generated_sql, objects, metric, group_by,
-				execution_status, execution_result, execution_error, source_type, used_llm, mark)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'lakehouse',false,false)
-				ON CONFLICT (project_id, user_question) DO UPDATE SET
-					generated_sql=EXCLUDED.generated_sql, execution_status=EXCLUDED.execution_status,
-					execution_result=EXCLUDED.execution_result, execution_error=EXCLUDED.execution_error`,
-				projectID, q,
-				res.SQL, strings.Join(objectNames, ","), "(plan)", "",
-				execStatus, res.ResultJSON, res.ErrorMessage)
-		}()
-		resp := M{
-			"execution_status":  execStatus,
-			"execution_result":  res.ResultJSON,
-			"execution_error":   res.ErrorMessage,
-			"matched_intent":    hint.Name,
-			"matched_intent_id": hint.IntentID,
-			"displayMode":       "table",
-			"plan_mode":         true,
-			"involved": M{
-				"kind":         "smartquery",
-				"odNames":      objectNames,
-				"propertyKeys": []M{},
-			},
-		}
-		// Surface the step trace so the frontend can render the plan DAG
-		// (per-step OD / status / row count / duration / SQL). Single source
-		// of truth: lakehouse-sql-server filled LakehouseResult.PlanTrace
-		// inside the executor — agent-server only forwards it.
-		if res.PlanTrace != nil {
-			resp["plan_trace"] = res.PlanTrace
-		}
-		return resp
 	}
 
 	// Build base spec from Intent. Objects come from Intent's lead Od;
@@ -3030,10 +2967,10 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		}
 	}
 	if matchedIntentName != "" {
-		resp["matched_intent"] = matchedIntentName
+		resp["matched_metric"] = matchedIntentName
 	}
 	if matchedIntentID != "" {
-		resp["matched_intent_id"] = matchedIntentID
+		resp["matched_metric_id"] = matchedIntentID
 	}
 	// P7.5 bound_spec — full server-side spec post-IntentHint + params binding,
 	// surfaced for debugging. The LLM sees this in tool result so it can
@@ -3052,14 +2989,14 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		specFiltersFull = append(specFiltersFull, row)
 	}
 	resp["bound_spec"] = M{
-		"objects":  spec.Objects,
-		"metric":   spec.Metric,
-		"groupBy":  spec.GroupBy,
-		"filters":  specFiltersFull,
-		"orderBy":  specOrderBy,
-		"limit":    spec.Limit,
-		"intentId": matchedIntentID,
-		"intent":   matchedIntentName,
+		"objects":   spec.Objects,
+		"metric":    spec.Metric,
+		"groupBy":   spec.GroupBy,
+		"filters":   specFiltersFull,
+		"orderBy":   specOrderBy,
+		"limit":     spec.Limit,
+		"metricId":  matchedIntentID,
+		"metricName": matchedIntentName,
 	}
 	// ── Empty-result hint ──
 	// When the query returned 0 rows AND it has equality filters on
@@ -3105,10 +3042,10 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	// toward the filter values rather than re-recall.
 	if result.ExecutionOK && totalRows > 0 && len(spec.Objects) > 1 &&
 		spec.Metric != "" && suspiciousAllZero(resultJSON, spec.GroupBy) {
-		resp["suspicious_zero_hint"] = "查询成功返回了维度行，但所有指标列在每一行都是 0/NULL。" +
+		resp["suspicious_zero_hint"] = "查询成功返回了维度行，但所有口径列在每一行都是 0/NULL。" +
 			"这通常是跨 OD 的 JOIN 一行没匹配上——极可能某个 filter 的【值】不存在" +
-			"（日期格式写错、枚举名拼错），而不是指标选错。请先核对 filter 的 value" +
-			"（尤其日期/期间是否为 YYYY-MM），不要急着 re_recall 换指标。"
+			"（日期格式写错、枚举名拼错），而不是口径选错。请先核对 filter 的 value" +
+			"（尤其日期/期间是否为 YYYY-MM），不要急着 re_recall 换口径。"
 	}
 	// Expose spec/intent metadata to the agent loop so it can build synth args.
 	resp["_spec_metric"] = spec.Metric
@@ -3182,10 +3119,10 @@ func suspiciousAllZero(resultJSON string, groupBy []string) bool {
 	return metricCells > 0
 }
 
-// lookupIntentHint queries lakehouse_metric_intent for the highest-priority
-// Intent applicable to spec.Objects whose keyword/alias appears verbatim
-// in userQuestion. It does NOT mutate spec — instead it returns an
-// IntentHint that the lakehouse pipeline applies on its side via
+// lookupIntentHint queries lakehouse_metric (口径/统一口径) for the
+// highest-priority Intent applicable to spec.Objects whose keyword/alias
+// appears verbatim in userQuestion. It does NOT mutate spec — instead it
+// returns an IntentHint that the lakehouse pipeline applies on its side via
 // PassApplyIntentHint. Same priority + keyword gate as the previous
 // in-place enforcement; just decoupled from spec mutation so the SQL
 // service is the single owner of "spec → spec" transforms.
@@ -3197,23 +3134,8 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 	}
 	// Keyword-match gate: lakehouse_keyword.keyword OR aliases must appear
 	// in userQuestion (length ≥ 2 to avoid single-char triggers like "的").
-	// Two variants differ ONLY in the keyword→metric join column:
-	//   - keywordMatchExpr     links via lk.metric_intent_id (legacy table)
-	//   - keywordMatchExprNew  links via lk.metric_id          (unified 指标)
+	// Links via lk.metric_id (unified 口径 / lakehouse_metric).
 	const keywordMatchExpr = `(EXISTS (
-			SELECT 1 FROM lakehouse_keyword lk
-			WHERE lk.metric_intent_id = mi.id
-			  AND lk.project_id = mi.project_id
-			  AND COALESCE(lk.is_stopword, false) = false
-			  AND (
-			    (LENGTH(lk.keyword) >= 2 AND LOWER($Q) LIKE '%'||LOWER(lk.keyword)||'%')
-			    OR EXISTS (
-			      SELECT 1 FROM unnest(COALESCE(lk.aliases,'{}'::text[])) a
-			      WHERE LENGTH(a) >= 2 AND LOWER($Q) LIKE '%'||LOWER(a)||'%'
-			    )
-			  )
-		))`
-	const keywordMatchExprNew = `(EXISTS (
 			SELECT 1 FROM lakehouse_keyword lk
 			WHERE lk.metric_id = mi.id
 			  AND lk.project_id = mi.project_id
@@ -3234,7 +3156,6 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 	var canonicalFiltersJSON, parametersJSON []byte
 	args := []interface{}{projectID, pq.Array(objects), userQuestion}
 
-	// selectCols is identical for both tables (shared column names under `mi`).
 	const selectCols = `
 		SELECT mi.id::text, mi.name, COALESCE(mi.canonical_metric,''),
 		       COALESCE(mi.auto_group_by, '{}'::text[]),
@@ -3243,8 +3164,8 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 		       COALESCE(mi.canonical_filters, '[]'::jsonb),
 		       COALESCE(mi.parameters, '[]'::jsonb)`
 
-	// New-table-FIRST: lakehouse_metric, keyword-ranked + priority DESC.
-	queryNew := selectCols + `
+	// Query lakehouse_metric, keyword-ranked + priority DESC.
+	query := selectCols + `
 		FROM lakehouse_metric mi
 		JOIN ont_object_type o ON mi.object_id = o.id
 		WHERE mi.project_id = $1
@@ -3252,52 +3173,24 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 		  AND COALESCE(mi.mark, true) = true
 		  AND COALESCE(o.mark, true) = true
 		  AND LOWER(o.name) = ANY(SELECT LOWER(unnest($2::text[])))
-		ORDER BY ` + strings.ReplaceAll(keywordMatchExprNew, "$Q", "$3") + ` DESC,
-		         mi.priority DESC
-		LIMIT 1`
-	// Legacy fallback: lakehouse_metric_intent.
-	queryOld := selectCols + `
-		FROM lakehouse_metric_intent mi
-		JOIN ont_object_type o ON mi.object_id = o.id
-		WHERE mi.project_id = $1
-		  AND COALESCE(mi.mark, true) = true
-		  AND COALESCE(o.mark, true) = true
-		  AND LOWER(o.name) = ANY(SELECT LOWER(unnest($2::text[])))
 		ORDER BY ` + strings.ReplaceAll(keywordMatchExpr, "$Q", "$3") + ` DESC,
 		         mi.priority DESC
 		LIMIT 1`
 
-	// fromNewTable tracks which table the chosen row came from, so the hard
-	// keyword gate below uses the matching join column.
-	fromNewTable := true
-	if err := db.QueryRow(queryNew, args...).Scan(
+	if err := db.QueryRow(query, args...).Scan(
 		&intentID, &intentName, &canonicalMetric, &autoGB, &replaceGB,
 		&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
 		&canonicalFiltersJSON, &parametersJSON,
 	); err != nil {
-		fromNewTable = false
-		if err := db.QueryRow(queryOld, args...).Scan(
-			&intentID, &intentName, &canonicalMetric, &autoGB, &replaceGB,
-			&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
-			&canonicalFiltersJSON, &parametersJSON,
-		); err != nil {
-			return nil
-		}
+		return nil
 	}
 	// Hard gate: no keyword match → no hint. Mirrors applyIntentPivot's
 	// selection rule so priority-only auto-fire can't inject irrelevant
-	// dimensions for unrelated questions on the same Od. Gate against the
-	// SAME table the row came from (join column differs).
+	// dimensions for unrelated questions on the same Od.
 	if userQuestion != "" {
 		var hasKwMatch bool
-		var gateQ string
-		if fromNewTable {
-			gateQ = `SELECT ` + strings.ReplaceAll(keywordMatchExprNew, "$Q", "$2") + `
+		gateQ := `SELECT ` + strings.ReplaceAll(keywordMatchExpr, "$Q", "$2") + `
 				FROM lakehouse_metric mi WHERE mi.id = $1`
-		} else {
-			gateQ = `SELECT ` + strings.ReplaceAll(keywordMatchExpr, "$Q", "$2") + `
-				FROM lakehouse_metric_intent mi WHERE mi.id = $1`
-		}
 		if err := db.QueryRow(gateQ, intentID, userQuestion).Scan(&hasKwMatch); err == nil && !hasKwMatch {
 			log.Printf("intent DEBUG: hint suppressed — no keyword match for Intent %s in question %q", intentID, userQuestion)
 			return nil
@@ -3339,18 +3232,6 @@ func lookupIntentHint(db *sql.DB, projectID, userQuestion string, objects []stri
 	return hint
 }
 
-// isPlanIntent reports whether the lakehouse_metric_intent.plan JSONB value
-// read from the DB represents a composite Intent. NULL → empty bytes;
-// 'null'::jsonb → string "null"; '{}'::jsonb → empty object. Anything else
-// non-empty is treated as a plan to be parsed downstream.
-func isPlanIntent(planJSON []byte) bool {
-	s := strings.TrimSpace(string(planJSON))
-	if s == "" || s == "null" || s == "{}" {
-		return false
-	}
-	return true
-}
-
 // lookupIntentByName loads the full Metric Intent record by name (strict-mode
 // dispatch path). Unlike lookupIntentHint — which finds the highest-priority
 // keyword-gated intent for a question — this resolves an explicit intent name
@@ -3365,24 +3246,22 @@ func isPlanIntent(planJSON []byte) bool {
 //
 // IntentParameter type comes from agent-server/smartquery package — single
 // source of truth for both the schema definition and BindIntentParams.
-// lookupIntentByName resolves a metric by name. The trailing level / querySQL
-// returns carry the unified-metric SQL-mode fields: level is one of
-// 'simple'|'plan'|'sql' (defaults to 'simple', and is always 'simple' for the
-// legacy lakehouse_metric_intent table, which has no level/query_sql columns);
-// querySQL is the human-authored OD-name SQL with {{param}} placeholders, set
-// only when level=='sql'.
+// lookupIntentByName resolves a metric by name from lakehouse_metric. The
+// trailing level / querySQL returns carry the unified-metric SQL-mode fields:
+// level is one of 'simple'|'plan'|'sql' (defaults to 'simple'); querySQL is
+// the human-authored OD-name SQL with {{param}} placeholders, set only when
+// level=='sql'.
 func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 	hint *smartquery.IntentHint,
 	objectNames []string,
 	params []smartquery.IntentParameter,
-	planJSON []byte,
 	level string,
 	querySQL string,
 	notFound bool,
 ) {
 	intentName = strings.TrimSpace(intentName)
 	if intentName == "" {
-		return nil, nil, nil, nil, "simple", "", true
+		return nil, nil, nil, "simple", "", true
 	}
 	var (
 		intentID, intentNameOut, canonicalMetric, objectName string
@@ -3390,74 +3269,40 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 		replaceGB                                            bool
 		defaultOrderLabel, defaultOrderDir                   sql.NullString
 		defaultLimit                                         sql.NullInt64
-		canonicalFiltersJSON, parametersJSON, planBytes      []byte
+		canonicalFiltersJSON, parametersJSON                 []byte
 		levelStr                                             sql.NullString
 		querySQLStr                                          sql.NullString
 	)
-	// New-table-FIRST: resolve against lakehouse_metric (unified 指标); on miss
-	// fall back to the legacy lakehouse_metric_intent. Both tables expose the
-	// SAME column names under alias `mi`, so a single scan target serves both.
-	scanTarget := func() error {
-		return db.QueryRow(`
-			SELECT mi.id::text, mi.name,
-			       COALESCE(mi.canonical_metric, ''),
-			       COALESCE(mi.auto_group_by, '{}'::text[]),
-			       COALESCE(mi.replace_group_by, false),
-			       mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
-			       COALESCE(mi.canonical_filters, '[]'::jsonb),
-			       COALESCE(mi.parameters, '[]'::jsonb),
-			       COALESCE(o.name, ''),
-			       mi.plan,
-			       COALESCE(mi.level, 'simple'),
-			       COALESCE(mi.query_sql, '')
-			FROM lakehouse_metric mi
-			JOIN ont_object_type o ON mi.object_id = o.id
-			WHERE mi.project_id = $1
-			  AND mi.deleted_at IS NULL
-			  AND COALESCE(mi.mark, true) = true
-			  AND COALESCE(o.mark, true) = true
-			  AND LOWER(mi.name) = LOWER($2)
-			LIMIT 1`,
-			projectID, intentName).Scan(
-			&intentID, &intentNameOut, &canonicalMetric, &autoGB, &replaceGB,
-			&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
-			&canonicalFiltersJSON, &parametersJSON, &objectName, &planBytes,
-			&levelStr, &querySQLStr,
-		)
-	}
-	err := scanTarget()
-	if err != nil {
-		// New-table miss → fall back to the legacy lakehouse_metric_intent.
-		err = db.QueryRow(`
-			SELECT mi.id::text, mi.name,
-			       COALESCE(mi.canonical_metric, ''),
-			       COALESCE(mi.auto_group_by, '{}'::text[]),
-			       COALESCE(mi.replace_group_by, false),
-			       mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
-			       COALESCE(mi.canonical_filters, '[]'::jsonb),
-			       COALESCE(mi.parameters, '[]'::jsonb),
-			       COALESCE(o.name, ''),
-			       mi.plan
-			FROM lakehouse_metric_intent mi
-			JOIN ont_object_type o ON mi.object_id = o.id
-			WHERE mi.project_id = $1
-			  AND COALESCE(mi.mark, true) = true
-			  AND COALESCE(o.mark, true) = true
-			  AND LOWER(mi.name) = LOWER($2)
-			LIMIT 1`,
-			projectID, intentName).Scan(
-			&intentID, &intentNameOut, &canonicalMetric, &autoGB, &replaceGB,
-			&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
-			&canonicalFiltersJSON, &parametersJSON, &objectName, &planBytes,
-		)
-	}
+	// Resolve against lakehouse_metric (unified 口径).
+	err := db.QueryRow(`
+		SELECT mi.id::text, mi.name,
+		       COALESCE(mi.canonical_metric, ''),
+		       COALESCE(mi.auto_group_by, '{}'::text[]),
+		       COALESCE(mi.replace_group_by, false),
+		       mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
+		       COALESCE(mi.canonical_filters, '[]'::jsonb),
+		       COALESCE(mi.parameters, '[]'::jsonb),
+		       COALESCE(o.name, ''),
+		       COALESCE(mi.level, 'simple'),
+		       COALESCE(mi.query_sql, '')
+		FROM lakehouse_metric mi
+		JOIN ont_object_type o ON mi.object_id = o.id
+		WHERE mi.project_id = $1
+		  AND mi.deleted_at IS NULL
+		  AND COALESCE(mi.mark, true) = true
+		  AND COALESCE(o.mark, true) = true
+		  AND LOWER(mi.name) = LOWER($2)
+		LIMIT 1`,
+		projectID, intentName).Scan(
+		&intentID, &intentNameOut, &canonicalMetric, &autoGB, &replaceGB,
+		&defaultOrderLabel, &defaultOrderDir, &defaultLimit,
+		&canonicalFiltersJSON, &parametersJSON, &objectName,
+		&levelStr, &querySQLStr,
+	)
 	if err != nil {
 		log.Printf("intent DEBUG: lookupIntentByName(%q) miss: %v", intentName, err)
-		return nil, nil, nil, nil, "simple", "", true
+		return nil, nil, nil, "simple", "", true
 	}
-	planJSON = planBytes
-	// level / query_sql exist only on the new lakehouse_metric table; the legacy
-	// fallback leaves them NULL → default to a simple metric.
 	level = "simple"
 	if levelStr.Valid && levelStr.String != "" {
 		level = levelStr.String
@@ -3529,7 +3374,7 @@ func lookupIntentByName(db *sql.DB, projectID, intentName string) (
 	for _, gb := range hint.AutoGroupBy {
 		addDimOD(gb)
 	}
-	return hint, objectNames, params, planJSON, level, querySQL, false
+	return hint, objectNames, params, level, querySQL, false
 }
 
 // computeRowSummary turns the result rows into a structured summary the
@@ -3652,22 +3497,8 @@ func intentPivotOnForSpec(db *sql.DB, projectID, userQuestion string, objects []
 	if len(objects) == 0 {
 		return ""
 	}
-	// Keyword-match join expr: legacy via lk.metric_intent_id, unified via
-	// lk.metric_id (only the join column differs).
+	// Keyword-match join expr: links via lk.metric_id (unified 口径 / lakehouse_metric).
 	const keywordMatchExpr = `(EXISTS (
-			SELECT 1 FROM lakehouse_keyword lk
-			WHERE lk.metric_intent_id = mi.id
-			  AND lk.project_id = mi.project_id
-			  AND COALESCE(lk.is_stopword, false) = false
-			  AND (
-			    (LENGTH(lk.keyword) >= 2 AND LOWER($Q) LIKE '%'||LOWER(lk.keyword)||'%')
-			    OR EXISTS (
-			      SELECT 1 FROM unnest(COALESCE(lk.aliases,'{}'::text[])) a
-			      WHERE LENGTH(a) >= 2 AND LOWER($Q) LIKE '%'||LOWER(a)||'%'
-			    )
-			  )
-		))`
-	const keywordMatchExprNew = `(EXISTS (
 			SELECT 1 FROM lakehouse_keyword lk
 			WHERE lk.metric_id = mi.id
 			  AND lk.project_id = mi.project_id
@@ -3682,24 +3513,11 @@ func intentPivotOnForSpec(db *sql.DB, projectID, userQuestion string, objects []
 		))`
 	args := []interface{}{projectID, pq.Array(objects), userQuestion}
 
-	// New-table-FIRST: lakehouse_metric.
-	queryNew := `SELECT COALESCE(mi.pivot_on,'')
+	query := `SELECT COALESCE(mi.pivot_on,'')
 		FROM lakehouse_metric mi
 		JOIN ont_object_type o ON mi.object_id = o.id
 		WHERE mi.project_id = $1
 		  AND mi.deleted_at IS NULL
-		  AND COALESCE(mi.mark, true) = true
-		  AND COALESCE(o.mark, true) = true
-		  AND mi.pivot_on IS NOT NULL AND mi.pivot_on <> ''
-		  AND LOWER(o.name) = ANY(SELECT LOWER(unnest($2::text[])))
-		ORDER BY ` + strings.ReplaceAll(keywordMatchExprNew, "$Q", "$3") + ` DESC,
-		         mi.priority DESC
-		LIMIT 1`
-	// Legacy fallback: lakehouse_metric_intent.
-	queryOld := `SELECT COALESCE(mi.pivot_on,'')
-		FROM lakehouse_metric_intent mi
-		JOIN ont_object_type o ON mi.object_id = o.id
-		WHERE mi.project_id = $1
 		  AND COALESCE(mi.mark, true) = true
 		  AND COALESCE(o.mark, true) = true
 		  AND mi.pivot_on IS NOT NULL AND mi.pivot_on <> ''
@@ -3709,25 +3527,14 @@ func intentPivotOnForSpec(db *sql.DB, projectID, userQuestion string, objects []
 		LIMIT 1`
 
 	var pivotOn string
-	fromNewTable := true
-	if err := db.QueryRow(queryNew, args...).Scan(&pivotOn); err != nil {
-		fromNewTable = false
-		if err := db.QueryRow(queryOld, args...).Scan(&pivotOn); err != nil {
-			return ""
-		}
+	if err := db.QueryRow(query, args...).Scan(&pivotOn); err != nil {
+		return ""
 	}
 	// Hard gate: require at least one matched keyword (mirrors applyIntentPivot).
-	// Gate against the SAME table the row came from (join column differs).
 	if userQuestion != "" && pivotOn != "" {
 		var hasKw bool
-		var gateQ string
-		if fromNewTable {
-			gateQ = `SELECT ` + strings.ReplaceAll(keywordMatchExprNew, "$Q", "$2") + `
+		gateQ := `SELECT ` + strings.ReplaceAll(keywordMatchExpr, "$Q", "$2") + `
 				FROM lakehouse_metric mi WHERE mi.pivot_on = $1 AND mi.deleted_at IS NULL`
-		} else {
-			gateQ = `SELECT ` + strings.ReplaceAll(keywordMatchExpr, "$Q", "$2") + `
-				FROM lakehouse_metric_intent mi WHERE mi.pivot_on = $1`
-		}
 		_ = db.QueryRow(gateQ, pivotOn, userQuestion).Scan(&hasKw)
 		if !hasKw {
 			return ""
@@ -3952,9 +3759,10 @@ func applyIntentPivot(ctx context.Context, db *sql.DB, projectID, userQuestion s
 	//
 	// Minimum keyword/alias length 2 avoids single-char noise like "的" matching
 	// everything. Lowercased on both sides so "Order"/"订单" behave the same.
+	// Links via lk.metric_id (unified 口径 / lakehouse_metric).
 	const keywordMatchExpr = `(EXISTS (
 			SELECT 1 FROM lakehouse_keyword lk
-			WHERE lk.metric_intent_id = mi.id
+			WHERE lk.metric_id = mi.id
 			  AND lk.project_id = mi.project_id
 			  AND (
 			    (LENGTH(lk.keyword) >= 2 AND LOWER($Q) LIKE '%'||LOWER(lk.keyword)||'%')
@@ -3970,9 +3778,10 @@ func applyIntentPivot(ctx context.Context, db *sql.DB, projectID, userQuestion s
 
 	{
 		q := selectCols + `
-			FROM lakehouse_metric_intent mi
+			FROM lakehouse_metric mi
 			JOIN ont_object_type o ON mi.object_id = o.id
 			WHERE mi.project_id = $1
+			  AND mi.deleted_at IS NULL
 			  AND COALESCE(mi.mark, true) = true
 			  AND COALESCE(o.mark, true) = true
 			  AND mi.pivot_on IS NOT NULL AND mi.pivot_on <> ''

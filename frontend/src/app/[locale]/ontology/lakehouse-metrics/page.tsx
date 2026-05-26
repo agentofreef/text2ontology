@@ -1,6 +1,6 @@
 'use client'
 
-// 指标 (Metric) list — the NEW unified lakehouse_metric table. Coexists with
+// 口径 (Metric) list — the NEW unified lakehouse_metric table. Coexists with
 // the lakehouse-metric-intents page (lakehouse_metric_intent); this is a fresh
 // authoring surface, not a replacement. Mirrors the metric-intents list chrome
 // (industrial header, DataTable, SegmentedFilter) but targets the new endpoint

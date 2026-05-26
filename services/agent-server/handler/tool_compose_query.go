@@ -85,9 +85,9 @@ var allowedAggregators = map[string]bool{
 	"distinctcount":  true,
 }
 
-// pureMetricEnabled gates the Path A "纯指标" measure check (col-family): a
+// pureMetricEnabled gates the Path A "纯口径" measure check (col-family): a
 // Mode B compose may only aggregate a column already used by an authorized
-// 指标 on the OD. Default on; set USE_PURE_METRIC=0 to disable (A/B / debug).
+// 口径 on the OD. Default on; set USE_PURE_METRIC=0 to disable (A/B / debug).
 var pureMetricEnabled = envFlagDefaultOn("USE_PURE_METRIC")
 
 // propertyOnOtherODs returns the names of every OTHER OD (other than
@@ -140,10 +140,10 @@ func composeError(detail string, hint string) M {
 }
 
 // metricColumnAuthorized reports whether the aggregated column `col` is covered
-// by at least one authorized (mark=true) 指标 on the OD — i.e. some
-// metric_intent's canonical_metric aggregates the same column. The aggregation
+// by at least one authorized (mark=true) 口径 on the OD — i.e. some
+// lakehouse_metric's canonical_metric aggregates the same column. The aggregation
 // FUNCTION may differ (col-family gate). Returns (false, authorizedCols) when no
-// 指标 backs the column; authorizedCols lists the columns that ARE authorized,
+// 口径 backs the column; authorizedCols lists the columns that ARE authorized,
 // for a corrective hint. Fail-open (true) on nil DB / lookup error so infra
 // failure never blocks a query.
 func metricColumnAuthorized(ctx context.Context, db *sql.DB, projectID, odID, col string) (bool, []string) {
@@ -151,8 +151,9 @@ func metricColumnAuthorized(ctx context.Context, db *sql.DB, projectID, odID, co
 		return true, nil
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT canonical_metric FROM lakehouse_metric_intent
+		SELECT canonical_metric FROM lakehouse_metric
 		WHERE project_id=$1 AND object_id=$2 AND mark=true
+		  AND deleted_at IS NULL
 		  AND COALESCE(canonical_metric,'') <> ''`,
 		projectID, odID)
 	if err != nil {
@@ -379,22 +380,22 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 	}
 
 	// Path A — pure-metric gate (col-family, USE_PURE_METRIC). The aggregated
-	// column must be a measure that at least one authorized 指标 (metric_intent)
+	// column must be a measure that at least one authorized 口径 (metric_intent)
 	// on this OD already uses in its canonical_metric. This forbids an ad-hoc
-	// bare aggregate that no 指标 backs ("无指标裸测度"), so the agent never
+	// bare aggregate that no 口径 backs ("无口径裸测度"), so the agent never
 	// invents an unauthorized computation — every number traces to a curated
-	// 指标 (consistent with cite-only). The aggregation FUNCTION may differ
+	// 口径 (consistent with cite-only). The aggregation FUNCTION may differ
 	// (sum vs avg); only the column must be authorized. Fail-open on nil DB /
 	// lookup error so infra never blocks a query.
 	if pureMetricEnabled {
 		if ok, authed := metricColumnAuthorized(ctx, db, projectID, odID, metricArg); !ok {
-			hint := "纯指标模式：度量列必须来自某个已授权指标。请改用 🎯 小节里已有的指标，" +
-				"或调用 declare_capability_gap 声明缺口——不要拼一个没有指标背书的聚合。"
+			hint := "纯口径模式：度量列必须来自某个已授权口径。请改用 🎯 小节里已有的口径，" +
+				"或调用 declare_capability_gap 声明缺口——不要拼一个没有口径背书的聚合。"
 			if len(authed) > 0 {
-				hint += " 本 OD 已授权指标覆盖的度量列：" + strings.Join(authed, " / ")
+				hint += " 本 OD 已授权口径覆盖的度量列：" + strings.Join(authed, " / ")
 			}
 			return M{
-				"error": fmt.Sprintf("NO_AUTHORIZED_METRIC: 度量列「%s」没有任何已授权指标背书", metricArg),
+				"error": fmt.Sprintf("NO_AUTHORIZED_METRIC: 度量列「%s」没有任何已授权口径背书", metricArg),
 				"code":  "NO_AUTHORIZED_METRIC",
 				"hint":  hint,
 			}

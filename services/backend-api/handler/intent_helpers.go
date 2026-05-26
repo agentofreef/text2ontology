@@ -1,5 +1,11 @@
 package handler
 
+// intent_helpers.go contains shared helper types and functions that were
+// previously defined in handler_intent.go / intent_validate_client.go.
+// Those CRUD handler files were removed (the /api/ontology/metric-intents*
+// routes are gone), but handler_lakehouse_metric.go and handler_export_import.go
+// still rely on these primitives.
+
 import (
 	"bytes"
 	"context"
@@ -15,11 +21,85 @@ import (
 	. "github.com/lakehouse2ontology/httputil"
 )
 
+// rowScanner is satisfied by *sql.Row and *sql.Rows, letting scan functions
+// accept either without duplicating code.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// intValDefault reads an int from a body field, defaulting if absent or
+// unparseable. JSON numbers decode to float64; int and int64 are also handled.
+func intValDefault(body M, key string, def int) int {
+	v, ok := body[key]
+	if !ok || v == nil {
+		return def
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return def
+}
+
+// stringSliceFromBody coerces body[key] (a JSON array decoded as
+// []interface{}) into []string, dropping nil / non-string entries.
+// Returns nil on miss so the caller can detect "field absent" vs "field empty".
+func stringSliceFromBody(body M, key string) []string {
+	v, ok := body[key]
+	if !ok || v == nil {
+		return nil
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// jsonArrayBytes normalises a JSON-ish value from ReadBody into a JSON array
+// byte slice. Accepts []interface{} directly, or nil → "[]".
+func jsonArrayBytes(v interface{}) []byte {
+	if v == nil {
+		return []byte("[]")
+	}
+	b, err := json.Marshal(v)
+	if err != nil || len(b) == 0 {
+		return []byte("[]")
+	}
+	return b
+}
+
+// optBoolPtr returns *bool for a field if present, else nil (so SQL uses
+// COALESCE default).
+func optBoolPtr(body M, key string) *bool {
+	v, ok := body[key]
+	if !ok || v == nil {
+		return nil
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
+}
+
+// ── intent dry-run validator (used by handler_lakehouse_metric.go) ─────────
+
 // intentValidateInput mirrors lakehouse-sql-server/smartquery.IntentValidationInput
 // over the wire. Field names use the same JSON tags so the body marshals into
 // the validator-side struct without a translation layer. We don't import the
 // remote type because services-level Go imports are forbidden by the layer-deps
-// gate (scripts/check-service-deps.sh, Phase 1 D4d).
+// gate (scripts/check-service-deps.sh).
 type intentValidateInput struct {
 	Name                string                    `json:"name"`
 	ObjectName          string                    `json:"objectName"`
@@ -59,9 +139,7 @@ type intentValidateResult struct {
 
 // validateIntentRemote calls lakehouse-sql-server's
 // POST /internal/smartquery/validate-intent. When LAKEHOUSE_SQL_URL is unset,
-// returns ok=true with a degraded-mode warning logged. This keeps dev
-// workflows running without lakehouse-sql-server in the loop while still
-// gating saves in fully-deployed environments where the URL is configured.
+// returns ok=true with a degraded-mode warning logged.
 func validateIntentRemote(ctx context.Context, in intentValidateInput) intentValidateResult {
 	url := strings.TrimSpace(os.Getenv("LAKEHOUSE_SQL_URL"))
 	if url == "" {
@@ -90,8 +168,6 @@ func validateIntentRemote(ctx context.Context, in intentValidateInput) intentVal
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		// Transport failure should not block save (dev-friendly) — log + skip
-		// validation. Production should monitor this log for actual outages.
 		log.Printf("intent dry-run: transport failure (skipping): %v", err)
 		return intentValidateResult{Ok: true, Code: "VALIDATION_TRANSPORT_FAILED"}
 	}
@@ -109,10 +185,7 @@ func validateIntentRemote(ctx context.Context, in intentValidateInput) intentVal
 }
 
 // buildIntentValidateInput extracts dry-run fields from the POST/PUT body
-// produced by ReadBody (already-deserialized map[string]interface{}). objectName
-// is fetched from db when objectId is provided — needed because the validator
-// uses it as spec.Objects[0]. If objectId is unknown, falls back to a stub so
-// validation can still proceed (objectName is purely structural — not resolved).
+// produced by ReadBody (already-deserialized map[string]interface{}).
 func buildIntentValidateInput(db *sql.DB, body map[string]interface{}) intentValidateInput {
 	in := intentValidateInput{
 		Name:                StrVal(body, "name"),
@@ -130,9 +203,6 @@ func buildIntentValidateInput(db *sql.DB, body map[string]interface{}) intentVal
 		}
 	}
 	if in.ObjectName == "" {
-		// Validator requires non-empty objectName; substitute a safe stub
-		// rather than failing here. The validator only uses objectName as a
-		// string for spec.Objects[0]; it does NOT resolve it to a real Od.
 		in.ObjectName = "_validation_stub_"
 	}
 	if raw, ok := body["canonicalFilters"].([]interface{}); ok {
@@ -171,8 +241,7 @@ func buildIntentValidateInput(db *sql.DB, body map[string]interface{}) intentVal
 	return in
 }
 
-// stringsFromBody extracts a []string from body["key"] where the value may
-// be []interface{} (JSON array) or already []string.
+// stringsFromBody extracts a []string from body[key].
 func stringsFromBody(body map[string]interface{}, key string) []string {
 	v, ok := body[key]
 	if !ok || v == nil {
@@ -193,6 +262,7 @@ func stringsFromBody(body map[string]interface{}, key string) []string {
 	return nil
 }
 
+// boolFromBody extracts a bool from body[key], returning false on miss.
 func boolFromBody(body map[string]interface{}, key string) bool {
 	v, ok := body[key]
 	if !ok || v == nil {

@@ -84,7 +84,7 @@ func TestReachabilityAnswer_FollowUpAdvisory(t *testing.T) {
 	infeasible := mission.ReachabilityVerdict{
 		Feasible: false,
 		Kind:     "gap",
-		Reason:   "不可行：未召回到任何可用于度量的指标。",
+		Reason:   "不可行：未召回到任何可用于度量的口径。",
 	}
 
 	// Follow-up: advisory → proceed (empty answer).
@@ -426,7 +426,7 @@ func TestSummarizeRecallResolution(t *testing.T) {
 	var sawMetric, sawValue, sawCol bool
 	for _, r := range roles {
 		switch r.Role {
-		case "指标":
+		case "口径":
 			sawMetric = true
 		case "取值":
 			sawValue = true
