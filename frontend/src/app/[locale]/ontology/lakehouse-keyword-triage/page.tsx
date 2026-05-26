@@ -9,7 +9,7 @@ import { useProject } from '@/lib/project'
 import { useStyleMode } from '@/lib/style-mode'
 import { AnimatedButton } from '@/components/ui/AnimatedButton'
 import { Filter, Check, X, Search, Tags, Database, Hash, Tag, Sparkles, Ban, Inbox, AlertTriangle, RefreshCw } from 'lucide-react'
-import type { OntObjectType, OntProperty, OntMetricIntent } from '@/types/api'
+import type { OntObjectType, OntProperty, OntMetric } from '@/types/api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -418,7 +418,7 @@ function ValAliasVisualizer({ token, projectId, objects, selectedOdId, onSelectO
 }
 
 function IntentVisualizer({ token, intents, selectedIntentId, onSelectIntent }: {
-  token: string; intents: OntMetricIntent[]; selectedIntentId: string; onSelectIntent: (id: string) => void
+  token: string; intents: OntMetric[]; selectedIntentId: string; onSelectIntent: (id: string) => void
 }) {
   const t = useTranslations('triage')
   const selectedIntent = intents.find(i => i.id === selectedIntentId)
@@ -630,7 +630,7 @@ function TokenQueue({ items, loading, selectedToken, onSelect }: {
 
 function AssignmentPanel({ token, detail, projectId, objects, intents, pendingDeleteIds, onSaved }: {
   token: string | null; tokenCount?: number; detail: TokenDetail | null
-  projectId: string; objects: OntObjectType[]; intents: OntMetricIntent[]
+  projectId: string; objects: OntObjectType[]; intents: OntMetric[]
   pendingDeleteIds: Set<string>; onSaved: (advance: boolean) => void
 }) {
   const t = useTranslations('triage')
@@ -932,7 +932,7 @@ export default function KeywordTriagePageMinimal() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [pendingDeleteIds, setPendingDeleteIds] = useState<Set<string>>(new Set())
   const [objects, setObjects] = useState<OntObjectType[]>([])
-  const [intents, setIntents] = useState<OntMetricIntent[]>([])
+  const [intents, setIntents] = useState<OntMetric[]>([])
 
   useEffect(() => {
     clearTimeout(searchDebounceRef.current)
@@ -944,7 +944,7 @@ export default function KeywordTriagePageMinimal() {
     if (!currentProject) return
     Promise.all([
       api<{ data: OntObjectType[] }>(`/ontology/keyword-triage/objects-tree?projectId=${currentProject.id}`),
-      api<{ data: OntMetricIntent[] }>(`/ontology/metric-intents?projectId=${currentProject.id}`),
+      api<{ data: OntMetric[] }>(`/ontology/lakehouse-metrics`),
     ]).then(([objRes, intRes]) => {
       setObjects(objRes.data || [])
       setIntents(intRes.data || [])

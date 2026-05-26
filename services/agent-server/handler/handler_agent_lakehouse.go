@@ -2525,6 +2525,19 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
 	}
 
+	// Mode B (自由组合): the `metric` value is an aggregate expression like
+	// `sum(ORDER_QUANTITY)` / `count(id)` rather than a curated 口径名. Any value
+	// containing `(` is treated as Mode B and dispatched to the composer (which
+	// parses+validates the aggregate against the OD's columns). Curated 口径 names
+	// are dotted identifiers (e.g. `Order.Total`, `Sales.ByGeo`) and never contain
+	// parentheses, so the heuristic is unambiguous. Without this branch a Mode B
+	// call falls through to `lookupIntentByName("sum(...)")` and errors out as
+	// METRIC_NOT_FOUND — the exact regression observed after the intent→metric
+	// field merge.
+	if strings.ContainsRune(intentName, '(') {
+		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
+	}
+
 	hint, objectNames, intentParams, level, querySQL, notFound := lookupIntentByName(db, projectID, intentName)
 	if notFound {
 		return M{

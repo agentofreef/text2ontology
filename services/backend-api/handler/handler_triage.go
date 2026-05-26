@@ -38,7 +38,7 @@ import (
 // Badge precedence (one badge per token):
 //
 //	ignored  — at least one row has is_stopword=true
-//	partial  — at least one row has any anchor (object_id|property_id|metric_intent_id)
+//	partial  — at least one row has any anchor (object_id|property_id|metric_id)
 //	floating — row(s) exist but none has an anchor and none is stopword
 //	orphan   — no lakehouse_keyword row at all
 func handleTriageQueue(db *sql.DB) http.HandlerFunc {
@@ -80,13 +80,13 @@ func handleTriageQueue(db *sql.DB) http.HandlerFunc {
 		               WHERE COALESCE(is_stopword,false) = false
 		                 AND (property_id IS NOT NULL
 		                   OR object_id IS NOT NULL
-		                   OR metric_intent_id IS NOT NULL)
+		                   OR metric_id IS NOT NULL)
 		           )::int                                AS anchor_count,
 		           COUNT(*) FILTER (
 		               WHERE COALESCE(is_stopword,false) = false
 		                 AND property_id      IS NULL
 		                 AND object_id        IS NULL
-		                 AND metric_intent_id IS NULL
+		                 AND metric_id        IS NULL
 		           )::int                                AS floating_count,
 		           BOOL_OR(COALESCE(is_stopword,false))  AS has_stopword
 		    FROM lakehouse_keyword,
@@ -198,14 +198,14 @@ func loadTriageBindings(db *sql.DB, projectID, token string) []M {
 		       COALESCE(lk.is_column_name, false),
 		       lk.property_id::text,  COALESCE(p.name,''),
 		       lk.object_id::text,    COALESCE(o.name,''),
-		       lk.metric_intent_id::text, COALESCE(mi.name,''),
+		       lk.metric_id::text, COALESCE(mi.name,''),
 		       COALESCE(po.name,''), COALESCE(mio.name,''),
 		       lk.synced_at
 		FROM lakehouse_keyword lk
 		LEFT JOIN ont_property p       ON lk.property_id      = p.id
 		LEFT JOIN ont_object_type po   ON p.object_type_id    = po.id
 		LEFT JOIN ont_object_type o    ON lk.object_id        = o.id
-		LEFT JOIN lakehouse_metric_intent mi ON lk.metric_intent_id = mi.id
+		LEFT JOIN lakehouse_metric mi  ON lk.metric_id        = mi.id
 		LEFT JOIN ont_object_type mio  ON mi.object_id        = mio.id
 		WHERE lk.project_id = $1
 		  AND (
@@ -510,7 +510,7 @@ func insertTriageRow(tx *sql.Tx, projectID, token string, b TriageAssignBinding)
 		return recordAliasOnCanonical(tx,
 			`SELECT id::text FROM lakehouse_keyword
 			  WHERE project_id = $1 AND object_id = $2
-			    AND property_id IS NULL AND metric_intent_id IS NULL
+			    AND property_id IS NULL AND metric_id IS NULL
 			    AND COALESCE(is_stopword,false) = false
 			    AND LOWER(keyword) = LOWER($3)
 			  LIMIT 1`,
@@ -587,20 +587,20 @@ func insertTriageRow(tx *sql.Tx, projectID, token string, b TriageAssignBinding)
 		}
 		var odID, intentName string
 		if err := tx.QueryRow(
-			`SELECT object_id::text, name FROM lakehouse_metric_intent WHERE id = $1`,
+			`SELECT object_id::text, name FROM lakehouse_metric WHERE id = $1 AND deleted_at IS NULL AND mark = true`,
 			b.IntentID,
 		).Scan(&odID, &intentName); err != nil {
 			return err
 		}
 		return recordAliasOnCanonical(tx,
 			`SELECT id::text FROM lakehouse_keyword
-			  WHERE project_id = $1 AND metric_intent_id = $2
+			  WHERE project_id = $1 AND metric_id = $2
 			    AND COALESCE(is_stopword,false) = false
 			  ORDER BY (LOWER(keyword) = LOWER($3)) DESC, synced_at DESC
 			  LIMIT 1`,
 			[]interface{}{projectID, b.IntentID, intentName},
 			`INSERT INTO lakehouse_keyword
-			     (project_id, object_type_id, metric_intent_id, keyword)
+			     (project_id, object_type_id, metric_id, keyword)
 			 VALUES ($1, $2, $3, $4) RETURNING id::text`,
 			[]interface{}{projectID, odID, b.IntentID, intentName},
 			intentName, token,
@@ -859,7 +859,7 @@ func handleIntentTriggers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Cross-project IDOR guard: triggers belong to the intent's project.
-		if !authmw.EnforceEntityProject(w, r, db, "lakehouse_metric_intent", "id", intentID) {
+		if !authmw.EnforceEntityProject(w, r, db, "lakehouse_metric", "id", intentID) {
 			return
 		}
 
@@ -872,7 +872,7 @@ func handleIntentTriggers(db *sql.DB) http.HandlerFunc {
 			}
 			if _, err := db.Exec(
 				`DELETE FROM lakehouse_keyword
-				 WHERE id = $1 AND metric_intent_id = $2`,
+				 WHERE id = $1 AND metric_id = $2`,
 				kwID, intentID,
 			); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -907,7 +907,7 @@ func handleIntentTriggers(db *sql.DB) http.HandlerFunc {
 			          FROM unnest(COALESCE(lk.aliases, '{}'::text[])) AS al
 			      )
 			) usage ON true
-			WHERE lk.metric_intent_id = $1
+			WHERE lk.metric_id = $1
 			ORDER BY usage_count DESC, lk.keyword`,
 			intentID)
 		if err != nil {

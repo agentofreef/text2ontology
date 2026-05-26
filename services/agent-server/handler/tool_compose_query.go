@@ -55,6 +55,12 @@ import (
 // the unified `smartquery` tool, not a separate tool. runComposeQueryTool below
 // remains the implementation that path delegates to.
 
+// metricAliasRE matches a trailing `as <alias>` clause on a canonical_metric
+// expression (口径 editor preserves the author's measure alias on the stored
+// SQL, e.g. `sum("ORDER_QUANTITY") as "total"`). Stripped before metricExprRE
+// runs so the anchored `^func(arg)$` regex doesn't get derailed by the alias.
+var metricAliasRE = regexp.MustCompile(`(?i)\s+as\s+("?[a-zA-Z_][a-zA-Z0-9_]*"?)\s*$`)
+
 // metricExprRE matches "func(arg)" where arg is a property name.
 // Examples: sum(NetAmount), count(id), avg(UnitPrice), distinct_count(CustomerID).
 // NOTE: count(*) is rejected at validation time — see the metricArg check
@@ -188,10 +194,15 @@ func metricColumnAuthorized(ctx context.Context, db *sql.DB, projectID, odID, co
 }
 
 // metricColFromExpr extracts the aggregated column from a canonical_metric
-// expression like "sum(ORDER_QUANTITY)" or "count(ORDER.ORDER_ID)" — returning
-// the bare column (OD prefix + granularity suffix stripped), or "" if it can't
-// be parsed.
+// expression like `sum(ORDER_QUANTITY)`, `sum("ORDER_QUANTITY") as "total"`, or
+// `count(ORDER.ORDER_ID)` — returning the bare column (alias / OD prefix /
+// granularity suffix / surrounding double-quotes stripped), or "" if it can't
+// be parsed. Without the alias + quote handling, every 口径 authored with a
+// custom measure alias falsely fails the NO_AUTHORIZED_METRIC gate.
 func metricColFromExpr(expr string) string {
+	if loc := metricAliasRE.FindStringIndex(expr); loc != nil {
+		expr = expr[:loc[0]]
+	}
 	m := metricExprRE.FindStringSubmatch(expr)
 	if m == nil {
 		return ""
@@ -200,7 +211,8 @@ func metricColFromExpr(expr string) string {
 	if i := strings.LastIndex(arg, "."); i >= 0 {
 		arg = arg[i+1:]
 	}
-	return strings.TrimSpace(arg)
+	arg = strings.Trim(strings.TrimSpace(arg), `"`)
+	return arg
 }
 
 // normMetricColName normalizes a column name for case-insensitive comparison.
