@@ -19,12 +19,14 @@
 
 import { useState, useMemo } from 'react'
 import { SQLEditor } from '@/components/ui/SQLEditor'
+import { ResultViewer } from '@/components/ui/ResultViewer'
 import { useProject } from '@/lib/project'
 import { useMessage } from '@/lib/message'
+import { api } from '@/lib/api'
 import type {
   OntMetricIntentFilter, OntMetricParameter, OntObjectType,
 } from '@/types/api'
-import { Plus, AlertCircle, Search, AlertTriangle } from 'lucide-react'
+import { Plus, AlertCircle, Search, AlertTriangle, Play, Loader2 } from 'lucide-react'
 
 // ── Form model ──────────────────────────────────────────────────────────────
 // The new editor writes only a few fields; the rest are kept on the form type
@@ -167,7 +169,60 @@ interface Props {
 export function MetricEditor({ form, setForm, objects, t }: Props) {
   const { currentProject } = useProject()
   const msg = useMessage()
-  void currentProject; void msg // reserved (kept stable across the simulator extraction)
+  void msg // reserved
+
+  // ── SQL run preview ──────────────────────────────────────────────────────
+  // Runs the bare metric SQL through the structured preview endpoint (same one
+  // the simulator uses, with empty sampleParams + no extra filters/dims) so the
+  // author can see "what does my口径 actually return right now" without leaving
+  // the editor. For complex what-if scenarios (cross-OD filters, group-by,
+  // pivot) the standalone simulator page remains the place; this is the inline
+  // smoke-test for the口径 itself.
+  const primaryOdName = useMemo(
+    () => objects.find(o => o.id === (form.odIds[0] || form.objectId))?.name || '',
+    [objects, form.odIds, form.objectId],
+  )
+  const [previewRunning, setPreviewRunning] = useState(false)
+  const [previewSQL, setPreviewSQL] = useState('')
+  const [previewRows, setPreviewRows] = useState<string | null>(null)
+  const [previewErr, setPreviewErr] = useState<string | null>(null)
+  const previewDisabled = previewRunning || !currentProject || !form.querySql.trim() || !primaryOdName
+  const runPreview = async () => {
+    if (previewDisabled) return
+    setPreviewRunning(true); setPreviewErr(null); setPreviewSQL(''); setPreviewRows(null)
+    try {
+      const res = await api<{ ok: boolean; sql: string; rows: unknown[]; rowCount: number; error?: string }>(
+        '/ontology/lakehouse-metric-preview',
+        {
+          method: 'POST',
+          body: {
+            projectId: currentProject!.id,
+            level: form.level,
+            odName: primaryOdName,
+            querySql: form.querySql,
+            canonicalMetric: form.canonicalMetric,
+            canonicalFilters: [],
+            autoGroupBy: form.autoGroupBy,
+            parameters: form.parameters,
+            groupBy: [],
+            orderBy: [],
+            defaultLimit: 0,
+            sampleParams: {},
+          },
+        },
+      )
+      setPreviewSQL(res.sql || '')
+      if (!res.ok) {
+        setPreviewErr(res.error || t('preview_failed'))
+      } else {
+        setPreviewRows(JSON.stringify(Array.isArray(res.rows) ? res.rows : []))
+      }
+    } catch (e) {
+      setPreviewErr(e instanceof Error ? e.message : t('preview_failed'))
+    } finally {
+      setPreviewRunning(false)
+    }
+  }
 
   // ── Primary OD picker (single OD — cross-OD is JSON-driven at runtime) ───
   const [odSearch, setOdSearch] = useState('')
@@ -309,6 +364,33 @@ export function MetricEditor({ form, setForm, objects, t }: Props) {
             schema={{}}
           />
           <p className="font-mono text-[10px] text-ink-ghost">{t('metric_sql_note')}</p>
+        </Panel>
+
+        {/* SQL 运行预览 — inline smoke test for the bare口径 SQL */}
+        <Panel title={t('preview_title')} hint={t('preview_hint')}>
+          <div className="flex items-center gap-2">
+            <button onClick={runPreview} disabled={previewDisabled}
+              className="inline-flex items-center gap-1.5 border border-ink bg-ink px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-white hover:bg-ink/90 disabled:opacity-40">
+              {previewRunning ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              {previewRunning ? t('preview_running') : t('preview_run')}
+            </button>
+            <p className="font-mono text-[9px] text-ink-ghost leading-relaxed">{t('preview_note')}</p>
+          </div>
+          {previewErr && (
+            <div className="border border-danger/30 bg-danger/5 px-2 py-1.5 font-mono text-[10px] text-danger leading-relaxed">{previewErr}</div>
+          )}
+          {previewSQL && (
+            <div>
+              <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-ink-ghost">{t('preview_sql_label')}</div>
+              <SQLEditor value={previewSQL} onChange={() => {}} height="140px" schema={{}} readOnly />
+            </div>
+          )}
+          {previewRows && (
+            <div>
+              <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-ink-ghost">{t('preview_result_label')}</div>
+              <ResultViewer data={previewRows} />
+            </div>
+          )}
         </Panel>
 
         {/* Pointer to the standalone simulator (lives on the edit page top bar;

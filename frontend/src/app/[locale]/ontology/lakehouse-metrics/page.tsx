@@ -18,8 +18,10 @@ import { api } from '@/lib/api'
 import { useStyleMode } from '@/lib/style-mode'
 import type { OntMetric } from '@/types/api'
 import {
-  Plus, Pencil, Trash2, BarChart3, RefreshCw,
+  Plus, Pencil, Trash2, BarChart3, RefreshCw, HelpCircle,
 } from 'lucide-react'
+import { Modal } from '@/components/ui/Modal'
+import { MetricHelpContent } from './_components/MetricHelp'
 
 type MarkFilter = 'all' | 'marked' | 'unmarked'
 
@@ -31,6 +33,7 @@ export default function LakehouseMetricsPage() {
   const reduce = useReducedMotion()
 
   const [markFilter, setMarkFilter] = useState<MarkFilter>('all')
+  const [helpOpen, setHelpOpen] = useState(false)
 
   const { data: metrics, refetch, loading } = useFetch<OntMetric>('/ontology/lakehouse-metrics')
 
@@ -215,6 +218,17 @@ export default function LakehouseMetricsPage() {
             ]}
           />
           <motion.button
+            onClick={() => setHelpOpen(true)}
+            whileHover={reduce ? undefined : { scale: 1.05 }}
+            whileTap={reduce ? undefined : { scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+            aria-label={t('help_aria')}
+            title={t('help_title')}
+            className={`inline-flex h-7 w-7 items-center justify-center bg-white text-ink-muted outline-none hover:border-ink hover:text-ink focus-visible:ring-1 focus-visible:ring-ink ${industrial ? 'border border-ink' : 'rounded-md border border-border'}`}
+          >
+            <HelpCircle size={13} aria-hidden="true" />
+          </motion.button>
+          <motion.button
             onClick={refetch}
             disabled={loading}
             whileHover={reduce || loading ? undefined : { scale: 1.05 }}
@@ -262,6 +276,12 @@ export default function LakehouseMetricsPage() {
           </div>
         )}
       </div>
+
+      {/* 口径 explainer — the most important onboarding surface for the metric
+          model. Content lives in MetricHelp (mirrored to docs/metric-caliber-guide.md). */}
+      <Modal open={helpOpen} onClose={() => setHelpOpen(false)} title={t('help_title')} subtitle={t('help_subtitle')} width="720px">
+        <MetricHelpContent />
+      </Modal>
     </div>
   )
 }
