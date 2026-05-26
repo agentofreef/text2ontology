@@ -128,10 +128,16 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE',
 -- llmclient.GetConfigForRole (SELECT base_url/api_key/model from these tables).
 -- Without SELECT the lookup returns an empty base_url, so the LLM POST hits a
 -- bare "/v1/chat/completions" → "unsupported protocol scheme """.
+-- NOTE (grant-gap fix): lakehouse_keyword_alias_vector added — agent-server runs
+-- recall.LakehouseVectorTopN (token-recall debug page + annotations) which JOINs
+-- this table for the alias-vector cosine UNION. Without SELECT the query errors
+-- ("permission denied for table lakehouse_keyword_alias_vector"), LakehouseVectorTopN
+-- returns nil, and the debug page shows "向量候选不可用" even though embeddings work.
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
-    'lakehouse_keyword', 'lakehouse_metric_intent', 'lakehouse_metric',
+    'lakehouse_keyword', 'lakehouse_keyword_alias_vector',
+    'lakehouse_metric_intent', 'lakehouse_metric',
     'lakehouse_shape_capability',
     'llm_config', 'llm_role_binding',
     'user', 'project'
@@ -156,11 +162,17 @@ SELECT pg_temp.grant_if_exists('GRANT', 'INSERT', ARRAY['capability_gap_log'], '
 -- etc.) are done by collector_server_user during ontology population — recall-server
 -- never writes. The old ont_vector_entry table no longer exists (refactored to
 -- pgvector columns on existing tables in the enterprise schema); its grant is removed.
+-- NOTE (grant-gap fix): llm_config + llm_role_binding added — recall-server calls
+-- llmclient.EmbedTexts (Tier-3 VEC keyword search + LakehouseVectorTopN), which reads
+-- the active embedding config (base_url/api_key/model) from these tables via
+-- GetConfigForRoleWithProxy(db,"embedding"). Without SELECT the lookup returns an empty
+-- config → "no active embedding config" → the whole VEC tier silently goes dark.
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
     'lakehouse_keyword', 'lakehouse_metric_intent', 'lakehouse_metric',
-    'lakehouse_keyword_alias_vector'
+    'lakehouse_keyword_alias_vector',
+    'llm_config', 'llm_role_binding'
   ], 'recall_server_user');
 
 -- 6. lakehouse_sql_server_user: RW on lakehouse/staging; RO on ontology.

@@ -944,7 +944,7 @@ export default function KeywordTriagePageMinimal() {
     if (!currentProject) return
     Promise.all([
       api<{ data: OntObjectType[] }>(`/ontology/keyword-triage/objects-tree?projectId=${currentProject.id}`),
-      api<{ data: OntMetric[] }>(`/ontology/lakehouse-metrics`),
+      api<{ data: OntMetric[] }>(`/ontology/lakehouse-metrics?projectId=${currentProject.id}`),
     ]).then(([objRes, intRes]) => {
       setObjects(objRes.data || [])
       setIntents(intRes.data || [])

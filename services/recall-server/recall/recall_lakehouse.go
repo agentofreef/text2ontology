@@ -311,6 +311,31 @@ func BuildLakehouseContext(ctx context.Context, db *sql.DB, projectID string, to
 		result.DirectOds = []OdBlock{}
 	}
 
+	// ── Step 6.5: Mirror 口径 (metric) hits into TokenDetails ──
+	// A token that ONLY hit a 口径 (no property / OD-alias / value hit) is
+	// authoritatively recorded in result.MetricIntents, but the per-token recall
+	// debug panel reads result.TokenDetails — so without this mirror it renders
+	// "MISS" for a token that actually matched a 口径 (e.g. "early order" →
+	// early_order_数量). This is a DISPLAY-parity copy only: it runs after all
+	// recall + the vectorCandidates guard reads TokenDetails downstream, so a
+	// 口径-matched token correctly skips the "almost matches" vector top-N.
+	for _, mi := range result.MetricIntents {
+		score := 1.0
+		if mi.Tier == "FUZZY" {
+			score = 0.75
+		}
+		for _, tok := range mi.MatchedTokens {
+			result.TokenDetails[tok] = append(result.TokenDetails[tok], KeywordHit{
+				KeywordID:    mi.IntentID,
+				Keyword:      mi.Name,
+				MappedField:  "🎯 口径 · " + mi.ObjectName,
+				Tier:         mi.Tier,
+				Score:        score,
+				MatchedToken: tok,
+			})
+		}
+	}
+
 	// ── Step 7: Format context markdown ──
 	result.ContextMD = FormatContext(result, tokens, question)
 
