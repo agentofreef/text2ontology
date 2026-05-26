@@ -13,6 +13,7 @@ import (
 
 	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
+	"github.com/lakehouse2ontology/sqlrewrite"
 )
 
 // =========================== Handlers ===========================
@@ -61,15 +62,15 @@ func handleSQLPassthrough(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Reject DDL
-		if err := rejectDDL(userSQL); err != nil {
+		// Reject DDL (single source of truth: pkg/sqlrewrite).
+		if err := sqlrewrite.RejectDDL(userSQL); err != nil {
 			_ = logPassthrough(db, projectID, userSQL, 0, 0, err.Error())
 			JsonResp(w, M{"error": err.Error(), "blocked": true})
 			return
 		}
 
 		// Extract referenced "tables" from FROM/JOIN; validate they are all Ods.
-		refs := extractReferencedNames(userSQL)
+		refs := sqlrewrite.ExtractReferencedNames(userSQL)
 		var unknown []string
 		var used []string
 		seen := map[string]bool{}
@@ -100,7 +101,7 @@ func handleSQLPassthrough(db *sql.DB) http.HandlerFunc {
 
 		// Build WITH clause injecting canonical_queries for used Ods
 		rewritten := buildCTEPrefix(odMap, used) + "\n" + userSQL
-		rewritten = maybeInjectLimit(rewritten, rowLimit)
+		rewritten = sqlrewrite.MaybeInjectLimit(rewritten, rowLimit)
 
 		// Look up project lakehouse schema (same pattern as smartquery executor)
 		var lakehouseSchema string
@@ -458,121 +459,19 @@ func loadProjectOdCanonical(db *sql.DB, projectID string) (map[string]odInfo, []
 }
 
 // buildCTEPrefix builds `WITH "Od1" AS (cq1), "Od2" AS (cq2)` using the ORIGINAL
-// Od names so quoted identifier case matches the user's SQL.
+// Od names so quoted identifier case matches the user's SQL. Thin adapter over
+// the shared sqlrewrite.BuildCTEPrefix: this handler keys its odMap by lowercased
+// name → odInfo{Name(original), Canonical}, while the shared builder wants
+// originalName → canonical, so we project before delegating.
 func buildCTEPrefix(odMap map[string]odInfo, usedLower []string) string {
-	var parts []string
+	canonical := make(map[string]string, len(usedLower))
+	used := make([]string, 0, len(usedLower))
 	for _, lname := range usedLower {
 		info := odMap[lname]
-		parts = append(parts, fmt.Sprintf("%q AS (\n%s\n)", info.Name, info.Canonical))
+		canonical[info.Name] = info.Canonical
+		used = append(used, info.Name)
 	}
-	return "WITH " + strings.Join(parts, ",\n") + "\n"
-}
-
-// dollarQuoteRe matches a PostgreSQL dollar-quote opener: $$ or $tag$ where the
-// optional tag is an identifier. Presence of any opener is treated as hostile in
-// the read-only passthrough path (see rejectDDL).
-var dollarQuoteRe = regexp.MustCompile(`\$[A-Za-z_0-9]*\$`)
-
-// rejectDDL blocks any DDL / dangerous keyword AND escape attempts that
-// would let a passthrough query read outside its project's lakehouse
-// schema (the `SET LOCAL search_path` set just before execution).
-//
-// The original implementation only filtered DML/DDL verbs. That leaves
-// every read path open: `SELECT * FROM public."user"` happily exfiltrates
-// password hashes, `SELECT * FROM pg_catalog.pg_authid` walks role
-// credentials. So we additionally reject:
-//
-//   - explicit references to "public.", "pg_catalog.", "information_schema."
-//   - any reference to a quoted "user" table
-//   - multi-statement input via top-level ';'
-//   - SET / RESET / SHOW (would let an attacker swap search_path mid-query)
-func rejectDDL(sqlText string) error {
-	// PG dollar-quoting ($$...$$ or $tag$...$tag$) lets a payload hide content
-	// from the comment-strip + keyword scan below (the quoted body is opaque to
-	// our --/ /* */ stripping and to the ';' multi-statement check). A read-only
-	// single-statement passthrough SELECT never legitimately needs dollar-quotes,
-	// so reject any dollar-quote opener outright rather than try to parse them.
-	if dollarQuoteRe.MatchString(sqlText) {
-		return fmt.Errorf("禁止美元引用（$$ / $tag$）语法")
-	}
-
-	cleaned := regexp.MustCompile(`--[^\n]*`).ReplaceAllString(sqlText, " ")
-	cleaned = regexp.MustCompile(`/\*[\s\S]*?\*/`).ReplaceAllString(cleaned, " ")
-	lower := strings.ToLower(cleaned)
-
-	banned := []string{
-		`\bdrop\b`, `\btruncate\b`, `\balter\b`, `\bcreate\b`,
-		`\bgrant\b`, `\brevoke\b`, `\bvacuum\b`, `\breindex\b`,
-		`\binsert\b`, `\bupdate\b`, `\bdelete\b`, `\bcopy\b`,
-		`\bset\b`, `\breset\b`, `\bshow\b`,
-	}
-	for _, p := range banned {
-		if matched, _ := regexp.MatchString(p, lower); matched {
-			return fmt.Errorf("只读查询，禁止的语句: %s", strings.Trim(p, `\b`))
-		}
-	}
-
-	// Cross-schema escapes. We allow only references to the project's
-	// lakehouse schema (caller wraps `SET LOCAL search_path TO <proj>,
-	// public`); explicit "public.x" and any "pg_*" / "information_schema"
-	// references are bona-fide exfiltration attempts.
-	forbidden := []string{
-		`\bpg_catalog\.`,
-		`\binformation_schema\.`,
-		`\bpg_authid\b`, `\bpg_shadow\b`, `\bpg_user\b`,
-		`\bpublic\."?user"?\b`,
-		`"user"\.|"user"\s*(?:\)|\(|where|on|left|right|inner|cross|join|from)`,
-	}
-	for _, p := range forbidden {
-		if matched, _ := regexp.MatchString(p, lower); matched {
-			return fmt.Errorf("禁止跨 schema 引用: %s", strings.Trim(p, `\b`))
-		}
-	}
-
-	// Multi-statement protection. We strip trailing semicolons before
-	// counting so an innocuous "SELECT 1;" still passes; anything that
-	// has a ';' followed by non-whitespace is a chained statement.
-	trimmed := strings.TrimRight(lower, "; \t\r\n")
-	if strings.Contains(trimmed, ";") {
-		return fmt.Errorf("只允许单条语句，禁止 ';' 分隔的多语句")
-	}
-	return nil
-}
-
-// extractReferencedNames returns all table-like identifiers referenced in FROM/JOIN
-// clauses. Handles both `"Quoted"` and unquoted forms. Comments stripped upstream.
-var nameRefRe = regexp.MustCompile(`(?i)\b(?:from|join)\s+(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_]*))`)
-
-func extractReferencedNames(sqlText string) []string {
-	// Strip comments first
-	clean := regexp.MustCompile(`--[^\n]*`).ReplaceAllString(sqlText, " ")
-	clean = regexp.MustCompile(`/\*[\s\S]*?\*/`).ReplaceAllString(clean, " ")
-	var out []string
-	for _, m := range nameRefRe.FindAllStringSubmatch(clean, -1) {
-		name := m[1]
-		if name == "" {
-			name = m[2]
-		}
-		if name == "" {
-			continue
-		}
-		low := strings.ToLower(name)
-		if low == "lateral" || low == "only" {
-			continue
-		}
-		out = append(out, name)
-	}
-	return out
-}
-
-var hasLimitRe = regexp.MustCompile(`(?i)\blimit\s+\d+`)
-
-func maybeInjectLimit(sqlText string, limit int) string {
-	trimmed := strings.TrimRight(sqlText, "; \t\n\r")
-	if hasLimitRe.MatchString(trimmed) {
-		return sqlText
-	}
-	return trimmed + fmt.Sprintf("\nLIMIT %d", limit)
+	return sqlrewrite.BuildCTEPrefix(canonical, used)
 }
 
 func executePassthrough(db *sql.DB, sqlText, lakehouseSchema string) ([]M, [][]interface{}, int, error) {

@@ -91,6 +91,7 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE', ARRAY[
     'ont_knowledge', 'ont_topic', 'ont_knowledge_definition', 'ont_knowledge_example',
     'ont_causality', 'ont_learned_fact', 'ont_fact_definition', 'ont_fact_link',
     'lakehouse_keyword', 'lakehouse_keyword_alias_vector', 'lakehouse_metric_intent',
+    'lakehouse_metric',
     'ont_query_log',
     'ont_lakehouse_sql_log', 'ont_sql_passthrough_log'
   ], 'backend_api_user');
@@ -130,7 +131,7 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE, DELETE',
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
-    'lakehouse_keyword', 'lakehouse_metric_intent',
+    'lakehouse_keyword', 'lakehouse_metric_intent', 'lakehouse_metric',
     'lakehouse_shape_capability',
     'llm_config', 'llm_role_binding',
     'user', 'project'
@@ -158,7 +159,7 @@ SELECT pg_temp.grant_if_exists('GRANT', 'INSERT', ARRAY['capability_gap_log'], '
 SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
-    'lakehouse_keyword', 'lakehouse_metric_intent',
+    'lakehouse_keyword', 'lakehouse_metric_intent', 'lakehouse_metric',
     'lakehouse_keyword_alias_vector'
   ], 'recall_server_user');
 
@@ -177,7 +178,7 @@ SELECT pg_temp.grant_if_exists('REVOKE', 'INSERT, UPDATE, DELETE', ARRAY[
     'ont_version', 'ont_object_type', 'ont_property', 'ont_link_type',
     'ont_knowledge', 'ont_causality', 'ont_learned_fact', 'ont_fact_link',
     'ont_vector_entry',
-    'lakehouse_keyword', 'lakehouse_metric_intent'
+    'lakehouse_keyword', 'lakehouse_metric_intent', 'lakehouse_metric'
   ], 'lakehouse_sql_server_user');
 
 -- 7. mcp_tools_server_user: the §3.4 comment says "no direct DB access", but the

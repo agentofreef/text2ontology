@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/lib/pq"
+
+	"github.com/lakehouse2ontology/sqlrewrite"
 )
 
 // TestRejectDDL_DollarQuoteBypass: PG dollar-quoting must be rejected outright.
@@ -19,14 +21,14 @@ func TestRejectDDL_DollarQuote(t *testing.T) {
 		`SELECT $$`, // lone opener
 	}
 	for _, q := range hostile {
-		if err := rejectDDL(q); err == nil {
+		if err := sqlrewrite.RejectDDL(q); err == nil {
 			t.Fatalf("rejectDDL(%q) = nil, want rejection of dollar-quoting", q)
 		}
 	}
 
 	// A normal read-only SELECT (no dollar-quotes, no banned verbs) still passes.
-	if err := rejectDDL(`SELECT id, name FROM "Customer" WHERE region = 'NA'`); err != nil {
-		t.Fatalf("rejectDDL rejected a benign SELECT: %v", err)
+	if err := sqlrewrite.RejectDDL(`SELECT id, name FROM "Customer" WHERE region = 'NA'`); err != nil {
+		t.Fatalf("RejectDDL rejected a benign SELECT: %v", err)
 	}
 }
 
@@ -40,7 +42,7 @@ func TestRejectDDL_StillBlocksKnownVectors(t *testing.T) {
 		`SET search_path TO public`,
 	}
 	for _, q := range cases {
-		if err := rejectDDL(q); err == nil {
+		if err := sqlrewrite.RejectDDL(q); err == nil {
 			t.Fatalf("rejectDDL(%q) = nil, want rejection", q)
 		}
 	}

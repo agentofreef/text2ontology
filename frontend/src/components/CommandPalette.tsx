@@ -11,7 +11,7 @@ import { useRouter } from '@/i18n/navigation'
 import { useTranslations } from 'next-intl'
 import { useStyleMode } from '@/lib/style-mode'
 import {
-  Upload, Box, Database, Tags, Filter, BarChart3, Bot,
+  Upload, Box, Database, Tags, Filter, BarChart3, LineChart, Bot,
   FlaskConical, Search, History, PenLine, Lightbulb, RotateCw, Terminal,
   Cpu, KeyRound, UserCog, Users, CornerDownLeft, Crosshair, ScrollText, type LucideIcon,
 } from 'lucide-react'
@@ -52,6 +52,7 @@ export function CommandPalette({
         { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
         { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
         { href: '/ontology/lakehouse-metric-intents', label: t('metric_intents'),     icon: BarChart3 },
+        { href: '/ontology/lakehouse-metrics',        label: t('metrics'),            icon: LineChart },
       ] },
       { label: t('mode_workbench'), items: [
         { href: '/ontology/lakehouse-agent',                   label: t('lakehouse_agent'),   icon: Bot          },

@@ -3,10 +3,37 @@ package lakehouse
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/smartquery"
 )
+
+// aliasTailRe extracts a trailing `AS <ident>` from a metric expression so the
+// author's chosen output column name wins over the engine's default
+// `Total_<col>` convention. Quoted identifiers ("X") and bare identifiers
+// (NAME) are both accepted; the captured alias is returned WITHOUT the quotes.
+var aliasTailRe = regexp.MustCompile(`(?is)^(.+?)\s+as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+
+// stripMetricAlias peels off a trailing `AS <ident>` from a metric expression.
+// Returns (body, alias). When no alias is present, returns (s, "").
+//   "sum(\"X\") AS qty"  → ("sum(\"X\")", "qty")
+//   "sum(\"X\")"          → ("sum(\"X\")", "")
+func stripMetricAlias(s string) (body, alias string) {
+	if m := aliasTailRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+		return strings.TrimSpace(m[1]), strings.Trim(m[2], `"`)
+	}
+	return s, ""
+}
+
+// metricLabel honors an author-supplied alias when present; otherwise falls
+// back to the engine's default `Total_<col>` convention.
+func metricLabel(authorAlias, propName string) string {
+	if a := strings.TrimSpace(authorAlias); a != "" {
+		return a
+	}
+	return "Total_" + propName
+}
 
 // countRowsKeywords maps metric names that should produce COUNT(*).
 // Bug #2 fix: "sum" and "total" REMOVED — they are aggregation function names, not COUNT synonyms.
@@ -650,6 +677,10 @@ func resolvePropertyLakehouse(db *sql.DB, projectID, name string, localProps []s
 // Resolution order: countRowsKeywords → ont_metric (sql_expression → agg+prop) → property → error.
 // NEVER silently falls back to COUNT(*). (Bug #1 fix)
 func resolveMetricLakehouse(db *sql.DB, projectID, metricPart string, allProps []smartquery.PropertyInfo, objectNames []string) ([]smartquery.ResolvedAggregate, error) {
+	// Peel off an optional `AS <alias>` BEFORE the aggregate wrapper detection.
+	// authorAlias (when non-empty) overrides the default `Total_<col>` label so
+	// the runtime output column matches what the metric author wrote.
+	metricPart, authorAlias := stripMetricAlias(metricPart)
 	innerName, detectedFunc := stripAggWrapperWithFunc(metricPart)
 	if innerName == "" {
 		return nil, nil
@@ -695,7 +726,7 @@ func resolveMetricLakehouse(db *sql.DB, projectID, metricPart string, allProps [
 			for _, p := range allProps {
 				if strings.EqualFold(p.Name, mTargetProp) && isNumericType(p.DataType) {
 					pp := p
-					return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: strings.ToUpper(mAgg), Label: "Total_" + p.Name}}, nil
+					return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: strings.ToUpper(mAgg), Label: metricLabel(authorAlias, p.Name)}}, nil
 				}
 			}
 		}
@@ -710,12 +741,12 @@ func resolveMetricLakehouse(db *sql.DB, projectID, metricPart string, allProps [
 			// This handles cases where data_type metadata is wrong or missing.
 			if detectedFunc != "" {
 				pp := p
-				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: detectedFunc, Label: "Total_" + p.Name}}, nil
+				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: detectedFunc, Label: metricLabel(authorAlias, p.Name)}}, nil
 			}
 			// No explicit function: use data_type to decide.
 			if isNumericType(p.DataType) {
 				pp := p
-				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: "SUM", Label: "Total_" + p.Name}}, nil
+				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: "SUM", Label: metricLabel(authorAlias, p.Name)}}, nil
 			}
 			// Non-numeric without explicit function → metric-as-groupBy fallback.
 			pp := p
@@ -738,11 +769,11 @@ func resolveMetricLakehouse(db *sql.DB, projectID, metricPart string, allProps [
 			// Explicit function → trust LLM intent regardless of data_type.
 			if detectedFunc != "" {
 				pp := p
-				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: detectedFunc, Label: "Total_" + p.Name}}, nil
+				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: detectedFunc, Label: metricLabel(authorAlias, p.Name)}}, nil
 			}
 			if isNumericType(p.DataType) {
 				pp := p
-				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: "SUM", Label: "Total_" + p.Name}}, nil
+				return []smartquery.ResolvedAggregate{{Kind: smartquery.AggStandard, Prop: &pp, Func: "SUM", Label: metricLabel(authorAlias, p.Name)}}, nil
 			}
 		}
 	}

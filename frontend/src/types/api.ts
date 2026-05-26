@@ -186,6 +186,66 @@ export interface OntMetricIntent {
   updatedAt: string
 }
 
+// ─── Unified Metric (指标 — lakehouse_metric) ─────────────────
+// The new first-class "指标" concept (table lakehouse_metric). Coexists with
+// OntMetricIntent (lakehouse_metric_intent). Adds typed `parameters` (a metric
+// declares typed params; required ones the agent asks the user about) plus an
+// optional `level` (simple|plan) and advanced raw `plan` object.
+export interface OntMetricParameter {
+  name: string
+  type: 'int' | 'string' | 'property_filter' | 'enum_ref'
+  property?: string
+  op?: string
+  optional?: boolean
+  default?: unknown
+  description?: string
+}
+export interface OntMetric {
+  id: string
+  projectId: string
+  objectId: string
+  objectName: string
+  // odIds: the full SELECTED OD set for a multi-OD metric (a metric can span
+  // several ODs via JOINs). object_id is the primary (= odIds[0]); odIds is
+  // persisted in extra and returned by GET-by-id. Edit hydrates form.odIds from
+  // this (fallback: [objectId] for legacy rows that predate odIds).
+  odIds?: string[]
+  name: string
+  displayName: string
+  description: string
+  // 'simple' = structured (canonicalMetric + filters/groupBy/pivot); 'sql' =
+  // hand-written passthrough SQL stored in querySql. 'plan' is the legacy
+  // multi-step variant (kept for back-compat with older rows).
+  level: 'simple' | 'plan' | 'sql'
+  canonicalMetric: string
+  // Hand-written SQL for level='sql'. The backend stores a sentinel in
+  // canonicalMetric for SQL-mode metrics; this is the real query.
+  querySql?: string
+  canonicalFilters: OntMetricIntentFilter[]
+  autoGroupBy: string[]
+  replaceGroupBy: boolean
+  defaultOrderByLabel: string
+  defaultOrderByDir: 'ASC' | 'DESC' | ''
+  defaultLimit: number | null
+  pivotOn: string
+  pivotValues: string[]
+  pivotColumnLabels: string[]
+  pivotTotalLabel: string
+  pivotWithPercent: boolean
+  pivotAppendGrandTotal: boolean
+  pivotPercentAxis: 'row' | 'column'
+  pivotPercentScope: 'filtered' | 'global'
+  pivotPercentSuffix: string
+  parameters: OntMetricParameter[]
+  plan?: Record<string, unknown> | null
+  responseTemplate: string
+  priority: number
+  mark: boolean
+  triggerKeywords: string[]
+  createdAt: string
+  updatedAt: string
+}
+
 // ─── Knowledge Ontology (Ok) ─────────────────────────────────
 
 export interface OntKnowledge {

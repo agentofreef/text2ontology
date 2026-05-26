@@ -440,6 +440,12 @@ func runReachabilityJudge(
 //     refusal therefore fires only on the FIRST turn.
 //   - First-turn clarify → ask the user to disambiguate.
 //   - First-turn gap/hole-2/metric-absent → machine-templated refusal.
+// clarifyTokenPrefix is the user-facing banner prepended to any
+// clarification request emitted as a streamed token. Shared by the
+// reachability gate (ambiguous filter values) and the missing-required-param
+// path in the ReAct dispatch loop so both ask the user with one voice.
+const clarifyTokenPrefix = "〔需要你先澄清一下〕\n\n"
+
 func reachabilityAnswer(verdict mission.ReachabilityVerdict, isFollowUp bool) string {
 	if verdict.Feasible {
 		return ""
@@ -450,7 +456,7 @@ func reachabilityAnswer(verdict mission.ReachabilityVerdict, isFollowUp bool) st
 	if verdict.Kind == "clarify" {
 		// Ambiguous filter value(s) — answerable once the user disambiguates.
 		// Ask rather than refuse outright.
-		return "〔需要你先澄清一下〕\n\n" + verdict.Reason
+		return clarifyTokenPrefix + verdict.Reason
 	}
 	return buildInfeasibilityAnswer(verdict)
 }

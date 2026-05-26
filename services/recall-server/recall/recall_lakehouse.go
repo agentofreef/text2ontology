@@ -1319,7 +1319,10 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		             SELECT 1 FROM unnest(COALESCE(lk.aliases, '{}'::text[])) a
 		             WHERE regexp_replace(LOWER(a), '[ _]', '', 'g') = regexp_replace(LOWER($2), '[ _]', '', 'g'))`
 	}
-	q := `
+	// Shared SELECT column list — IDENTICAL column names exist on both
+	// lakehouse_metric_intent (old) and lakehouse_metric (new, unified 指标).
+	// The alias `mi` is reused for both so the scan helper is table-agnostic.
+	const selectCols = `
 		SELECT DISTINCT
 		    mi.id::text, mi.name, COALESCE(mi.display_name,''),
 		    mi.object_id::text, COALESCE(o.name,''),
@@ -1336,7 +1339,10 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		    COALESCE(mi.description,''),
 		    COALESCE(mi.priority, 0),
 		    mi.default_order_by_label, mi.default_order_by_dir, mi.default_limit,
-		    COALESCE(mi.parameters::text, '[]')
+		    COALESCE(mi.parameters::text, '[]')`
+
+	// Old table: lakehouse_metric_intent, joined via lk.metric_intent_id.
+	qOld := selectCols + `
 		FROM lakehouse_keyword lk
 		JOIN lakehouse_metric_intent mi ON lk.metric_intent_id = mi.id
 		JOIN ont_object_type o ON mi.object_id = o.id
@@ -1347,9 +1353,57 @@ func lookupIntentsForToken(db *sql.DB, projectID, token string, exact bool) []Me
 		  AND ` + cond + `
 		LIMIT 10`
 
-	rows, err := db.Query(q, projectID, token)
+	// New table: lakehouse_metric (unified 指标), joined via lk.metric_id.
+	// Same column names, same token/guard conditions, PLUS deleted_at IS NULL
+	// (the new table carries a soft-delete column the old one lacks).
+	qNew := selectCols + `
+		FROM lakehouse_keyword lk
+		JOIN lakehouse_metric mi ON lk.metric_id = mi.id
+		JOIN ont_object_type o ON mi.object_id = o.id
+		WHERE lk.project_id = $1
+		  AND COALESCE(lk.is_stopword, false) = false
+		  AND mi.deleted_at IS NULL
+		  AND COALESCE(mi.mark, true) = true
+		  AND COALESCE(o.mark, true) = true
+		  AND ` + cond + `
+		LIMIT 10`
+
+	// Collect old-table then new-table matches, then dedup by LOWER(name)
+	// with NEW-TABLE-WINS: a lakehouse_metric row shadows a
+	// lakehouse_metric_intent row of the same name.
+	oldHits := scanMetricIntentRows(db, projectID, qOld, token)
+	newHits := scanMetricIntentRows(db, projectID, qNew, token)
+	byName := map[string]MetricIntent{}
+	var order []string // preserve first-seen order (old then new)
+	for _, mi := range oldHits {
+		k := strings.ToLower(mi.Name)
+		if _, seen := byName[k]; !seen {
+			order = append(order, k)
+		}
+		byName[k] = mi
+	}
+	for _, mi := range newHits {
+		k := strings.ToLower(mi.Name)
+		if _, seen := byName[k]; !seen {
+			order = append(order, k)
+		}
+		byName[k] = mi // new-table wins on collision
+	}
+	out := make([]MetricIntent, 0, len(order))
+	for _, k := range order {
+		out = append(out, byName[k])
+	}
+	return out
+}
+
+// scanMetricIntentRows runs one already-built SELECT (against either
+// lakehouse_metric_intent or lakehouse_metric — both expose IDENTICAL column
+// names under alias `mi`) and scans each row into a MetricIntent. Factored out
+// so the old-table and new-table queries share one scan/unmarshal path.
+func scanMetricIntentRows(db *sql.DB, projectID, query, token string) []MetricIntent {
+	rows, err := db.Query(query, projectID, token)
 	if err != nil {
-		log.Printf("recall_lakehouse: lookupIntentsForToken error: %v", err)
+		log.Printf("recall_lakehouse: scanMetricIntentRows error: %v", err)
 		return nil
 	}
 	defer rows.Close()

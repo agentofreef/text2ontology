@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +43,7 @@ import (
 	"github.com/lakehouse2ontology/observability"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/lakehouse"
 	"github.com/lakehouse2ontology/services/lakehouse-sql-server/smartquery"
+	"github.com/lakehouse2ontology/sqlrewrite"
 	"github.com/lakehouse2ontology/srvkit"
 )
 
@@ -118,6 +121,7 @@ func main() {
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/internal/smartquery/execute", executeHandler(engine))
 	mux.HandleFunc("/internal/smartquery/execute-plan", executePlanHandler(engine))
+	mux.HandleFunc("/internal/smartquery/execute-sql", executeSQLHandler(db))
 	mux.HandleFunc("/internal/smartquery/validate-intent", validateIntentHandler())
 
 	auth := authmw.New(db, authmw.NewDBAuditWriter(db))
@@ -261,6 +265,218 @@ func executePlanHandler(engine *lakehouse.Engine) http.HandlerFunc {
 			log.Printf("execute-plan: write response failed: %v", err)
 		}
 	}
+}
+
+// executeSQLRequest is the HTTP body for SQL-mode metric execution.
+//
+//	sql      human-authored, OD-name SQL declaring parameters INLINE via
+//	         {sys.req.NAME} (required) / {sys.opt.NAME} (optional). There is no
+//	         separate param table — params are derived by parsing the SQL.
+//	params   the LLM/editor-supplied parameter values, keyed by NAME. Values are
+//	         strings; the driver infers the column type. A NAME present with a
+//	         non-empty value is "provided"; absent/empty optionals are dropped and
+//	         absent required ones surface as MISSING_REQUIRED.
+//
+// paramTypes is retained for body-compat but no longer used: every value binds
+// via $N driver args regardless of type (pq infers), so int-coercion is moot.
+type executeSQLRequest struct {
+	ProjectID string `json:"projectId"`
+	SQL       string `json:"sql"`
+	// Params values are scalar (JSON string/number) OR list (JSON array). A list
+	// binds to a single $N as `= ANY($N)` (the executor wraps it in pq.Array).
+	Params     map[string]interface{} `json:"params"`
+	ParamTypes map[string]string      `json:"paramTypes"` // deprecated, ignored
+	RowLimit   int                    `json:"rowLimit"`
+}
+
+// executeSQLHandler implements POST /internal/smartquery/execute-sql — the
+// SQL-mode metric runtime. Pipeline (security-critical ordering):
+//
+//	1. RenderSysParams(sql, params) — position-awarely substitute every inline
+//	   {sys.req/opt.NAME}: provided VALUES → positional $N + driver args; provided
+//	   dimensions → quoted "NAME"; absent optionals → dropped (predicate/comma
+//	   cleaned); absent requireds → recorded in missingRequired. Runs FIRST so all
+//	   brace payloads are gone before any keyword/identifier scan.
+//	2. missingRequired non-empty → return {ok:false,error:"MISSING_REQUIRED:..."}
+//	   so callers (agent/editor) can surface the missing param to the user.
+//	3. RejectDDL(rendered)         — block DDL/DML/dollar-quote/cross-schema/
+//	   multi-statement on the post-render text.
+//	4. load OD→canonical_query map  — ont_object_type WHERE project_id +
+//	   canonical_query<>'' + mark.
+//	5. ExtractReferencedNames       — every FROM/JOIN ref must be a known OD.
+//	6. BuildCTEPrefix + prepend      — wrap canonical_query CTEs.
+//	7. MaybeInjectLimit              — cap rows.
+//	8. ExecuteSQLParams(db, projectId, finalSQL, args...) — bind args from step 1.
+//
+// Values ALWAYS bind through the $N driver args produced in step 1 — never
+// concatenated. Identifiers (dimensions) are quoted-ident escaped in step 1.
+func executeSQLHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var req executeSQLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+		req.SQL = strings.TrimSpace(req.SQL)
+		if req.ProjectID == "" || req.SQL == "" {
+			writeErr(w, http.StatusBadRequest, "projectId and sql required")
+			return
+		}
+		rowLimit := req.RowLimit
+		if rowLimit <= 0 || rowLimit >= 50000 {
+			rowLimit = 10000
+		}
+
+		// 1. Inline {sys.req/opt.NAME} render FIRST (before any keyword/identifier
+		// scan): values → $N args, dimensions → quoted idents, absent optionals
+		// dropped, absent requireds collected.
+		rewritten, args, missingRequired := sqlrewrite.RenderSysParams(req.SQL, req.Params)
+
+		// 2. Missing required params → clear error so callers can surface it.
+		if len(missingRequired) > 0 {
+			resp := map[string]interface{}{
+				"ok":    false,
+				"error": "MISSING_REQUIRED:" + strings.Join(missingRequired, ","),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// 3. Reject DDL on the post-render text.
+		if err := sqlrewrite.RejectDDL(rewritten); err != nil {
+			writeSQLErr(w, err.Error())
+			return
+		}
+
+		// 4. Load OD → canonical_query for the project (mirrors backend-api's
+		// loadProjectOdCanonical). lakehouse-sql-server has DB access here.
+		odCanonical, odNames, err := loadProjectOdCanonical(db, req.ProjectID)
+		if err != nil {
+			writeSQLErr(w, fmt.Sprintf("加载 Ontology 对象失败: %v", err))
+			return
+		}
+		if len(odCanonical) == 0 {
+			writeSQLErr(w, "当前项目尚未配置任何 Ontology 对象（或对象未完成 canonical_query 固化）")
+			return
+		}
+
+		// 5. Validate every FROM/JOIN reference is a known OD (case-insensitive).
+		refs := sqlrewrite.ExtractReferencedNames(rewritten)
+		lowerToName := make(map[string]string, len(odCanonical))
+		for name := range odCanonical {
+			lowerToName[strings.ToLower(name)] = name
+		}
+		var unknown, used []string
+		seen := map[string]bool{}
+		for _, ref := range refs {
+			lr := strings.ToLower(ref)
+			name, ok := lowerToName[lr]
+			if !ok {
+				unknown = append(unknown, ref)
+				continue
+			}
+			if !seen[lr] {
+				seen[lr] = true
+				used = append(used, name)
+			}
+		}
+		if len(unknown) > 0 {
+			writeSQLErr(w, fmt.Sprintf("未知的 Ontology 对象: %s。可用对象: %s",
+				strings.Join(unknown, ", "), strings.Join(odNames, ", ")))
+			return
+		}
+		if len(used) == 0 {
+			writeSQLErr(w, "查询中未引用任何 Ontology 对象（FROM/JOIN 至少需要一个 Od 名）")
+			return
+		}
+
+		// 6+7. CTE prefix + LIMIT injection.
+		finalSQL := sqlrewrite.BuildCTEPrefix(odCanonical, used) + "\n" + rewritten
+		finalSQL = sqlrewrite.MaybeInjectLimit(finalSQL, rowLimit)
+
+		// 8. Execute with the $N args produced by RenderSysParams (step 1). Values
+		// bind via driver args; identifiers were already quoted-ident escaped.
+		ok, resultJSON, errMsg, _ := lakehouse.ExecuteSQLParams(db, req.ProjectID, finalSQL, args...)
+
+		// Parse resultJSON ([]map) into rows + ordered-ish columns. Column order
+		// is derived from the first row's keys (Go map iteration is unordered, so
+		// callers needing strict order should rely on the SQL SELECT list); the
+		// agent path consumes rows directly and does not depend on columns order.
+		var rows []map[string]interface{}
+		if resultJSON != "" {
+			_ = json.Unmarshal([]byte(resultJSON), &rows)
+		}
+		columns := []string{}
+		if len(rows) > 0 {
+			for k := range rows[0] {
+				columns = append(columns, k)
+			}
+			sort.Strings(columns)
+		}
+		resp := map[string]interface{}{
+			"ok":       ok,
+			"sql":      finalSQL,
+			"columns":  columns,
+			"rows":     rows,
+			"rowCount": len(rows),
+		}
+		if !ok {
+			resp["error"] = errMsg
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("execute-sql: write response failed: %v", err)
+		}
+	}
+}
+
+// writeSQLErr writes a 200 with {ok:false,error:...} for SQL-mode validation /
+// execution failures — the outcome is in the body, not the HTTP status, so the
+// agent / editor can distinguish "query rejected" from "transport broke".
+func writeSQLErr(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":       false,
+		"error":    msg,
+		"columns":  []string{},
+		"rows":     []map[string]interface{}{},
+		"rowCount": 0,
+	})
+}
+
+// loadProjectOdCanonical returns originalName → canonical_query for every
+// marked OD in the project that has a non-empty canonical_query, plus a sorted
+// display list of those names. Mirrors backend-api's loadProjectOdCanonical
+// (the passthrough loader) so SQL-mode metrics resolve OD names identically.
+func loadProjectOdCanonical(db *sql.DB, projectID string) (map[string]string, []string, error) {
+	rows, err := db.Query(`SELECT o.name, COALESCE(o.canonical_query,'')
+		FROM ont_object_type o
+		WHERE o.project_id = $1 AND COALESCE(o.mark,true) = true
+		ORDER BY o.name`, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	var names []string
+	for rows.Next() {
+		var n, cq string
+		if err := rows.Scan(&n, &cq); err != nil {
+			continue
+		}
+		if cq == "" {
+			continue // exclude ODs without a fixed canonical_query
+		}
+		m[n] = cq
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return m, names, nil
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {

@@ -5,7 +5,7 @@ import Image from 'next/image'
 import { usePathname, useRouter } from '@/i18n/navigation'
 import {
   ChevronLeft, ChevronRight, LogOut, Settings, FolderOpen, ChevronDown, Plus, Database,
-  Box, BarChart3, Tags, Trash2, Filter,
+  Box, BarChart3, LineChart, Tags, Trash2, Filter,
   Lightbulb, RotateCw, FlaskConical, Terminal, KeyRound, UserCog, Users,
   Upload, Bot, Search, History, Crosshair, PenLine, ScrollText,
 } from 'lucide-react'
@@ -73,6 +73,7 @@ function useLakehouseGroups(t: ReturnType<typeof useTranslations<'nav'>>): NavGr
         { href: '/ontology/lakehouse-keywords',       label: t('lakehouse_keywords'), icon: Tags      },
         { href: '/ontology/lakehouse-keyword-triage', label: t('keyword_triage'),     icon: Filter    },
         { href: '/ontology/lakehouse-metric-intents', label: t('metric_intents'),     icon: BarChart3 },
+        { href: '/ontology/lakehouse-metrics',        label: t('metrics'),            icon: LineChart },
       ],
     },
     {
@@ -153,6 +154,7 @@ function NavLeafLink({
   return (
     <Link
       href={leaf.href}
+      prefetch={false}
       className={`flex items-center gap-3 text-sm transition-colors duration-150 ${
         collapsed ? 'justify-center px-0 py-2' : `py-1.5 ${indent ? 'pl-9 pr-3' : 'px-3'}`
       } ${stateCls}`}
@@ -224,6 +226,7 @@ function NavGroupSection({
         {group.href && Icon ? (
           <Link
             href={group.href}
+            prefetch={false}
             className={`flex flex-1 items-center gap-3 px-3 py-1.5 text-sm transition-colors duration-150 ${
               headerActive
                 ? industrial ? 'bg-ink text-white font-medium' : 'bg-canvas-alt text-ink font-medium'

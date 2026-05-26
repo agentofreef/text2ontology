@@ -138,6 +138,11 @@ func main() {
 	mux.HandleFunc("/api/ontology/agent-annotations/", handler.HandleAgentAnnotationByID(db))
 	mux.HandleFunc("/api/ontology/agent-annotations-recompute", handler.HandleAnnotationsRecompute(db))
 	mux.HandleFunc("/api/ontology/lakehouse-token-recall-tokenize", handler.HandleLakehouseTokenRecallWithTokenize(db))
+	// Editor "Run" button: preview a metric (structured or SQL mode) without
+	// persisting. SQL mode reuses the same execute-sql ($N-bound) path the agent
+	// runtime uses. Public (user-bearer) + per-project access enforcement.
+	mux.HandleFunc("/api/ontology/lakehouse-metric-preview", handler.HandleLakehouseMetricPreview(db))
+	mux.HandleFunc("/api/ontology/lakehouse-metric-distinct", handler.HandleLakehouseMetricDistinct(db))
 
 	// Signal-driven shutdown context. The LH-test background worker and
 	// srvkit.Run both observe this ctx so a SIGINT/SIGTERM stops the dequeue

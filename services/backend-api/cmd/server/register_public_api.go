@@ -85,6 +85,10 @@ func registerPublicAPI(mux *http.ServeMux, db *sql.DB) {
 		}
 		handler.HandleMetricIntentByID(db)(w, r)
 	})
+	// Unified metric (lakehouse_metric) — coexists with metric-intents during the
+	// compatibility window. Triggers are managed inline via the POST/PUT body.
+	mux.HandleFunc("/api/ontology/lakehouse-metrics", handler.HandleLakehouseMetrics(db))
+	mux.HandleFunc("/api/ontology/lakehouse-metrics/", handler.HandleLakehouseMetricByID(db))
 	mux.HandleFunc("/api/ontology/keyword-triage/queue", handler.HandleTriageQueue(db))
 	mux.HandleFunc("/api/ontology/keyword-triage/token", handler.HandleTriageToken(db))
 	mux.HandleFunc("/api/ontology/keyword-triage/assign", handler.HandleTriageAssign(db))

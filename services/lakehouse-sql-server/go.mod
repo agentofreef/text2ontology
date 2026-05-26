@@ -10,6 +10,7 @@ require (
 	github.com/lakehouse2ontology/httputil v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/llmclient v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/observability v0.0.0-00010101000000-000000000000
+	github.com/lakehouse2ontology/sqlrewrite v0.0.0-00010101000000-000000000000
 	github.com/lakehouse2ontology/srvkit v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.20.5
@@ -54,5 +55,6 @@ replace (
 	github.com/lakehouse2ontology/httputil => ../../pkg/httputil
 	github.com/lakehouse2ontology/llmclient => ../../pkg/llmclient
 	github.com/lakehouse2ontology/observability => ../../pkg/observability
+	github.com/lakehouse2ontology/sqlrewrite => ../../pkg/sqlrewrite
 	github.com/lakehouse2ontology/srvkit => ../../pkg/srvkit
 )

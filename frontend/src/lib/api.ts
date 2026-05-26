@@ -51,7 +51,9 @@ function matchAgentPath(path: string): boolean {
     path.startsWith('/ontology/lakehouse-ledger') ||
     path.startsWith('/ontology/lakehouse-missions') ||
     path.startsWith('/ontology/agent-annotations') ||
-    path.startsWith('/ontology/lakehouse-token-recall-tokenize')
+    path.startsWith('/ontology/lakehouse-token-recall-tokenize') ||
+    path.startsWith('/ontology/lakehouse-metric-preview') ||
+    path.startsWith('/ontology/lakehouse-metric-distinct')
   )
 }
 

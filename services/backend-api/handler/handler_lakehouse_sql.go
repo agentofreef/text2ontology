@@ -13,6 +13,7 @@ import (
 
 	"github.com/lakehouse2ontology/authmw"
 	. "github.com/lakehouse2ontology/httputil"
+	"github.com/lakehouse2ontology/sqlrewrite"
 )
 
 // =========================== Handlers ===========================
@@ -62,8 +63,8 @@ func handleLakehouseSQLExecute(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Reject DDL / DML
-		if err := rejectDDL(userSQL); err != nil {
+		// Reject DDL / DML (single source of truth: pkg/sqlrewrite).
+		if err := sqlrewrite.RejectDDL(userSQL); err != nil {
 			_ = logLakehouseSQL(db, projectID, userSQL, 0, 0, err.Error())
 			JsonResp(w, M{"error": err.Error(), "blocked": true})
 			return
@@ -425,7 +426,7 @@ func logLakehouseSQL(db *sql.DB, projectID, sqlText string, rowCount, durationMs
 	return err
 }
 
-// (rejectDDL, stringOr reused from handler_sql_passthrough.go)
+// (DDL rejection now lives in pkg/sqlrewrite.RejectDDL; stringOr reused from handler_sql_passthrough.go)
 
 func firstSQLWord(s string) string {
 	s = strings.TrimSpace(s)

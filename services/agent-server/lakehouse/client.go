@@ -153,6 +153,104 @@ func (c *RemoteClient) ExecutePlan(ctx context.Context, planJSON []byte, params 
 	return result
 }
 
+// executeSQLResponse mirrors lakehouse-sql-server's /internal/smartquery/
+// execute-sql response body: {ok, sql, columns, rows, rowCount, error}. rows
+// is the raw []map result set; we re-marshal it into LakehouseResult.ResultJSON
+// so downstream consumers (the agent's data-template renderer) see the same
+// JSON-array shape the structured Execute path produces.
+type executeSQLResponse struct {
+	OK       bool                     `json:"ok"`
+	SQL      string                   `json:"sql"`
+	Columns  []string                 `json:"columns"`
+	Rows     []map[string]interface{} `json:"rows"`
+	RowCount int                      `json:"rowCount"`
+	Error    string                   `json:"error"`
+}
+
+// ExecuteSQLMetric POSTs `{projectId, sql, params}` to
+// /internal/smartquery/execute-sql and maps the response into a LakehouseResult.
+// sql is the human-authored, OD-name SQL declaring inline {sys.req/opt.NAME}
+// parameters; params are the LLM-filled values keyed by NAME. The service-side
+// handler performs the security-critical rewrite (RenderSysParams → missing-
+// required check → RejectDDL → OD-CTE → MaybeInjectLimit), binding every VALUE
+// via positional $N driver args (never concatenated) and escaping any provided
+// dimension as a quoted identifier. Mirrors Execute / ExecutePlan.
+func (c *RemoteClient) ExecuteSQLMetric(ctx context.Context, projectID, sql string, params map[string]interface{}) LakehouseResult {
+	start := time.Now()
+	ctx, span := observability.Tracer().Start(ctx, "cross_service_http",
+		trace.WithAttributes(
+			attribute.String("peer.service", "lakehouse-sql-server"),
+			attribute.String("http.method", http.MethodPost),
+			attribute.String("http.route", "/internal/smartquery/execute-sql"),
+			attribute.String("project_id", projectID),
+		))
+	defer span.End()
+	defer func() {
+		observability.CrossSvcHTTPDuration.
+			WithLabelValues("monolith", "lakehouse-sql-server", "/internal/smartquery/execute-sql").
+			Observe(float64(time.Since(start).Milliseconds()))
+	}()
+
+	if c.HTTP == nil {
+		c.HTTP = &http.Client{Timeout: 60 * time.Second}
+	}
+
+	body, err := json.Marshal(struct {
+		ProjectID string                 `json:"projectId"`
+		SQL       string                 `json:"sql"`
+		Params    map[string]interface{} `json:"params"`
+	}{ProjectID: projectID, SQL: sql, Params: params})
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client marshal: %v", err))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/smartquery/execute-sql", bytes.NewReader(body))
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client new request: %v", err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", c.Token)
+	req.Header.Set("X-On-Behalf-Of", c.OnBehalfOf)
+	req.Header.Set("X-Caller-Service", "monolith")
+	observability.InjectTraceContext(ctx, req)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return errResult(fmt.Sprintf("remote client do: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		peek, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return errResult(fmt.Sprintf("remote status %d: %s", resp.StatusCode, string(peek)))
+	}
+
+	var out executeSQLResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return errResult(fmt.Sprintf("remote client decode: %v", err))
+	}
+
+	result := LakehouseResult{
+		SQL:         out.SQL,
+		OntologySQL: sql, // Layer-1 view: the human-authored OD-name SQL pre-rewrite.
+		ExecutionOK: out.OK,
+	}
+	if !out.OK {
+		result.ErrorMessage = out.Error
+		return result
+	}
+	// Re-marshal rows into the JSON-array ResultJSON shape the structured path
+	// produces. A nil rows slice marshals to "[]" after the guard below.
+	rows := out.Rows
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	if b, mErr := json.Marshal(rows); mErr == nil {
+		result.ResultJSON = string(b)
+	}
+	return result
+}
+
 func errResult(msg string) LakehouseResult {
 	return LakehouseResult{ExecutionOK: false, ErrorMessage: msg}
 }

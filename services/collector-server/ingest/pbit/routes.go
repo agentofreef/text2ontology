@@ -1699,9 +1699,14 @@ func handleLakehouseKeywords(db *sql.DB) http.HandlerFunc {
 		}
 
 		offset := (page - 1) * pageSize
-		// property_id is optional (intent-anchored rows set it NULL), so we
-		// LEFT JOIN ont_property. metric_intent_id + lakehouse_metric_intent
-		// surface the intent binding when present.
+		// property_id is optional (anchor-by-intent or anchor-by-metric rows
+		// set it NULL), so we LEFT JOIN ont_property. Two anchor flavors are
+		// surfaced:
+		//   · metric_intent_id → legacy lakehouse_metric_intent (old indicator).
+		//   · metric_id        → unified lakehouse_metric (new indicator).
+		// New rows authored via the metric editor land on metric_id; without
+		// this LEFT JOIN those rows showed up as "floating" (orphan) on the
+		// keywords page even though they have a perfectly good anchor.
 		query := fmt.Sprintf(`
 			SELECT lk.id, lk.keyword, lk.is_machine_code, COALESCE(lk.is_column_name, false), lk.synced_at,
 			       o.name AS od_name,
@@ -1712,13 +1717,17 @@ func handleLakehouseKeywords(db *sql.DB) http.HandlerFunc {
 			       COALESCE(lk.metric_intent_id::text,'') AS metric_intent_id,
 			       COALESCE(mi.name,'') AS intent_name,
 			       COALESCE(mi.display_name,'') AS intent_display_name,
+			       COALESCE(lk.metric_id::text,'') AS metric_id,
+			       COALESCE(m.name,'') AS metric_name,
+			       COALESCE(m.display_name,'') AS metric_display_name,
 			       COUNT(*) OVER() AS total_count
 			FROM lakehouse_keyword lk
 			JOIN ont_object_type o ON o.id = lk.object_type_id
 			LEFT JOIN ont_property p ON p.id = lk.property_id
 			LEFT JOIN lakehouse_metric_intent mi ON mi.id = lk.metric_intent_id
+			LEFT JOIN lakehouse_metric m ON m.id = lk.metric_id
 			WHERE %s
-			ORDER BY o.name, COALESCE(p.name, mi.name), lk.keyword
+			ORDER BY o.name, COALESCE(p.name, mi.name, m.name), lk.keyword
 			LIMIT %d OFFSET %d`, where, pageSize, offset)
 
 		rows, err := db.Query(query, args...)
@@ -1743,6 +1752,10 @@ func handleLakehouseKeywords(db *sql.DB) http.HandlerFunc {
 			MetricIntentID    string   `json:"metricIntentId,omitempty"`
 			IntentName        string   `json:"intentName,omitempty"`
 			IntentDisplayName string   `json:"intentDisplayName,omitempty"`
+			// Unified-metric anchor (new lakehouse_metric table).
+			MetricID          string   `json:"metricId,omitempty"`
+			MetricName        string   `json:"metricName,omitempty"`
+			MetricDisplayName string   `json:"metricDisplayName,omitempty"`
 		}
 
 		var list []kwRow
@@ -1755,6 +1768,7 @@ func handleLakehouseKeywords(db *sql.DB) http.HandlerFunc {
 				&kw.OdName, &kw.PropName, &kw.SourceColumn, &kw.DataType,
 				&aliasesJSON, &kw.IsOrphaned,
 				&kw.MetricIntentID, &kw.IntentName, &kw.IntentDisplayName,
+				&kw.MetricID, &kw.MetricName, &kw.MetricDisplayName,
 				&totalCount)
 			kw.SyncedAt = syncedAt.Format(time.RFC3339)
 			if aliasesJSON != "" && aliasesJSON != "[]" {

@@ -36,6 +36,12 @@ interface LakehouseKeyword {
   dataType: string
   aliases: string[]
   isOrphaned: boolean
+  // Unified-metric anchor (lakehouse_metric → lakehouse_keyword.metric_id).
+  // Surfaced so triggers authored in the metric editor are visible here AND
+  // hittable by recall.
+  metricId?: string
+  metricName?: string
+  metricDisplayName?: string
 }
 
 interface Summary {
@@ -722,7 +728,7 @@ export default function LakehouseKeywordsPage() {
       ),
     },
     {
-      key: 'anchor', title: t('col_anchor'), width: '240px',
+      key: 'anchor', title: t('col_anchor'), width: '260px',
       render: (_, kw) => (
         <div className="flex flex-wrap items-center gap-1 pt-0.5">
           {kw.odName ? (
@@ -730,10 +736,29 @@ export default function LakehouseKeywordsPage() {
               <span className={`bg-ink px-1.5 py-0.5 leading-none text-white ${industrial ? 'font-mono text-[10px] tracking-[0.06em]' : 'rounded-md text-[11px] font-medium'}`}>
                 {kw.odName}
               </span>
-              <span className="text-[10px] text-ink-ghost">·</span>
-              <span className={`border border-border px-1.5 py-0.5 leading-none text-ink-muted ${industrial ? 'font-mono text-[10px] tracking-[0.04em]' : 'rounded-md text-[11px]'}`}>
-                {kw.propName}
-              </span>
+              {kw.propName && (
+                <>
+                  <span className="text-[10px] text-ink-ghost">·</span>
+                  <span className={`border border-border px-1.5 py-0.5 leading-none text-ink-muted ${industrial ? 'font-mono text-[10px] tracking-[0.04em]' : 'rounded-md text-[11px]'}`}>
+                    {kw.propName}
+                  </span>
+                </>
+              )}
+              {/* Metric anchor (lakehouse_metric.metric_id). Surfaces triggers
+                  authored in the metric editor — without this they'd render
+                  as just an OD chip with no hint that they bind a metric. */}
+              {kw.metricName && (
+                <>
+                  <span className="text-[10px] text-ink-ghost">·</span>
+                  <span
+                    className={`border px-1.5 py-0.5 leading-none ${industrial ? 'font-mono text-[10px] tracking-[0.04em]' : 'rounded-md text-[11px]'}`}
+                    style={{ color: '#7C3AED', borderColor: '#C4B5FD', backgroundColor: '#F5F3FF' }}
+                    title={kw.metricDisplayName || kw.metricName}
+                  >
+                    🎯 {kw.metricName}
+                  </span>
+                </>
+              )}
             </>
           ) : (
             <span className={`border border-border bg-canvas-alt px-1.5 py-0.5 text-ink-ghost ${industrial ? 'font-mono text-[10px]' : 'rounded-md text-[11px]'}`}>—</span>
