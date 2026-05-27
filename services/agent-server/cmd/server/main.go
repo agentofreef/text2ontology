@@ -115,6 +115,10 @@ func main() {
 	mux.HandleFunc("/internal/agent/agent-annotations", handler.HandleAgentAnnotations(db))
 	mux.HandleFunc("/internal/agent/agent-annotations/", handler.HandleAgentAnnotationByID(db))
 	mux.HandleFunc("/internal/agent/agent-annotations-recompute", handler.HandleAnnotationsRecompute(db))
+	mux.HandleFunc("/internal/agent/agent-annotations-import", handler.HandleAnnotationsImport(db))
+	mux.HandleFunc("/internal/agent/agent-annotations-export", handler.HandleAnnotationsExport(db))
+	mux.HandleFunc("/internal/agent/agent-annotations-vector-status", handler.HandleAnnotationsVectorStatus(db))
+	mux.HandleFunc("/internal/agent/agent-annotations-bulk-status", handler.HandleAnnotationsBulkStatus(db))
 	mux.HandleFunc("/internal/agent/lakehouse-token-recall-tokenize", handler.HandleLakehouseTokenRecallWithTokenize(db))
 
 	// Phase 4C.2: public /api/* mirrors for browser-direct access.
@@ -137,6 +141,10 @@ func main() {
 	mux.HandleFunc("/api/ontology/agent-annotations", handler.HandleAgentAnnotations(db))
 	mux.HandleFunc("/api/ontology/agent-annotations/", handler.HandleAgentAnnotationByID(db))
 	mux.HandleFunc("/api/ontology/agent-annotations-recompute", handler.HandleAnnotationsRecompute(db))
+	mux.HandleFunc("/api/ontology/agent-annotations-import", handler.HandleAnnotationsImport(db))
+	mux.HandleFunc("/api/ontology/agent-annotations-export", handler.HandleAnnotationsExport(db))
+	mux.HandleFunc("/api/ontology/agent-annotations-vector-status", handler.HandleAnnotationsVectorStatus(db))
+	mux.HandleFunc("/api/ontology/agent-annotations-bulk-status", handler.HandleAnnotationsBulkStatus(db))
 	mux.HandleFunc("/api/ontology/lakehouse-token-recall-tokenize", handler.HandleLakehouseTokenRecallWithTokenize(db))
 	// Editor "Run" button: preview a metric (structured or SQL mode) without
 	// persisting. SQL mode reuses the same execute-sql ($N-bound) path the agent
