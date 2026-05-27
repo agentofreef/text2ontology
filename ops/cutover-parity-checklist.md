@@ -13,27 +13,27 @@
 
 ---
 
-## Check 0: `lakehouse2ontology-enterprise` clone exists and is current
+## Check 0: `text2ontology_community` clone exists and is current
 
-**Risk**: running ops/db-roles.sql, rollback-schema-unsplit.sql, or any service writes against the pristine live `lakehouse2ontology` DB corrupts the Big Bang rollback fallback. Per user directive 2026-04-23 (`feedback_db_isolation.md`), all enterprise-rebuild work targets `lakehouse2ontology-enterprise` clone exclusively.
+**Risk**: running ops/db-roles.sql, rollback-schema-unsplit.sql, or any service writes against the pristine live `lakehouse2ontology` DB corrupts the Big Bang rollback fallback. Per user directive 2026-04-23 (`feedback_db_isolation.md`), all enterprise-rebuild work targets `text2ontology_community` clone exclusively.
 
 ```bash
 # Verify the clone exists.
 psql $PROD_SUPERUSER_URL -tAc \
-  "SELECT 1 FROM pg_database WHERE datname='lakehouse2ontology-enterprise';"
+  "SELECT 1 FROM pg_database WHERE datname='text2ontology_community';"
 # Expected output: 1
 
 # Verify recency: clone must be ≤ 7 days old AND ingest row counts match source
 # within 0.5% (acceptable drift window during concurrent prod writes).
 psql $PROD_SUPERUSER_URL -tAc \
-  "SELECT (now() - datctime)::interval FROM pg_database WHERE datname='lakehouse2ontology-enterprise';"
+  "SELECT (now() - datctime)::interval FROM pg_database WHERE datname='text2ontology_community';"
 # Expected: < 7 days. If stale → re-clone before proceeding:
-#   DROP DATABASE "lakehouse2ontology-enterprise";
-#   CREATE DATABASE "lakehouse2ontology-enterprise" TEMPLATE lakehouse2ontology;
+#   DROP DATABASE "text2ontology_community";
+#   CREATE DATABASE "text2ontology_community" TEMPLATE lakehouse2ontology;
 # (requires no active connections to source DB during clone).
 
 # Verify DATABASE_URL targets the clone, NOT live.
-echo "$DATABASE_URL" | grep -q '/lakehouse2ontology-enterprise?\|/lakehouse2ontology-enterprise$' \
+echo "$DATABASE_URL" | grep -q '/text2ontology_community?\|/text2ontology_community$' \
   || { echo "ABORT: DATABASE_URL does not target -enterprise clone"; exit 2; }
 ```
 

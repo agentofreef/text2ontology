@@ -10,7 +10,7 @@ import (
 // TestCollectorDSNPasses verifies that the DATABASE_URL used by the collector
 // process is not blocked by dsnguard. pkg/dsnguard/guard.go only matches
 // the legacy text2dax credential pattern; the enterprise clone DSN
-// (lakehouse2ontology-enterprise) passes cleanly.
+// (text2ontology_community) passes cleanly.
 //
 // This is the empirical closure for OQ-2 (ralplan consensus R2 decision):
 // dsnguard blocks on "text2dax" token only — it does NOT block based on

@@ -4,7 +4,7 @@
 # the db_target_hash returned by each service's /healthz?check=db endpoint.
 #
 # === DB ISOLATION GUARD (2026-04-23) ===
-# All service DSNs must point at lakehouse2ontology-enterprise (clone), NOT
+# All service DSNs must point at text2ontology_community (clone), NOT
 # lakehouse2ontology (pristine live DB). This script ensures split-brain
 # consistency; operator pre-check must also verify the -enterprise DB exists
 # (see cutover-parity-checklist.md Check 0).

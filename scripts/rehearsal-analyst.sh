@@ -47,8 +47,8 @@ psql_exec() {
     psql "$DATABASE_URL" "$@"
   elif docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^text2ontology-enterprise-postgres-1$'; then
     docker exec -i text2ontology-enterprise-postgres-1 \
-      psql -U "${POSTGRES_USER:-lakehouse2ontology-enterprise}" \
-           -d "${POSTGRES_DB:-lakehouse2ontology-enterprise}" "$@"
+      psql -U "${POSTGRES_USER:-text2ontology_community}" \
+           -d "${POSTGRES_DB:-text2ontology_community}" "$@"
   else
     echo "ERROR: neither local psql nor docker postgres container available" >&2
     return 2

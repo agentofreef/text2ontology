@@ -39,7 +39,7 @@ ASK_TIMEOUT="${ASK_TIMEOUT:-300}"
 FIXTURE_DIR="${FIXTURE_DIR:-regression-fixtures/demo-shots}"  # raw SSE per demo question
 
 PSQL=(docker compose --env-file "$ENV_FILE" exec -T postgres
-      psql -U lakehouse2ontology-enterprise -d lakehouse2ontology-enterprise -tA)
+      psql -U text2ontology_community -d text2ontology_community -tA)
 
 say()  { printf '\n\033[1m▼// %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32m✓\033[0m %s\n' "$*"; }

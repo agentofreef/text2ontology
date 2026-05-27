@@ -31,8 +31,8 @@ docker compose up -d
 
 # 3) load the demo seeds: ddl → static → generated → ontology
 for f in ddl seed_static seed_generated seed_ontology; do
-  docker compose exec -T postgres psql -U lakehouse2ontology-enterprise \
-    -d lakehouse2ontology-enterprise < scripts/demo-seed/$f.sql
+  docker compose exec -T postgres psql -U text2ontology_community \
+    -d text2ontology_community < scripts/demo-seed/$f.sql
 done
 
 # 4) open

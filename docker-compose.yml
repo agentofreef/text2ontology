@@ -103,7 +103,7 @@ services:
     command: ["-port", "8090"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://backend_api_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://backend_api_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: backend-api
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
     healthcheck:
@@ -127,7 +127,7 @@ services:
     command: ["-port", "8092"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://agent_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://agent_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: agent-server
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
       RECALL_SERVER_URL: http://recall-server:8093
@@ -155,7 +155,7 @@ services:
     command: ["-port", "8093"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://recall_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://recall_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: recall-server
     healthcheck:
       test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8093/healthz?check=db"']
@@ -176,7 +176,7 @@ services:
     command: ["-port", "8094"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://lakehouse_sql_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://lakehouse_sql_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: lakehouse-sql-server
     healthcheck:
       test: ["CMD-SHELL", 'wget -q -O /dev/null --header "X-Internal-Token: $$INTERNAL_TOKEN" "http://localhost:8094/healthz?check=db"']
@@ -197,7 +197,7 @@ services:
     command: ["-port", "8095"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://mcp_tools_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://mcp_tools_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: mcp-tools-server
       RECALL_SERVER_URL: http://recall-server:8093
       LAKEHOUSE_SQL_URL: http://lakehouse-sql-server:8094
@@ -230,7 +230,7 @@ services:
     command: ["-port", "8096"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://collector_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://collector_server_user:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       OTEL_SERVICE_NAME: collector-server
       PBIT_STAGING_ROOT: /data/pbit-staging
       PBIX_SCRIPTS_DIR: /app/scripts
@@ -337,7 +337,7 @@ services:
     cpus: '0.5'
     pids_limit: 256
     environment:
-      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://lakehouse2ontology-enterprise:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/lakehouse2ontology-enterprise?sslmode=disable}
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:-postgres://text2ontology_community:${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}@postgres:5432/text2ontology_community?sslmode=disable}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}
     entrypoint: ["sh", "/run-migrations.sh"]
     volumes:
@@ -364,13 +364,13 @@ services:
     # budget (6 × srvkit MaxOpen 20 = 120) plus headroom for psql/maintenance.
     command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
     environment:
-      POSTGRES_DB: lakehouse2ontology-enterprise
-      POSTGRES_USER: lakehouse2ontology-enterprise
+      POSTGRES_DB: text2ontology_community
+      POSTGRES_USER: text2ontology_community
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-t2o_dev_change_me_pg}
     volumes:
     - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lakehouse2ontology-enterprise"]
+      test: ["CMD-SHELL", "pg_isready -U text2ontology_community"]
       interval: 5s
       retries: 10
       timeout: 3s

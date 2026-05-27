@@ -65,13 +65,13 @@ fi
 
 # Sanity: project must have ≥ 4 OD + ≥ 7 intent.
 od_count=$(docker exec -i text2ontology-enterprise-postgres-1 \
-  psql -U "${POSTGRES_USER:-lakehouse2ontology-enterprise}" \
-       -d "${POSTGRES_DB:-lakehouse2ontology-enterprise}" -tAc \
+  psql -U "${POSTGRES_USER:-text2ontology_community}" \
+       -d "${POSTGRES_DB:-text2ontology_community}" -tAc \
   "SELECT count(*) FROM ont_object_type WHERE project_id='$PID' AND mark=true" \
   | tr -d '[:space:]')
 intent_count=$(docker exec -i text2ontology-enterprise-postgres-1 \
-  psql -U "${POSTGRES_USER:-lakehouse2ontology-enterprise}" \
-       -d "${POSTGRES_DB:-lakehouse2ontology-enterprise}" -tAc \
+  psql -U "${POSTGRES_USER:-text2ontology_community}" \
+       -d "${POSTGRES_DB:-text2ontology_community}" -tAc \
   "SELECT count(*) FROM lakehouse_metric_intent WHERE project_id='$PID'" \
   | tr -d '[:space:]')
 

@@ -19,8 +19,8 @@ fi
 # Use host.docker.internal so collector container can reach the external Postgres
 PG_HOST="${PG_HOST:-host.docker.internal}"
 PG_PORT="${PG_PORT:-5438}"
-PG_DB="${PG_DB:-lakehouse2ontology-enterprise}"
-PG_USER="${PG_USER:-lakehouse2ontology-enterprise}"
+PG_DB="${PG_DB:-text2ontology_community}"
+PG_USER="${PG_USER:-text2ontology_community}"
 PG_PASS="${PG_PASS:-15993c18f401384bfcd92af6aa3013270bbcb6296acc5caa}"
 
 echo "=== Step 1: test-connection ==="

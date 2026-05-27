@@ -19,7 +19,7 @@ URL='http://127.0.0.1:18094/internal/smartquery/execute-plan'
 TOKEN=$(grep -E '^INTERNAL_TOKEN=' .env.shared | cut -d= -f2-)
 
 PSQL=(docker compose --env-file .env.shared exec -T postgres
-      psql -U lakehouse2ontology-enterprise -d lakehouse2ontology-enterprise -tA)
+      psql -U text2ontology_community -d text2ontology_community -tA)
 
 say() { printf '\n\033[1m▼ %s\033[0m\n' "$*"; }
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }

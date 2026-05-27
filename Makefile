@@ -82,11 +82,11 @@ analyst-llm-smoke: ## Phase 2B gate: 25-tool surface compatible w/ claude/openai
 # ── Database (Postgres is internal — operate via the container) ────────────────
 
 db-psql: ## Open a psql shell inside the postgres container
-	@docker compose exec postgres psql -U lakehouse2ontology-enterprise -d lakehouse2ontology-enterprise
+	@docker compose exec postgres psql -U text2ontology_community -d text2ontology_community
 
 migrate: ## Apply a single migration file (pass FILE=docs/migrations/<name>.sql)
 	@if [ -z "$(FILE)" ]; then echo "ERROR: FILE=docs/migrations/<name>.sql is required"; exit 2; fi
-	@docker compose exec -T postgres psql -U lakehouse2ontology-enterprise -d lakehouse2ontology-enterprise < "$(FILE)"
+	@docker compose exec -T postgres psql -U text2ontology_community -d text2ontology_community < "$(FILE)"
 
 migrate-up: ## Re-run the full migration runner (schema + roles + versioned migrations)
 	@docker compose run --rm db-migrate

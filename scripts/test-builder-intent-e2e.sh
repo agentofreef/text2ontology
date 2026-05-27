@@ -25,8 +25,8 @@ set -a && . ./.env.shared && set +a
 psql_exec() {
   if command -v psql >/dev/null 2>&1; then psql "$DATABASE_URL" "$@"
   else docker exec -i text2ontology-enterprise-postgres-1 \
-        psql -U "${POSTGRES_USER:-lakehouse2ontology-enterprise}" \
-             -d "${POSTGRES_DB:-lakehouse2ontology-enterprise}" "$@"; fi
+        psql -U "${POSTGRES_USER:-text2ontology_community}" \
+             -d "${POSTGRES_DB:-text2ontology_community}" "$@"; fi
 }
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)

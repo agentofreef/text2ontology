@@ -18,8 +18,8 @@ set -euo pipefail
 current_db=$(psql "$DATABASE_URL" -tAc "SELECT current_database();" 2>/dev/null | tr -d '[:space:]')
 if [[ "$current_db" == "lakehouse2ontology" ]]; then
   echo "REFUSED: connected DB is 'lakehouse2ontology' (pristine live DB)."
-  echo "         This script must run against 'lakehouse2ontology-enterprise' clone."
-  echo "         Fix: update DATABASE_URL path to /lakehouse2ontology-enterprise."
+  echo "         This script must run against 'text2ontology_community' clone."
+  echo "         Fix: update DATABASE_URL path to /text2ontology_community."
   exit 2
 fi
 if [[ -z "$current_db" ]]; then
