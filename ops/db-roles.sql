@@ -208,7 +208,11 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT, INSERT, UPDATE', ARRAY['mcp_api
 -- tables below, reads broadly across ontology/lakehouse, and creates per-project
 -- schemas at runtime (CREATE SCHEMA proj_<hex>), so it needs CREATE on the DB.
 -- Posture: least-privilege-but-functional — broad RO + targeted RW write set.
-GRANT CREATE ON DATABASE "text2ontology_community" TO collector_server_user;  -- runtime CREATE SCHEMA proj_<hex>
+DO $grant_db$ BEGIN
+  EXECUTE format('GRANT CREATE ON DATABASE %I TO collector_server_user', current_database());
+END $grant_db$;  -- runtime CREATE SCHEMA proj_<hex>; resolves to whatever DB
+                  -- compose / EXTERNAL_DATABASE_URL targets (default
+                  -- text2ontology_community in current compose).
 GRANT USAGE ON SCHEMA public TO collector_server_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO collector_server_user;  -- reads broadly for ontology population
 -- Write set: INSERT/UPDATE/DELETE on the audited collector-server write tables.
