@@ -2703,9 +2703,46 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 	//
 	// detect runtime groupBy BEFORE resolution so the base-dim override rule can
 	// branch on the LLM's intent (did it explicitly ask to regroup?).
+	//
+	// Subtlety: the LLM often "promotes" eq-filter props into groupBy to keep
+	// the result self-describing (the filter column then echoes in every row).
+	// That's NOT the same as "give me a different grouping" — it should layer
+	// ON TOP of the 口径's base dims, not REPLACE them. So we only count the
+	// runtime groupBy as an override when it contains at least one column the
+	// filter list doesn't already cover (a "true new dim").
+	//
+	// Without this guard a question like "YG7 2IN1 14ILL10 early order 数量"
+	// (filter PRODUCT.PRODUCT_OFFERING_SHORT_NAME=YG7, no explicit groupBy)
+	// loses the 口径's base ORDER_TYPE dim — the LLM adds groupBy=[PRODUCT_OFFERING_SHORT_NAME]
+	// for self-describe, the override branch wipes AutoGroupBy, and the
+	// result shows 2 cols instead of 3. The simulator stays correct because it
+	// always layers AutoGroupBy + runtime groupBy additively.
 	runtimeGroupByGiven := false
 	if rawGB, ok := args["groupBy"].([]interface{}); ok && len(rawGB) > 0 {
-		runtimeGroupByGiven = true
+		filterEqDims := map[string]bool{}
+		if rawFilters, ok := args["filters"].([]interface{}); ok {
+			for _, fi := range rawFilters {
+				fm, _ := fi.(map[string]interface{})
+				prop, _ := fm["property"].(string)
+				op, _ := fm["op"].(string)
+				switch strings.ToLower(strings.TrimSpace(op)) {
+				case "", "=", "==", "eq", "in":
+					if prop != "" {
+						filterEqDims[bareDimKey(prop)] = true
+					}
+				}
+			}
+		}
+		for _, g := range rawGB {
+			gs, _ := g.(string)
+			if gs == "" {
+				continue
+			}
+			if !filterEqDims[bareDimKey(gs)] {
+				runtimeGroupByGiven = true
+				break
+			}
+		}
 	}
 
 	// Resolve runtime groupBy/filters/orderBy onto the spec. requiredDims are
