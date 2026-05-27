@@ -229,16 +229,32 @@ func denseAggExpr(agg smartquery.ResolvedAggregate, factObj *ObjectInfo) string 
 		}
 		col := factRef + "." + quoteColRef(agg.Prop.Name)
 		fn := strings.ToUpper(agg.Func)
+		// Defensive numeric coercion. ont_property.data_type may say "int8"
+		// while the physical column landed as `text` (collector imports PBIX
+		// string-quoted numbers as-is; ontology learning re-types them by
+		// looking at sample values). Without a cast, `sum(text)` errors out
+		// even when the values are valid numerics like '320'. We add
+		// `::numeric` only when the FUNCTION needs a number AND the declared
+		// property type is numeric — non-numeric properties hitting SUM/AVG
+		// are caught earlier by the resolver, so this never silently coerces
+		// a true string column. COUNT/DISTINCTCOUNT are type-agnostic and
+		// skip the cast.
+		needsNumeric := (fn == "SUM" || fn == "AVG" || fn == "MIN" || fn == "MAX") &&
+			isNumericType(agg.Prop.DataType)
+		castedCol := col
+		if needsNumeric {
+			castedCol = "(" + col + ")::numeric"
+		}
 		switch fn {
 		case "SUM":
-			return fmt.Sprintf("COALESCE(SUM(%s), 0) AS %s", col, quoteIdent(agg.Label))
+			return fmt.Sprintf("COALESCE(SUM(%s), 0) AS %s", castedCol, quoteIdent(agg.Label))
 		case "COUNT":
 			return fmt.Sprintf("COALESCE(COUNT(%s), 0) AS %s", col, quoteIdent(agg.Label))
 		case "DISTINCTCOUNT":
 			return fmt.Sprintf("COALESCE(COUNT(DISTINCT %s), 0) AS %s", col, quoteIdent(agg.Label))
 		default:
 			// MIN/MAX/AVG — NULL on empty groups is semantically correct.
-			return fmt.Sprintf("%s(%s) AS %s", sqlAggFunc(fn), col, quoteIdent(agg.Label))
+			return fmt.Sprintf("%s(%s) AS %s", sqlAggFunc(fn), castedCol, quoteIdent(agg.Label))
 		}
 	}
 	return fmt.Sprintf("COALESCE(COUNT(*), 0) AS %s", quoteIdent("Count"))

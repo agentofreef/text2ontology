@@ -207,7 +207,9 @@ func TestBuildSQLV2_GroupByWithSumAggregate(t *testing.T) {
 	}
 	assertContainsAll(t, sql,
 		`"Order"."Geo" AS "Geo"`,
-		`SUM("Order"."Order_Quantity") AS "Total_Quantity"`,
+		// Numeric props (data_type=int*/numeric/...) are CAST to numeric inside
+		// the aggregate so a text-typed physical column still sums cleanly.
+		`SUM(CAST("Order"."Order_Quantity" AS numeric)) AS "Total_Quantity"`,
 		`GROUP BY "Order"."Geo"`,
 	)
 }
@@ -241,7 +243,10 @@ func TestBuildSQLV2_DenseModeDelegation(t *testing.T) {
 		`SELECT DISTINCT`,
 		`dims`,
 		`LEFT JOIN`,
-		`COALESCE(SUM("Order"."Order_Quantity"), 0)`,
+		// dense_sql.go wraps numeric props with `(col)::numeric` so the agg
+		// works even when the physical column landed as text (collector imports
+		// PBIX string-quoted numbers verbatim).
+		`COALESCE(SUM(("Order"."Order_Quantity")::numeric), 0)`,
 	)
 }
 
@@ -600,8 +605,9 @@ func TestBuildOntologySQLV2_PhysicalAndOntologyDifferOnlyInFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ontology: %v", err)
 	}
-	// Both should reference Order columns identically.
-	for _, needle := range []string{`"Order"."Geo"`, `SUM("Order"."Order_Quantity")`, `AS "Total_Qty"`} {
+	// Both should reference Order columns identically. Numeric aggregates
+	// get a defensive CAST to numeric (collector imports PBIX numbers as text).
+	for _, needle := range []string{`"Order"."Geo"`, `SUM(CAST("Order"."Order_Quantity" AS numeric))`, `AS "Total_Qty"`} {
 		assertContainsAll(t, physSQL, needle)
 		assertContainsAll(t, ontSQL, needle)
 	}

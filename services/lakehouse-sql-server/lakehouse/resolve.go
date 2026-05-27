@@ -13,14 +13,33 @@ import (
 // author's chosen output column name wins over the engine's default
 // `Total_<col>` convention. Quoted identifiers ("X") and bare identifiers
 // (NAME) are both accepted; the captured alias is returned WITHOUT the quotes.
-var aliasTailRe = regexp.MustCompile(`(?is)^(.+?)\s+as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+// Two patterns are needed because PostgreSQL allows the `AS` keyword to be glued
+// directly onto a `)` or `"` boundary — e.g. `sum("X")as "alias"` with no space.
+// Go's regexp (RE2) lacks lookbehind, so we can't express "require whitespace
+// before `as` UNLESS preceded by ) or \"" in one pass. Instead:
+//
+//   - aliasTailReTight matches when the body ends in `)` or `"` (space optional).
+//   - aliasTailReLoose matches when the body ends in an identifier char (space
+//     REQUIRED to avoid eating `column_as` → `column_`).
+//
+// stripMetricAlias tries tight first because it's the narrower (paren/quote)
+// shape; if it doesn't match we fall back to the loose form.
+var (
+	aliasTailReTight = regexp.MustCompile(`(?is)^(.+?[)"])\s*as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+	aliasTailReLoose = regexp.MustCompile(`(?is)^(.+?)\s+as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+)
 
 // stripMetricAlias peels off a trailing `AS <ident>` from a metric expression.
 // Returns (body, alias). When no alias is present, returns (s, "").
-//   "sum(\"X\") AS qty"  → ("sum(\"X\")", "qty")
-//   "sum(\"X\")"          → ("sum(\"X\")", "")
+//   "sum(\"X\") AS qty"   → ("sum(\"X\")", "qty")
+//   "sum(\"X\")as \"qty\"" → ("sum(\"X\")", "qty")   ← Postgres allows the gap
+//   "sum(\"X\")"           → ("sum(\"X\")", "")
 func stripMetricAlias(s string) (body, alias string) {
-	if m := aliasTailRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+	s = strings.TrimSpace(s)
+	if m := aliasTailReTight.FindStringSubmatch(s); m != nil {
+		return strings.TrimSpace(m[1]), strings.Trim(m[2], `"`)
+	}
+	if m := aliasTailReLoose.FindStringSubmatch(s); m != nil {
 		return strings.TrimSpace(m[1]), strings.Trim(m[2], `"`)
 	}
 	return s, ""
