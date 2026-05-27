@@ -17,16 +17,16 @@
 //      `level='sql'` + `{sys.req/opt.NAME}` escape hatch (deprecation banner).
 //   4. Trigger keywords (≥1; how the metric is recalled by the LLM)
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { SQLEditor } from '@/components/ui/SQLEditor'
 import { ResultViewer } from '@/components/ui/ResultViewer'
 import { useProject } from '@/lib/project'
 import { useMessage } from '@/lib/message'
 import { api } from '@/lib/api'
 import type {
-  OntMetricIntentFilter, OntMetricParameter, OntObjectType,
+  OntMetricIntentFilter, OntMetricParameter, OntObjectType, OntProperty,
 } from '@/types/api'
-import { Plus, AlertCircle, Search, AlertTriangle, Play, Loader2 } from 'lucide-react'
+import { Plus, AlertCircle, Search, AlertTriangle, Play, Loader2, Database, Columns3 } from 'lucide-react'
 
 // ── Form model ──────────────────────────────────────────────────────────────
 // The new editor writes only a few fields; the rest are kept on the form type
@@ -235,6 +235,53 @@ export function MetricEditor({ form, setForm, objects, t }: Props) {
   const setPrimaryOd = (odId: string) =>
     setForm(f => ({ ...f, odIds: [odId], objectId: odId }))
 
+  // ── Primary OD detail (for the column browser next to the SQL editor) ──
+  // The /ontology/objects list endpoint returns summaries (no properties);
+  // we fetch the full OD on demand once the author picks one. Cached so
+  // toggling between ODs is instant.
+  const [odDetailCache, setOdDetailCache] = useState<Record<string, OntObjectType>>({})
+  const [odDetailLoading, setOdDetailLoading] = useState(false)
+  useEffect(() => {
+    if (!primaryOdId || !currentProject?.id || odDetailCache[primaryOdId]) return
+    let cancelled = false
+    setOdDetailLoading(true)
+    api<OntObjectType>(`/ontology/objects/${primaryOdId}?projectId=${currentProject.id}`)
+      .then(od => { if (!cancelled) setOdDetailCache(prev => ({ ...prev, [primaryOdId]: od })) })
+      .catch(() => { /* leave cache empty — browser shows "load failed" hint */ })
+      .finally(() => { if (!cancelled) setOdDetailLoading(false) })
+    return () => { cancelled = true }
+  }, [primaryOdId, currentProject?.id, odDetailCache])
+  const primaryOd: OntObjectType | undefined = odDetailCache[primaryOdId]
+
+  // Property filter for the right-side column browser.
+  const [colSearch, setColSearch] = useState('')
+  const filteredCols = useMemo<OntProperty[]>(() => {
+    const cols = primaryOd?.properties || []
+    if (!colSearch.trim()) return cols
+    const q = colSearch.toLowerCase()
+    return cols.filter(c =>
+      c.name.toLowerCase().includes(q) || (c.displayName || '').toLowerCase().includes(q),
+    )
+  }, [primaryOd, colSearch])
+
+  // Append text to the SQL editor (cursor-aware insertion needs a CodeMirror
+  // ref the shared SQLEditor doesn't expose; match the SQL SEMANTIC LAYER UX
+  // on the object-detail page, which also appends).
+  const insertIntoSql = (snippet: string) => {
+    setForm(f => ({
+      ...f,
+      querySql: f.querySql && !f.querySql.endsWith(' ') && !f.querySql.endsWith('\n')
+        ? `${f.querySql} ${snippet}`
+        : `${f.querySql}${snippet}`,
+    }))
+  }
+
+  // schema hint for CodeMirror autocomplete inside the SQL editor.
+  const sqlEditorSchema = useMemo<Record<string, string[]>>(() => {
+    if (!primaryOd) return {}
+    return { [primaryOd.name]: (primaryOd.properties || []).map(p => p.name) }
+  }, [primaryOd])
+
   // ── Triggers ─────────────────────────────────────────────────────────────
   const [kwInput, setKwInput] = useState('')
   const addKeyword = () => {
@@ -355,14 +402,105 @@ export function MetricEditor({ form, setForm, objects, t }: Props) {
           </div>
         )}
 
-        {/* 口径 SQL — 只描述口径本身,单 OD,无 token、无 JOIN、无过滤 */}
+        {/* 口径 SQL — 只描述口径本身,单 OD,无 token、无 JOIN、无过滤.
+            Right-side OD column browser mirrors the SQL SEMANTIC LAYER on the
+            object-detail page: click an OD name → insert `"<OD>"` into the
+            editor (the FROM target); click a property → insert `"<col>"`. The
+            browser only knows about the primary OD because metric SQL is
+            single-OD by construction. */}
         <Panel title={t('metric_sql')} hint={t('metric_sql_hint')}>
-          <SQLEditor
-            value={form.querySql}
-            onChange={v => setForm({ ...form, querySql: v })}
-            height="220px"
-            schema={{}}
-          />
+          <div className="flex border border-border">
+            {/* SQL editor — left */}
+            <div className="min-w-0 flex-1">
+              <SQLEditor
+                value={form.querySql}
+                onChange={v => setForm({ ...form, querySql: v })}
+                height="220px"
+                schema={sqlEditorSchema}
+              />
+            </div>
+            {/* OD column browser — right */}
+            <div className="flex w-[180px] flex-col border-l border-border bg-canvas-alt/30" style={{ height: '220px' }}>
+              <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+                <Database size={10} className="flex-shrink-0 text-ink-ghost" />
+                <span className="truncate font-mono text-[9px] font-semibold tracking-wider text-ink-ghost uppercase">
+                  {primaryOd?.name || t('metric_sql_browser_no_od_short')}
+                </span>
+                {primaryOd && (
+                  <span className="ml-auto font-mono text-[8px] text-ink-ghost">
+                    {(primaryOd.properties || []).length}
+                  </span>
+                )}
+              </div>
+              {primaryOdId && (
+                <div className="border-b border-border px-2 py-1.5">
+                  <div className="flex items-center gap-1 border border-border bg-white px-1.5 py-1">
+                    <Search size={9} className="flex-shrink-0 text-ink-ghost" />
+                    <input
+                      value={colSearch}
+                      onChange={e => setColSearch(e.target.value)}
+                      placeholder={t('metric_sql_browser_search')}
+                      className="w-full bg-transparent font-mono text-[9px] text-ink outline-none placeholder:text-ink-ghost"
+                      aria-label={t('metric_sql_browser_search')}
+                    />
+                  </div>
+                </div>
+              )}
+              <div className="flex-1 overflow-y-auto py-1">
+                {!primaryOdId ? (
+                  <div className="px-2 py-2 font-mono text-[9px] text-ink-ghost leading-relaxed">
+                    {t('metric_sql_browser_no_od')}
+                  </div>
+                ) : odDetailLoading && !primaryOd ? (
+                  <div className="flex items-center gap-1 px-2 py-2 font-mono text-[9px] text-ink-ghost">
+                    <Loader2 size={9} className="animate-spin" />
+                    {t('metric_sql_browser_loading')}
+                  </div>
+                ) : !primaryOd ? (
+                  <div className="px-2 py-2 font-mono text-[9px] text-ink-ghost">
+                    {t('metric_sql_browser_load_fail')}
+                  </div>
+                ) : (
+                  <>
+                    {/* OD itself — click to insert `"<OD>"` (the FROM target). */}
+                    <button
+                      type="button"
+                      onClick={() => insertIntoSql(`"${primaryOd.name}"`)}
+                      className="group flex w-full items-center gap-1 px-2 py-0.5 text-left hover:bg-canvas-alt"
+                      title={t('metric_sql_browser_od_title')}
+                    >
+                      <Database size={9} className="flex-shrink-0 text-ink-ghost group-hover:text-ink" />
+                      <span className="truncate font-mono text-[9px] font-semibold text-ink">{primaryOd.name}</span>
+                      <span className="ml-auto font-mono text-[8px] text-ink-ghost">OD</span>
+                    </button>
+                    {/* Property list. Empty hint guards against an OD that has
+                        not yet had its columns ingested. */}
+                    {filteredCols.length === 0 ? (
+                      <div className="px-2 py-1 font-mono text-[9px] text-ink-ghost">
+                        {colSearch ? t('metric_sql_browser_no_match') : t('metric_sql_browser_no_cols')}
+                      </div>
+                    ) : (
+                      filteredCols.map(c => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => insertIntoSql(`"${c.name}"`)}
+                          className="flex w-full items-center gap-1 px-2 py-0.5 pl-5 text-left hover:bg-blue-50"
+                          title={`${c.dataType || 'text'} — ${t('metric_sql_browser_col_title')}`}
+                        >
+                          <Columns3 size={9} className="flex-shrink-0 text-ink-ghost" aria-hidden="true" />
+                          <span className="truncate font-mono text-[9px] text-ink">{c.name}</span>
+                          <span className="ml-auto font-mono text-[7px] text-ink-ghost">
+                            {(c.dataType || '').slice(0, 4)}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
           <p className="font-mono text-[10px] text-ink-ghost">{t('metric_sql_note')}</p>
         </Panel>
 

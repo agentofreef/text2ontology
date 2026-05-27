@@ -45,9 +45,34 @@ func HandleAgentAnnotations(db *sql.DB) http.HandlerFunc { return handleAgentAnn
 // HandleAgentAnnotationByID returns the agent-annotation detail factory.
 func HandleAgentAnnotationByID(db *sql.DB) http.HandlerFunc { return handleAgentAnnotationByID(db) }
 
-// HandleAnnotationsRecompute returns the vector-recompute batch factory.
+// HandleAnnotationsRecompute returns the vector-recompute batch factory
+// (SSE stream; events: start/progress/error/done).
 func HandleAnnotationsRecompute(db *sql.DB) http.HandlerFunc {
 	return handleAnnotationsRecompute(db)
+}
+
+// HandleAnnotationsImport accepts a multipart CSV upload and bulk-inserts
+// annotations; duplicates are skipped via ON CONFLICT.
+func HandleAnnotationsImport(db *sql.DB) http.HandlerFunc {
+	return handleAnnotationsImport(db)
+}
+
+// HandleAnnotationsExport streams a UTF-8 CSV (BOM) of every annotation
+// under the current project.
+func HandleAnnotationsExport(db *sql.DB) http.HandlerFunc {
+	return handleAnnotationsExport(db)
+}
+
+// HandleAnnotationsVectorStatus returns the vector coverage badge data
+// (total / withVector / missing / needsCompute).
+func HandleAnnotationsVectorStatus(db *sql.DB) http.HandlerFunc {
+	return handleAnnotationsVectorStatus(db)
+}
+
+// HandleAnnotationsBulkStatus flips status (confirm/unconfirm) on many rows
+// in one call. Accepts either explicit ids[] or a selectAll filter spec.
+func HandleAnnotationsBulkStatus(db *sql.DB) http.HandlerFunc {
+	return handleAnnotationsBulkStatus(db)
 }
 
 // HandleLakehouseTokenRecallWithTokenize runs tokenize + recall for

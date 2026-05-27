@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lakehouse2ontology/authmw"
@@ -245,9 +246,31 @@ func embedAndSaveAnnotationVector(db *sql.DB, annotationID, question string) {
 	log.Printf("[annotation embed] OK id=%s dim=%d", annotationID, len(vec))
 }
 
-// handleAnnotationsRecompute recomputes question_vector for all annotations
-// (by default only status=true ones missing vectors). POST endpoint.
-// Query params: ?projectId=xxx&all=true (include pending annotations too)
+// handleAnnotationsRecompute streams an SSE progress channel while embedding
+// every annotation whose question_vector is NULL under the given project. By
+// default only confirmed (status=true) rows are eligible; pass ?all=true to
+// include pending ones too.
+//
+// Concurrency: fixed at apiBatchSize × apiConcurrency texts in flight
+// (20 × 8 = 160). We do NOT lean on EMBED_BATCH_SIZE / EMBED_MAX_CONCURRENCY
+// from env — those govern keywords / pbit and tuning them globally pulls the
+// whole stack along. Here we want a higher fan-out specifically for the
+// annotation backfill: each worker calls EmbedTextsCtx with at most
+// apiBatchSize texts (≤ embedDefaultBatchSize=32), so the inner client emits
+// a single /embeddings request per worker call, and the 8 outer workers
+// supply the parallelism.
+//
+// SSE events match the lakehouse-keywords compute-vectors pattern so the
+// frontend can re-use that reader verbatim:
+//
+//	{"type":"start","total":N}
+//	{"type":"progress","done":k,"total":N}
+//	{"type":"error","msg":"..."}     // per-batch recoverable failure
+//	{"type":"done","embedded":N,"failed":F}
+//
+// Idempotent: re-running only picks up rows still NULL. Safe to interrupt.
+//
+//	POST /api/ontology/agent-annotations-recompute?projectId=<uuid>&all=true
 func handleAnnotationsRecompute(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
@@ -262,48 +285,198 @@ func handleAnnotationsRecompute(db *sql.DB) http.HandlerFunc {
 		}
 
 		pid := GetProjectID(r)
-		includeAll := r.URL.Query().Get("all") == "true"
-
-		query := `SELECT id::text, question FROM ont_agent_annotation
-			WHERE project_id = $1 AND question_vector IS NULL`
-		if !includeAll {
-			query += " AND status = true"
-		}
-		rows, err := db.Query(query, pid)
-		if err != nil {
-			w.WriteHeader(500)
-			JsonResp(w, M{"error": err.Error()})
+		if pid == "" {
+			w.WriteHeader(400)
+			JsonResp(w, M{"error": "projectId required"})
 			return
 		}
-		type job struct{ id, q string }
-		var jobs []job
-		for rows.Next() {
-			var id, q string
-			rows.Scan(&id, &q)
-			jobs = append(jobs, job{id, q})
-		}
-		rows.Close()
+		includeAll := r.URL.Query().Get("all") == "true"
 
-		queued := len(jobs)
-		log.Printf("[annotation recompute] queued %d annotations for project %s (includeAll=%v)", queued, pid, includeAll)
-
-		// Run synchronously so caller can see result count
-		ok, fail := 0, 0
-		for _, j := range jobs {
-			before := 0
-			db.QueryRow(`SELECT COUNT(*) FROM ont_agent_annotation WHERE id = $1 AND question_vector IS NOT NULL`, j.id).Scan(&before)
-			embedAndSaveAnnotationVector(db, j.id, j.q)
-			after := 0
-			db.QueryRow(`SELECT COUNT(*) FROM ont_agent_annotation WHERE id = $1 AND question_vector IS NOT NULL`, j.id).Scan(&after)
-			if after > before {
-				ok++
-			} else {
-				fail++
+		sseSetupAnnotation(w)
+		var sseMu sync.Mutex
+		send := func(payload M) {
+			sseMu.Lock()
+			defer sseMu.Unlock()
+			b, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
 		}
 
-		JsonResp(w, M{"queued": queued, "succeeded": ok, "failed": fail})
+		// Pre-flight: confirm embedding config exists. Without this we'd
+		// burn time on N batches that all fail loudly with the same error.
+		if _, err := llmclient.EmbedTextsCtx(r.Context(), db, []string{"ping"}); err != nil {
+			send(M{"type": "error", "msg": "embedding 模型不可用: " + err.Error()})
+			send(M{"type": "done", "embedded": 0, "failed": 0})
+			return
+		}
+
+		query := `SELECT id::text, question FROM ont_agent_annotation
+			WHERE project_id = $1 AND question_vector IS NULL
+			  AND question IS NOT NULL AND question <> ''`
+		if !includeAll {
+			query += " AND status = true"
+		}
+		query += " ORDER BY created_at"
+		rows, err := db.Query(query, pid)
+		if err != nil {
+			send(M{"type": "error", "msg": err.Error()})
+			send(M{"type": "done", "embedded": 0, "failed": 0})
+			return
+		}
+		type annJob struct{ id, q string }
+		var jobs []annJob
+		for rows.Next() {
+			var id, q string
+			if err := rows.Scan(&id, &q); err == nil {
+				jobs = append(jobs, annJob{id, q})
+			}
+		}
+		rows.Close()
+
+		total := len(jobs)
+		send(M{"type": "start", "total": total})
+		log.Printf("[annotation recompute] queued %d annotations for project %s (includeAll=%v)", total, pid, includeAll)
+		if total == 0 {
+			send(M{"type": "done", "embedded": 0, "failed": 0})
+			return
+		}
+
+		// Chunk into batches of apiBatchSize, feed via channel to
+		// apiConcurrency workers. Each worker = one in-flight /embeddings
+		// request, so apiBatchSize × apiConcurrency = peak texts in flight.
+		const apiBatchSize = 20
+		const apiConcurrency = 8
+
+		type batch struct {
+			start int
+			rows  []annJob
+		}
+		batchCh := make(chan batch, apiConcurrency*2)
+		go func() {
+			defer close(batchCh)
+			for start := 0; start < total; start += apiBatchSize {
+				end := start + apiBatchSize
+				if end > total {
+					end = total
+				}
+				select {
+				case <-r.Context().Done():
+					return
+				case batchCh <- batch{start: start, rows: jobs[start:end]}:
+				}
+			}
+		}()
+
+		var (
+			doneMu   sync.Mutex
+			embedded int
+			failed   int
+		)
+		var wg sync.WaitGroup
+		for w := 0; w < apiConcurrency; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				for b := range batchCh {
+					if err := r.Context().Err(); err != nil {
+						return
+					}
+					texts := make([]string, len(b.rows))
+					for i, j := range b.rows {
+						texts[i] = j.q
+					}
+					vecs, err := llmclient.EmbedTextsCtx(r.Context(), db, texts)
+					if err != nil || len(vecs) != len(b.rows) {
+						msg := "embed batch failed"
+						if err != nil {
+							msg = err.Error()
+						}
+						send(M{"type": "error", "msg": msg})
+						doneMu.Lock()
+						failed += len(b.rows)
+						doneMu.Unlock()
+						log.Printf("[annotation recompute] worker=%d batch start=%d size=%d FAILED: %s", workerID, b.start, len(b.rows), msg)
+						continue
+					}
+					ids := make([]string, len(b.rows))
+					for i, j := range b.rows {
+						ids[i] = j.id
+					}
+					n, werr := writeAnnotationVectorsBack(db, ids, vecs)
+					if werr != nil {
+						send(M{"type": "error", "msg": werr.Error()})
+					}
+					doneMu.Lock()
+					embedded += n
+					failed += len(b.rows) - n
+					running := embedded
+					doneMu.Unlock()
+					send(M{"type": "progress", "done": running, "total": total})
+					log.Printf("[annotation recompute] worker=%d batch start=%d size=%d OK n=%d", workerID, b.start, len(b.rows), n)
+				}
+			}(w)
+		}
+		wg.Wait()
+
+		send(M{"type": "done", "embedded": embedded, "failed": failed})
 	}
+}
+
+// sseSetupAnnotation primes SSE response headers. Mirrors collector-server's
+// sseSetup (we don't share helpers across services so each owns its own).
+func sseSetupAnnotation(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering for true streaming
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// writeAnnotationVectorsBack issues one bulk UPDATE per batch (VALUES … JOIN
+// id). Returns the number of rows actually mutated (some ids may have been
+// deleted between the SELECT and now — those silently drop without erroring).
+func writeAnnotationVectorsBack(db *sql.DB, ids []string, vecs [][]float64) (int, error) {
+	if len(ids) == 0 || len(vecs) == 0 {
+		return 0, nil
+	}
+	var parts []string
+	var args []interface{}
+	argIdx := 1
+	for i, id := range ids {
+		if i >= len(vecs) || len(vecs[i]) == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("($%d::uuid, $%d::vector)", argIdx, argIdx+1))
+		args = append(args, id, vectorToPgVecString(vecs[i]))
+		argIdx += 2
+	}
+	if len(parts) == 0 {
+		return 0, nil
+	}
+	q := fmt.Sprintf(`
+		UPDATE ont_agent_annotation
+		   SET question_vector = v.vec, updated_at = now()
+		  FROM (VALUES %s) AS v(id, vec)
+		 WHERE ont_agent_annotation.id = v.id`,
+		strings.Join(parts, ", "))
+	res, err := db.Exec(q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("update question_vector: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func vectorToPgVecString(vec []float64) string {
+	parts := make([]string, len(vec))
+	for i, v := range vec {
+		parts[i] = strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // ─── Pre-processing: Auto-tokenize + Keyword Lookup ──────────────

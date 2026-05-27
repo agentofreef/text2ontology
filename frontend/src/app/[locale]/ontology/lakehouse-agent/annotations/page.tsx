@@ -3,13 +3,26 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { motion, useReducedMotion } from 'motion/react'
-import { api } from '@/lib/api'
+import { api, getApiBase } from '@/lib/api'
 import { useMessage } from '@/lib/message'
 import { useProject } from '@/lib/project'
 import { useStyleMode } from '@/lib/style-mode'
 import { AnimatedButton } from '@/components/ui/AnimatedButton'
-import { Trash2, Search, Check, X, MessageSquare, RefreshCw } from 'lucide-react'
+import { Trash2, Search, Check, X, MessageSquare, RefreshCw, Upload, Download, Sparkles } from 'lucide-react'
 import { useAutoAnimate } from '@/lib/motion'
+
+interface VecStatus {
+  total: number
+  withVector: number
+  missing: number
+  needsCompute: number
+  // Project-wide status counts (header badges read these instead of
+  // page-local item counts; otherwise the "X 已确认 / Y 待确认" numbers
+  // describe only the visible 50 rows and look wildly wrong after a
+  // bulk "select all matching" operation).
+  confirmed?: number
+  pending?: number
+}
 
 interface TokenMapping {
   token: string
@@ -181,6 +194,14 @@ export default function LakehouseAnnotationsPageMinimal() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [fadingOut, setFadingOut] = useState<Set<string>>(new Set())
   const [refreshKey, setRefreshKey] = useState(0)
+  // ── Bulk selection ────────────────────────────────────────────────
+  //   selected: explicit per-row picks (overlaps with current page)
+  //   allMatchingSelected: gmail-style "select all N matching" flag —
+  //     when true, bulk ops apply to the full filter, NOT the ids list
+  //   selection automatically clears whenever the filter/search/page changes
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [allMatchingSelected, setAllMatchingSelected] = useState(false)
+  const [bulkRunning, setBulkRunning] = useState(false)
   const { currentProject } = useProject()
   const msg = useMessage()
   const reduce = useReducedMotion()
@@ -209,6 +230,11 @@ export default function LakehouseAnnotationsPageMinimal() {
 
   useEffect(() => { load() }, [load])
   useEffect(() => { setPage(1) }, [search, statusFilter])
+  // Any filter/page change invalidates the selection (the underlying row set changes).
+  useEffect(() => {
+    setSelected(new Set())
+    setAllMatchingSelected(false)
+  }, [search, statusFilter, page, currentProject?.id])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -285,9 +311,232 @@ export default function LakehouseAnnotationsPageMinimal() {
     return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   }
 
-  const confirmed = items.filter(i => i.status).length
-  const pending = items.filter(i => !i.status).length
+  // ── Vector status + batch compute (mirrors lakehouse-keywords) ──
+  const [vecStatus, setVecStatus] = useState<VecStatus | null>(null)
+  const [computing, setComputing] = useState(false)
+  const [vecProgress, setVecProgress] = useState<{ done: number; total: number } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
+  const loadVecStatus = useCallback(async () => {
+    if (!currentProject?.id) return
+    try {
+      const res = await api<VecStatus>(
+        `/ontology/agent-annotations-vector-status?projectId=${currentProject.id}`,
+      )
+      setVecStatus(res)
+    } catch {
+      setVecStatus(null)
+    }
+  }, [currentProject])
+  useEffect(() => { loadVecStatus() }, [loadVecStatus])
+
+  // SSE stream reader — same shape the lakehouse-keywords page uses.
+  const startCompute = useCallback(async () => {
+    if (!currentProject?.id || computing) return
+    setComputing(true)
+    setVecProgress({ done: 0, total: 0 })
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('lakehouse2ontology_token') : null
+      const res = await fetch(
+        `${getApiBase()}/ontology/agent-annotations-recompute?projectId=${currentProject.id}&all=true`,
+        { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      )
+      if (!res.ok || !res.body) {
+        msg.error(t('compute_failed_status', { status: res.status }))
+        return
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let embedded = 0
+      let failed = 0
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() || ''
+        for (const ln of lines) {
+          if (!ln.startsWith('data: ')) continue
+          try {
+            const evt = JSON.parse(ln.slice(6))
+            if (evt.type === 'start') setVecProgress({ done: 0, total: evt.total || 0 })
+            else if (evt.type === 'progress') setVecProgress({ done: evt.done || 0, total: evt.total || 0 })
+            else if (evt.type === 'error') msg.error(typeof evt.msg === 'string' ? evt.msg : t('compute_error'))
+            else if (evt.type === 'done') { embedded = evt.embedded || 0; failed = evt.failed || 0 }
+          } catch { /* skip malformed line */ }
+        }
+      }
+      if (failed > 0) msg.error(t('compute_done_partial', { embedded, failed }))
+      else if (embedded > 0) msg.success(t('compute_done_ok', { embedded }))
+      else msg.success(t('compute_no_op'))
+    } catch (e) {
+      msg.error(t('compute_failed_err', { message: (e as Error).message }))
+    } finally {
+      setComputing(false)
+      setVecProgress(null)
+      loadVecStatus()
+    }
+  }, [currentProject, computing, loadVecStatus, msg, t])
+
+  const handleImportClick = () => fileInputRef.current?.click()
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-selecting the same file later
+    if (!file || !currentProject?.id) return
+    setImporting(true)
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('lakehouse2ontology_token') : null
+      const form = new FormData()
+      form.append('file', file)
+      const res = await fetch(
+        `${getApiBase()}/ontology/agent-annotations-import?projectId=${currentProject.id}`,
+        { method: 'POST', body: form, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      )
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        msg.error(t('import_fail', { message: data?.error || `HTTP ${res.status}` }))
+        return
+      }
+      const inserted = data.inserted ?? 0
+      const skipped = data.skipped ?? 0
+      const failed = data.failed ?? 0
+      if (failed > 0) msg.error(t('import_partial', { inserted, skipped, failed }))
+      else msg.success(t('import_success', { inserted, skipped }))
+      load()
+      loadVecStatus()
+    } catch (err) {
+      msg.error(t('import_fail', { message: (err as Error).message }))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleExport = async () => {
+    if (!currentProject?.id || exporting) return
+    setExporting(true)
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('lakehouse2ontology_token') : null
+      const res = await fetch(
+        `${getApiBase()}/ontology/agent-annotations-export?projectId=${currentProject.id}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      )
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '')
+        msg.error(t('export_fail', { message: errBody || `HTTP ${res.status}` }))
+        return
+      }
+      const blob = await res.blob()
+      // Prefer server-provided filename, fall back to a project-stamped default.
+      const cd = res.headers.get('Content-Disposition') || ''
+      const m = /filename="([^"]+)"/.exec(cd)
+      const filename = m?.[1] || `annotations_${currentProject.id}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.csv`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      msg.error(t('export_fail', { message: (err as Error).message }))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  // ── Bulk selection helpers ──────────────────────────────────────
+  const toggleSelectOne = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    setAllMatchingSelected(false)
+  }
+
+  const allOnPageSelected = items.length > 0 && items.every(i => selected.has(i.id))
+  const someOnPageSelected = items.some(i => selected.has(i.id))
+
+  const toggleSelectAllOnPage = () => {
+    if (allOnPageSelected) {
+      // Deselect just the current-page ids (keep any cross-page picks intact).
+      setSelected(prev => {
+        const next = new Set(prev)
+        items.forEach(i => next.delete(i.id))
+        return next
+      })
+      setAllMatchingSelected(false)
+    } else {
+      setSelected(prev => {
+        const next = new Set(prev)
+        items.forEach(i => next.add(i.id))
+        return next
+      })
+    }
+  }
+
+  const selectAllMatching = () => setAllMatchingSelected(true)
+
+  const clearSelection = () => {
+    setSelected(new Set())
+    setAllMatchingSelected(false)
+  }
+
+  // Effective count the bulk action will hit. When "all matching" is on we
+  // trust the server-reported total; otherwise we count explicit ids.
+  const effectiveSelectedCount = allMatchingSelected ? total : selected.size
+
+  const applyBulkStatus = async (newStatus: boolean) => {
+    if (!currentProject?.id || bulkRunning) return
+    if (effectiveSelectedCount === 0) {
+      msg.error(t('bulk_no_selection'))
+      return
+    }
+    setBulkRunning(true)
+    try {
+      const body: Record<string, unknown> = { status: newStatus }
+      if (allMatchingSelected) {
+        body.selectAll = true
+        if (search) body.search = search
+        body.statusFilter = statusFilter === 'pending' ? 'false' : statusFilter === 'confirmed' ? 'true' : ''
+      } else {
+        body.ids = Array.from(selected)
+      }
+      const res = await api<{ updated: number }>(
+        `/ontology/agent-annotations-bulk-status?projectId=${currentProject.id}`,
+        { method: 'POST', body },
+      )
+      msg.success(t('bulk_success', { updated: res.updated ?? 0 }))
+      clearSelection()
+      load()
+      loadVecStatus()
+    } catch (e) {
+      msg.error(t('bulk_fail', { message: (e as Error).message }))
+    } finally {
+      setBulkRunning(false)
+    }
+  }
+
+  const handleRefresh = () => { setRefreshKey(k => k + 1); load(); loadVecStatus() }
+
+  // Header badges show PROJECT-wide counts (from vec-status endpoint) when
+  // available — falls back to current-page counts on first render before the
+  // status load completes. Otherwise "X 已确认 · Y 待确认" describes only the
+  // visible 50 rows, which looked like a bug right after a bulk "select all
+  // matching" run that actually touched rows across pages.
+  const confirmed = vecStatus?.confirmed ?? items.filter(i => i.status).length
+  const pending = vecStatus?.pending ?? items.filter(i => !i.status).length
+
+  // Early-return AFTER all hooks (React Rules of Hooks: every hook must run
+  // every render in the same order). Earlier we returned here before declaring
+  // vecStatus / startCompute / etc., which made the hook count jump from
+  // ~10 to ~20 once a project loaded — triggering React error #310.
   if (!currentProject) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center">
@@ -296,8 +545,6 @@ export default function LakehouseAnnotationsPageMinimal() {
       </div>
     )
   }
-
-  const handleRefresh = () => { setRefreshKey(k => k + 1); load() }
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
@@ -350,6 +597,59 @@ export default function LakehouseAnnotationsPageMinimal() {
               </span>
             </div>
           )}
+          {/* Hidden file input — opens native picker when 导入 button clicked. */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={handleImportFile}
+            aria-hidden="true"
+          />
+          <AnimatedButton
+            variant="ghost"
+            size="sm"
+            onClick={handleImportClick}
+            disabled={importing}
+            aria-label={t('import_aria')}
+            title={t('import_aria')}
+          >
+            <Upload size={12} aria-hidden="true" />
+            <span>{importing ? t('import_running') : t('import_button')}</span>
+          </AnimatedButton>
+          <AnimatedButton
+            variant="ghost"
+            size="sm"
+            onClick={handleExport}
+            disabled={exporting || !vecStatus || vecStatus.total === 0}
+            aria-label={t('export_aria')}
+            title={t('export_aria')}
+          >
+            <Download size={12} aria-hidden="true" />
+            <span>{exporting ? t('export_running') : t('export_button')}</span>
+          </AnimatedButton>
+          <AnimatedButton
+            variant="primary"
+            size="sm"
+            onClick={startCompute}
+            disabled={computing || !vecStatus || vecStatus.needsCompute === 0}
+            aria-label={t('compute_vec_aria')}
+            title={vecStatus?.needsCompute === 0 ? t('vec_all_ready') : t('compute_vec_aria')}
+          >
+            <motion.span
+              className="inline-flex"
+              animate={computing && !reduce ? { rotate: 360 } : { rotate: 0 }}
+              transition={computing ? { repeat: Infinity, duration: 1, ease: 'linear' } : { duration: 0 }}
+              aria-hidden="true"
+            >
+              <Sparkles size={12} />
+            </motion.span>
+            {computing && vecProgress ? (
+              <span>{t('computing', { done: vecProgress.done, total: vecProgress.total })}</span>
+            ) : (
+              <span>{t('compute_vec')}{vecStatus?.needsCompute ? ` (${vecStatus.needsCompute})` : ''}</span>
+            )}
+          </AnimatedButton>
           <motion.button
             onClick={handleRefresh}
             whileHover={reduce ? undefined : { scale: 1.05 }}
@@ -375,6 +675,18 @@ export default function LakehouseAnnotationsPageMinimal() {
 
       {/* Filter strip */}
       <div className={`flex flex-shrink-0 flex-wrap items-center gap-3 bg-white px-6 py-3 ${industrial ? 'border-b border-ink' : 'border-b border-border'}`}>
+        {/* Bulk-select-page checkbox.
+            indeterminate = some-but-not-all on the current page are checked. */}
+        <input
+          type="checkbox"
+          className="h-3.5 w-3.5 flex-shrink-0 cursor-pointer accent-ink"
+          checked={allOnPageSelected}
+          ref={el => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected }}
+          onChange={toggleSelectAllOnPage}
+          aria-label={t('bulk_select_page_aria')}
+          title={t('bulk_select_page_aria')}
+          disabled={items.length === 0}
+        />
         <div className={`flex h-8 flex-1 min-w-[200px] max-w-md items-center gap-1.5 bg-white px-2.5 ${
           industrial ? 'border border-ink' : 'rounded-md border border-border focus-within:border-ink'
         }`}>
@@ -416,6 +728,64 @@ export default function LakehouseAnnotationsPageMinimal() {
         </div>
       </div>
 
+      {/* Bulk-action toolbar — appears whenever selection is non-empty.
+          The "select all matching" link upgrades the picked-id set into a
+          server-side filter so the bulk endpoint can update across pages. */}
+      {(selected.size > 0 || allMatchingSelected) && (
+        <div className={`flex flex-shrink-0 flex-wrap items-center gap-3 bg-canvas-alt px-6 py-2 ${
+          industrial ? 'border-b border-ink' : 'border-b border-border'
+        }`}>
+          <span className={`flex-shrink-0 ${industrial ? 'font-mono text-[11px] tracking-[0.14em]' : 'text-xs'} text-ink-muted`}>
+            {allMatchingSelected
+              ? t('bulk_all_matching_selected', { total })
+              : t('bulk_selected_label', { count: selected.size })}
+          </span>
+          {!allMatchingSelected && allOnPageSelected && total > items.length && (
+            <button
+              type="button"
+              onClick={selectAllMatching}
+              className="text-xs text-ink underline-offset-2 hover:underline focus-visible:ring-1 focus-visible:ring-ink"
+            >
+              {t('bulk_select_all_matching_link', { total })}
+            </button>
+          )}
+          <div className="ml-auto flex flex-shrink-0 items-center gap-2">
+            <AnimatedButton
+              variant="primary"
+              size="sm"
+              onClick={() => applyBulkStatus(true)}
+              disabled={bulkRunning || effectiveSelectedCount === 0}
+              aria-label={t('bulk_confirm')}
+              title={t('bulk_confirm')}
+            >
+              <Check size={12} aria-hidden="true" />
+              <span>{bulkRunning ? t('bulk_running') : `${t('bulk_confirm')} (${effectiveSelectedCount})`}</span>
+            </AnimatedButton>
+            <AnimatedButton
+              variant="ghost"
+              size="sm"
+              onClick={() => applyBulkStatus(false)}
+              disabled={bulkRunning || effectiveSelectedCount === 0}
+              aria-label={t('bulk_unconfirm')}
+              title={t('bulk_unconfirm')}
+            >
+              <X size={12} aria-hidden="true" />
+              <span>{bulkRunning ? t('bulk_running') : `${t('bulk_unconfirm')} (${effectiveSelectedCount})`}</span>
+            </AnimatedButton>
+            <AnimatedButton
+              variant="ghost"
+              size="sm"
+              onClick={clearSelection}
+              disabled={bulkRunning}
+              aria-label={t('bulk_clear')}
+              title={t('bulk_clear')}
+            >
+              {t('bulk_clear')}
+            </AnimatedButton>
+          </div>
+        </div>
+      )}
+
       {/* Scrollable list */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
@@ -436,9 +806,20 @@ export default function LakehouseAnnotationsPageMinimal() {
                 key={item.id}
                 className={`space-y-2 px-6 py-3.5 transition-all duration-300 ${
                   fadingOut.has(item.id) ? 'max-h-0 overflow-hidden py-0 opacity-0' : 'max-h-[500px] opacity-100'
+                } ${
+                  (allMatchingSelected || selected.has(item.id)) ? 'bg-canvas-alt/60' : ''
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-3.5 w-3.5 flex-shrink-0 cursor-pointer accent-ink"
+                    checked={allMatchingSelected || selected.has(item.id)}
+                    onChange={() => toggleSelectOne(item.id)}
+                    disabled={allMatchingSelected}
+                    aria-label={t('bulk_select_row_aria')}
+                    title={t('bulk_select_row_aria')}
+                  />
                   <div className="min-w-0 flex-1">
                     <div className="text-sm leading-relaxed text-ink">{item.question}</div>
                   </div>
