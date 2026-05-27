@@ -47,42 +47,35 @@ const lookupToolDescription = `查询本体定义 + 业务关键词。
 通常 context 已含 Od 信息时不必调用；遇到生疏术语 / 找不到属性 / 想确认值映射时再 lookup。`
 
 // smartqueryToolDescription is the LLM-facing description for the
-// `smartquery` tool in **strict mode**. The contract is intentionally tiny:
-// LLM picks a metric (口径) by name and fills its declared params. The server
-// owns metric / groupBy / orderBy / limit / canonical filters / SQL gen.
-// LLM never builds spec — that path is closed.
-const smartqueryToolDescription = `执行数据查询，返回表格结果。两种用法，二选一：
+// `smartquery` tool. Single model: the LLM picks a curated 口径 by NAME and
+// optionally layers runtime dimensions/filters/ordering on top. The server owns
+// the measure (canonical_metric), JOIN stitching, and SQL gen. The LLM never
+// writes an aggregate expression or SQL — that path is closed.
+const smartqueryToolDescription = `执行数据查询，返回表格结果。统一模型：选一个口径名 + 运行时叠加维度/过滤。
 
-⚠ **odName 始终必填**（无论 Mode A / Mode B），缺失会被拒绝并返回 ODNAME_REQUIRED。
-   Mode A 时 odName 也要带——填该 metric 在 🎯 小节标注的 OD 名；保持显式让前端可以
-   稳定渲染"对象"列，也让人复盘 LLM 选择路径时一目了然。
+形式：{"odName":"对应OD","metric":"口径名","filters":[...],"groupBy":[...],"orderBy":[...],"limit":N,"params":{...}}
 
-【Mode A · 预设】命中现成口径时——把口径交给人工策展好的口径。
-  形式：{"odName":"对应OD","metric":"口径名","params":{...}}
-  odName — 必填。须等于该 metric 在 🎯 小节标注的 OD（不一致会报 OD_INTENT_MISMATCH）。
-  metric — 从 context 顶部「🎯 查询口径（Metric）」小节里选一个 name。
-  params — 按该口径的 parameters schema 填；用户没提的省略走默认。
+• metric — **必填**。从 context 顶部「🎯 查询口径（Metric）」小节里挑一个口径 name。
+           ⚠ 不要自己写聚合表达式（sum(...)/avg(...)/count(...) 之类）——那会被拒（METRIC_MUST_BE_NAME）。
+           度量逻辑由口径背书；你只负责"选哪个口径 + 叠加什么维度/过滤"。
+• odName — **必填**。须等于该 metric 在 🎯 小节标注的 OD（不一致会报 OD_INTENT_MISMATCH）。
+           显式带上让前端稳定渲染"对象"列。
+• filters / groupBy / orderBy / limit — **运行时叠加**，加在口径的度量 + 基础维度之上：
+    - property 跨 OD 用 "OD.Property"（如 PRODUCT.GEN）；op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between。
+    - **给了 groupBy 就以你的维度为准**（不会再强加口径自带的基础维度）；没给 groupBy 才用口径基础维度兜底。
+    - filters / orderBy 始终叠加在口径之上（口径自带的固定过滤仍然生效）。
+    - 筛选值必须落在该属性的值域内（不在则报 COMPOSE_FAILED），不要臆造映射。
+• params — 若该口径声明了 parameters schema，按它填；用户没提的省略走默认。
            未声明的 key → PARAM_UNKNOWN；类型不符 → PARAM_TYPE_ERROR。
-  例："Top 5 摇滚乐手" → {"odName":"SALE","metric":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
-      "各 Geo 订单分布" → {"odName":"EARLY_ORDER","metric":"Order.Quantity.Distribution","params":{}}
-  Mode A 下不要再填 filters/groupBy —— 这些由口径提供（填了会被忽略）。
 
-【Mode B · 自由组合】没有现成口径完全匹配时——自己从目录 token 拼一次查询。
-  形式：{"odName":"主OD","metric":"sum(列)","filters":[...],"groupBy":[...],"orderBy":[...],"limit":N}
-  odName — 主 OD 名（单个，必填）。
-  metric — func(arg)，func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。
-           ⚠ 不接受 count(*)（JOIN 下双重计数），用 count(<id列>)。
-           ⚠ 纯口径：arg 必须是某个已授权口径（🎯 小节）用到的度量列。否则别拼无背书的聚合——改用已有口径，或调用 declare_capability_gap。
-  filters/groupBy — property 必须是 OD 已有列；跨 OD 用 "OD.Property"（如 PRODUCT.GEN）。
-  op 白名单：=, !=, >, <, >=, <=, in, not_in, like, between。
-  失败返回 COMPOSE_FAILED + 具体原因（哪个 token 不存在 / op 不允许）。
-  例："X11 产品各 Geo 年度 early order"
-      → {"odName":"EARLY_ORDER","metric":"sum(ORDER_QUANTITY)",
-         "filters":[{"property":"PRODUCT.GEN","op":"=","value":"X11"}],
-         "groupBy":["GEO","FISCAL_YEAR"],"orderBy":[{"label":"FISCAL_YEAR","dir":"ASC"}]}
+例："X11 产品各 Geo 年度 early order"
+   → {"odName":"EARLY_ORDER","metric":"early_order_数量",
+      "filters":[{"property":"PRODUCT.GEN","op":"=","value":"X11"}],
+      "groupBy":["GEO","FISCAL_YEAR"],"orderBy":[{"label":"FISCAL_YEAR","dir":"ASC"}]}
+   "Top 5 摇滚乐手" → {"odName":"SALE","metric":"Sales.ByArtist","params":{"n":5,"genre":"Rock"}}
 
-策略：先看 🎯 小节有没有合适口径，有就走 Mode A；没有就直接走 Mode B（不要因为没现成口径就回"无法处理"）。
-任一模式都不写 SQL —— 只从已策展的目录里挑/拼。Mode B 限制：暂不支持把 metric 跨 OD（聚合列必须在主 OD 上）。`
+🎯 小节里**完全没有**合适口径时 → 调 declare_capability_gap 声明缺口，不要自己拼一个无口径背书的聚合。
+不写 SQL —— 只从已策展的目录里挑口径名 + 叠加维度/过滤。`
 
 // smartqueryExecutor is the cross-service surface of lakehouse.RemoteClient.
 // Post-Phase-1 D4b: the monolith no longer hosts a local smartquery engine —
@@ -712,10 +705,11 @@ FULLY_LOADED_ODS_PLACEHOLDER
 
 ## 查询工具策略
 
-查询只有 smartquery 一个工具，两种模式（调用契约见工具自带说明）：
-- **命中口径** → 带 metric 字段（从 context 顶部「🎯 查询口径」小节挑），套用策展好的口径（Mode A）。
-- **没有合适口径** → 不填 metric，直接给 odName + metric + filters + groupBy 自由组合（Mode B）。不要因为没现成口径就回"无法处理"。
-- 只有当问题要测的口径在目录里**完全找不到对应 OD/度量**时，才告知用户"当前查询超出已配置范围"。
+查询只有 smartquery 一个工具，统一模型：**metric 永远填口径名 + 运行时叠加维度/过滤**（调用契约见工具自带说明）：
+- **metric 永远是口径名** → 从 context 顶部「🎯 查询口径」小节挑一个 name 填进去；**绝不要自己写聚合表达式**（sum(...)/count(...) 之类，会被拒 METRIC_MUST_BE_NAME）。度量逻辑交给人工策展好的口径。
+- **运行时维度/过滤放 groupBy / filters / orderBy** → 它们会叠加在口径之上。给了 groupBy 就以你的维度为准（不会再强加口径自带的基础维度）；没给才用口径基础维度兜底。
+- **没有合适口径** → 调 declare_capability_gap 声明缺口，不要自己拼无背书的聚合，也不要直接回"无法处理"。
+- 只有当问题要测的场景在目录里**完全找不到对应 OD/口径**时，才告知用户"当前查询超出已配置范围"。
 - **筛选值必须来自 OD Catalog 里该属性的值域**（property 后大括号里列出的那些值）。用户的筛选概念找不到对应字段、映射到多个字段无法确定、或值不在该属性值域内时——**不要臆造映射**（不要把"TBD"硬塞成"Not ready"，也不要在 4 个 readiness 里随便挑一个），改用 declare_capability_gap 声明，或向用户澄清。
 
 ## 歧义处理
@@ -728,7 +722,7 @@ FULLY_LOADED_ODS_PLACEHOLDER
 
 每次 smartquery 后服务端自动调一次 reflect_query_result，结果以 follow-up message 追加进对话。**必须读它**：
 - **verdict=match**：服务端接着自动调 synthesize 给结构化模板，直接据此写中文答复，**不要再调工具**。
-- **verdict=mismatch**：按 follow-up 的 missing_dimensions 补救——优先 re_recall(hints) 找更合适口径；仍不行就改用 smartquery **不带 metric 的自由组合模式**（odName+metric+filters+groupBy）补齐缺失维度；再不行就给当前最佳答案 + 一句话说明缺失维度让用户拍板。**最多 2 轮自我修正**，超过就收尾给答案。
+- **verdict=mismatch**：按 follow-up 的 missing_dimensions 补救——优先 re_recall(hints) 找更合适口径；仍不行就用同一口径名重查，把缺失维度放进 smartquery 的 groupBy（运行时维度叠加在口径之上）补齐；再不行就给当前最佳答案 + 一句话说明缺失维度让用户拍板。**最多 2 轮自我修正**，超过就收尾给答案。
 - **verdict=uncertain**：直接答用户，但回复里含蓄提示结果可能不全。
 **反例**（绝不要做）：reflect 说 mismatch，你照样答用户总数 → 答非所问，不可接受。
 
@@ -854,18 +848,6 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 ` + buildDateReferenceBlock() + dataCoverageLine
 
-		// ── Metric-first steering (USE_METRIC_FIRST) ──
-		// Prefer Mode B (自由组合): take the metric's canonical_metric and write
-		// groupBy/filters yourself, so required dimensions are not silently
-		// dropped by a preset's fixed config. Mode A (带 intent) is still kept
-		// for genuine pivot needs — this only changes the default steering.
-		if metricFirstEnabled {
-			systemPrompt = strings.Replace(systemPrompt,
-				"- **命中口径** → 带 metric 字段",
-				"- **默认走 Mode B(自由组合)**：从 🎯 小节取该口径的**度量(canonical_metric)**填到 metric，自己写 groupBy/filters；只有确实需要模板自带的 pivot 透视时才用 Mode A(带 metric)。\n- **命中口径** → 带 metric 字段",
-				1)
-		}
-
 		// ── Override system prompt for branch (clarification) threads ──
 		// Branch threads get a distilled seed prompt with only the original question
 		// and candidate list. No project-wide context, no main system rules.
@@ -928,23 +910,21 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 					"type":     "object",
 					"required": []string{"odName"},
 					"properties": M{
-						// metric — Mode A: curated preset name; Mode B: aggregation expression.
+						// metric — ALWAYS a curated 口径 name; aggregate expressions are rejected.
 						"metric": M{
 							"type":        "string",
-							"description": "Mode A 用：口径(metric)名称——命中 context 顶部「🎯 查询口径」小节的 name 时填它，套用策展好的口径（分组/pivot）。例：Sales.ByArtist / Order.Quantity.Distribution。Mode B 用：聚合表达式 func(arg)，func ∈ sum/avg/min/max/count/distinct_count；arg 必须是主 OD 的 property。⚠ 不接受 count(*)（JOIN 双重计数），用 count(<id列>)。Mode A 与 Mode B 共用此字段；不填则进入自由组合但无聚合（仅 groupBy）。",
+							"description": "**必填**。口径(metric)名称——从 context 顶部「🎯 查询口径」小节挑一个 name 填它，套用人工策展好的口径（度量 + 基础维度）。例：early_order_数量 / Sales.ByArtist / Order.Quantity.Distribution。⚠ 不要自己写聚合表达式（sum(...)/count(...) 之类）——会被拒 METRIC_MUST_BE_NAME；运行时维度/过滤请放 groupBy/filters。目录无合适口径时调 declare_capability_gap。",
 						},
 						"params": M{
 							"type":                 "object",
-							"description":          "Mode A 用：按口径的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。口径没声明的 key 会被拒绝。",
+							"description":          "按所选口径的 parameters schema 填的用户级参数。例 {n:5, genre:\"Rock\"}。口径没声明的 key 会被拒绝。",
 							"additionalProperties": true,
 						},
-						// odName — ALWAYS required, both modes. Mode A must still
-						// name the primary OD (must equal the OD that the named
-						// metric is curated on); Mode B names the OD to compose
-						// against. Empty/missing → ODNAME_REQUIRED error (no
-						// silent fall-through that would let the UI render the
+						// odName — ALWAYS required. Must equal the OD that the named
+						// metric is curated on. Empty/missing → ODNAME_REQUIRED error
+						// (no silent fall-through that would let the UI render the
 						// OD column as empty).
-						"odName": M{"type": "string", "description": "**必填**。主 OD 名（单个）。Mode A：必须等于所选 metric 在 🎯 小节标注的 OD（同名一致即可）。Mode B：要查询的主 OD。例：\"EARLY_ORDER\" / \"MTM\" / \"PRODUCT\"。"},
+						"odName": M{"type": "string", "description": "**必填**。主 OD 名（单个）。必须等于所选 metric 在 🎯 小节标注的 OD（同名一致即可）。例：\"EARLY_ORDER\" / \"MTM\" / \"PRODUCT\"。"},
 						"filters": M{"type": "array", "items": M{
 							"type":     "object",
 							"required": []string{"property", "op"},
@@ -954,7 +934,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 								"value":    M{"type": "string", "description": "过滤值（in/between 用逗号分隔）"},
 							},
 						}},
-						"groupBy": M{"type": "array", "items": M{"type": "string"}, "description": "Mode B 用：分组列，每个是 OD 的 property（跨 OD 用 \"OD.Property\"）"},
+						"groupBy": M{"type": "array", "items": M{"type": "string"}, "description": "运行时分组列，叠加在口径之上；每个是 OD 的 property（跨 OD 用 \"OD.Property\"）。给了就以你的维度为准（不再强加口径基础维度）。"},
 						"orderBy": M{"type": "array", "items": M{
 							"type":     "object",
 							"required": []string{"label"},
@@ -2496,25 +2476,26 @@ func loadFullLakehouseOd(db *sql.DB, projectID string, odName string) *recall.Od
 // can only produce one of three outcomes: correct SQL, INTENT_NOT_FOUND, or
 // PARAM_*_ERROR / SPEC_VALIDATION_FAILED — never silently wrong SQL.
 func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQuestion string, args map[string]interface{}, requiredDims []string) M {
-	// Unified query tool: `intent` is OPTIONAL.
-	//   - intent present → curated-preset path (this function continues below):
-	//     OD / metric / filters / groupBy / pivot all come from the Intent;
-	//     the LLM only fills `params`. Any compose-only fields are ignored —
-	//     the preset owns the spec.
-	//   - intent absent  → catalog-bound composition: delegate to
-	//     runComposeQueryTool, which builds the spec from
-	//     {odName, metric, filters, groupBy, ...} and runs the SAME engine.
-	// (These used to be two separate tools — smartquery vs compose_query.
-	// Merging removes the LLM's "preset vs compose" tool-choice dithering;
-	// both paths end at QuerySpec → Execute.)
-	// odName is mandatory in both modes — keeps the call-graph explicit and
-	// prevents the UI from rendering an empty "对象" cell (which masked the
-	// fact that the LLM had silently picked a wrong primary OD). Refused here
-	// before either path so Mode A and Mode B share the same gate.
+	// Unified query tool — single model: `metric` is the curated 口径 NAME.
+	//   - metric is a 口径名 → 口径-name path (this function continues below):
+	//     the named 口径 supplies the measure (canonical_metric) + base dims;
+	//     the LLM's runtime filters / groupBy / orderBy are LAYERED ON TOP via
+	//     applyRuntimeComposition. A non-empty runtime groupBy overrides the
+	//     口径's base dims (runtime wins); otherwise the base dims apply.
+	//   - metric contains "(" (an aggregate expression) → rejected with
+	//     METRIC_MUST_BE_NAME (the LLM must never re-define the measure).
+	//   - metric empty → catalog-bound composition: delegate to
+	//     runComposeQueryTool (kept for pure exploration / tests), which builds
+	//     the spec from {odName, metric=func(arg), filters, groupBy, ...}.
+	// All paths end at QuerySpec → Execute on the SAME engine.
+	// odName is mandatory — keeps the call-graph explicit and prevents the UI
+	// from rendering an empty "对象" cell (which masked the fact that the LLM had
+	// silently picked a wrong primary OD). Refused here before either path
+	// (口径名 / empty-metric composer) shares the same gate.
 	requestedOD := strings.TrimSpace(StrVal(args, "odName"))
 	if requestedOD == "" {
 		return M{
-			"error": "ODNAME_REQUIRED: smartquery 必须显式指定主 OD（odName 字段）。Mode A 时填该 metric 在 🎯 小节标注的 OD；Mode B 时填要查询的主 OD。不要漏填——UI 会把这个值直接呈现为「对象」列。",
+			"error": "ODNAME_REQUIRED: smartquery 必须显式指定主 OD（odName 字段）。填该 metric(口径名) 在 🎯 小节标注的 OD。不要漏填——UI 会把这个值直接呈现为「对象」列。",
 			"code":  "ODNAME_REQUIRED",
 		}
 	}
@@ -2525,17 +2506,20 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
 	}
 
-	// Mode B (自由组合): the `metric` value is an aggregate expression like
-	// `sum(ORDER_QUANTITY)` / `count(id)` rather than a curated 口径名. Any value
-	// containing `(` is treated as Mode B and dispatched to the composer (which
-	// parses+validates the aggregate against the OD's columns). Curated 口径 names
-	// are dotted identifiers (e.g. `Order.Total`, `Sales.ByGeo`) and never contain
-	// parentheses, so the heuristic is unambiguous. Without this branch a Mode B
-	// call falls through to `lookupIntentByName("sum(...)")` and errors out as
-	// METRIC_NOT_FOUND — the exact regression observed after the intent→metric
-	// field merge.
+	// metric MUST be a curated 口径名 — never an aggregate expression. A value
+	// containing `(` (e.g. `sum(ORDER_QUANTITY)`) means the LLM tried to write
+	// the measure itself, which breaks the core invariant that every number
+	// traces to a named, human-curated 口径. Reject it with explicit guidance:
+	// pick a 口径名 from the 🎯 section and put runtime dimensions/filters into
+	// groupBy/filters (which now layer on top of the 口径), or declare a gap when
+	// the catalog genuinely has no fit. Curated 口径 names are dotted identifiers
+	// (e.g. `Order.Total`, `early_order_数量`) and never contain parentheses, so
+	// the heuristic is unambiguous.
 	if strings.ContainsRune(intentName, '(') {
-		return runComposeQueryTool(ctx, db, projectID, userQuestion, args, requiredDims)
+		return M{
+			"error": "METRIC_MUST_BE_NAME: metric 必须是 context 顶部「🎯 查询口径」小节里的口径名（如 early_order_数量），不要自己写聚合表达式（sum(...) 之类）。运行时的维度/过滤请放到 groupBy / filters 字段，它们会叠加在口径之上。若目录里确实没有合适口径，调用 declare_capability_gap。",
+			"code":  "METRIC_MUST_BE_NAME",
+		}
 	}
 
 	hint, objectNames, intentParams, level, querySQL, notFound := lookupIntentByName(db, projectID, intentName)
@@ -2710,29 +2694,75 @@ func lakehouseToolSmartQuery(ctx context.Context, db *sql.DB, projectID, userQue
 		DisplayMode: "table",
 	}
 
-	// Completeness contract (Mode A): merge the question's required GROUP-BY
-	// dimensions into the Intent's AutoGroupBy so the executed query keeps them
-	// even if the curated preset didn't list them. Best-effort, server-side
-	// merge (ReplaceGroupBy=false) — dedupe on the normalized form so a dim the
-	// preset already groups by is not added twice. hint is a pointer, so the
-	// mutation rides on spec.IntentHint.
-	if len(requiredDims) > 0 && hint != nil {
-		// Dedupe on the bare property name (case-insensitive) so a required dim
-		// already covered by AutoGroupBy in EITHER form (bare "Prop" or qualified
-		// "OD.Prop") is not appended again — a bare+qualified pair of one column
-		// is a duplicate groupBy that the engine treats as two columns → 0 rows.
-		existing := map[string]bool{}
-		for _, g := range hint.AutoGroupBy {
-			existing[bareDimKey(g)] = true
+	// Runtime composition (口径名 + 运行时叠加): accept the function-call's
+	// filters / groupBy / orderBy and layer them ON TOP of the curated 口径
+	// (canonical_metric + base dims). The metric stays the named 口径 — this only
+	// adds runtime dimensions/filters, it never re-defines the measure. Shared
+	// resolver with the pure composer so cross-OD resolution, the op whitelist,
+	// and the value-domain guard behave identically on both paths.
+	//
+	// detect runtime groupBy BEFORE resolution so the base-dim override rule can
+	// branch on the LLM's intent (did it explicitly ask to regroup?).
+	runtimeGroupByGiven := false
+	if rawGB, ok := args["groupBy"].([]interface{}); ok && len(rawGB) > 0 {
+		runtimeGroupByGiven = true
+	}
+
+	// Resolve runtime groupBy/filters/orderBy onto the spec. requiredDims are
+	// injected here ONLY when the LLM gave a runtime groupBy (base-dim override
+	// path) — otherwise they ride through the IntentHint.AutoGroupBy merge below
+	// so the engine's MOVE-equality-filter-into-groupBy enforcement still applies.
+	runtimeReqDims := []string(nil)
+	if runtimeGroupByGiven {
+		runtimeReqDims = requiredDims
+	}
+	rcResolver, errM := newCompositionResolver(ctx, db, projectID, requestedOD)
+	if errM != nil {
+		return errM
+	}
+	if errM := applyRuntimeComposition(rcResolver, args, runtimeReqDims, &spec); errM != nil {
+		return errM
+	}
+
+	switch {
+	case runtimeGroupByGiven:
+		// 运行时维度为准: the LLM explicitly chose the grouping. Drop the 口径's
+		// base dims (AutoGroupBy) so the engine doesn't force-append them on top
+		// (e.g. "各 GEO 趋势" must NOT also carry early_order_数量's base ORDER_TYPE).
+		// Runtime groupBy + any reachability requiredDims already live in
+		// spec.GroupBy (applyRuntimeComposition put them there, deduped).
+		// ReplaceGroupBy stays false: AutoGroupBy is now empty so the engine
+		// leaves spec.GroupBy as-is; canonical filters / default order / limit
+		// from the IntentHint still apply.
+		if hint != nil {
+			hint.AutoGroupBy = nil
+			hint.ReplaceGroupBy = false
+			spec.IntentHint = hint
 		}
-		for _, d := range requiredDims {
-			if n := bareDimKey(d); n != "" && !existing[n] {
-				existing[n] = true
-				hint.AutoGroupBy = append(hint.AutoGroupBy, d)
+	default:
+		// No runtime groupBy → fall back to the 口径's base dims (AutoGroupBy),
+		// merging the question's reachability requiredDims into them so the
+		// executed query keeps required dimensions even if the curated preset
+		// didn't list them. Best-effort, server-side merge (ReplaceGroupBy=false)
+		// — dedupe on the bare property name (case-insensitive) so a dim already
+		// covered by AutoGroupBy in EITHER form (bare "Prop" or qualified
+		// "OD.Prop") is not appended again (a bare+qualified pair of one column is
+		// a duplicate groupBy the engine treats as two columns → 0 rows). hint is
+		// a pointer, so the mutation rides on spec.IntentHint.
+		if len(requiredDims) > 0 && hint != nil {
+			existing := map[string]bool{}
+			for _, g := range hint.AutoGroupBy {
+				existing[bareDimKey(g)] = true
 			}
+			for _, d := range requiredDims {
+				if n := bareDimKey(d); n != "" && !existing[n] {
+					existing[n] = true
+					hint.AutoGroupBy = append(hint.AutoGroupBy, d)
+				}
+			}
+			hint.ReplaceGroupBy = false
+			spec.IntentHint = hint
 		}
-		hint.ReplaceGroupBy = false
-		spec.IntentHint = hint
 	}
 
 	// Type-validated parameter binding (defense line 1).

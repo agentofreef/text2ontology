@@ -220,6 +220,301 @@ func normMetricColName(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// compositionResolver holds the per-call cross-OD property-resolution state
+// shared by the pure composer (runComposeQueryTool) and the metric-name path
+// (Mode A). It validates "OD.Prop" / bare "Prop" references against the
+// project's ontology, lazy-loading dim-OD property sets, and records which dim
+// ODs were referenced so the caller can append them to spec.Objects (the engine
+// needs the full set to resolve JOIN edges via ont_causality).
+type compositionResolver struct {
+	ctx       context.Context
+	db        *sql.DB
+	projectID string
+	odName    string // primary OD name
+	// odProps caches property-name sets per OD. Primary is loaded eagerly;
+	// dim ODs are loaded lazily the first time an "OD.Prop" reference names them.
+	odProps map[string]map[string]bool
+	primary map[string]bool // == odProps[odName], for hot-path lookups
+	// odIDByName caches OD id by name (primary + lazily-loaded dim ODs).
+	odIDByName map[string]string
+	// referencedDimODs records dim ODs touched by a qualified reference so the
+	// caller can append them (sorted) to spec.Objects.
+	referencedDimODs map[string]bool
+}
+
+// newCompositionResolver validates odName, loads its property set, and returns
+// a resolver ready to parse runtime groupBy/filters/orderBy references. Returns
+// a composeError-style M (non-nil ⇒ error, caller returns it directly).
+func newCompositionResolver(ctx context.Context, db *sql.DB, projectID, odName string) (*compositionResolver, M) {
+	var odID string
+	err := db.QueryRowContext(ctx, `
+		SELECT id FROM ont_object_type
+		WHERE project_id=$1 AND name=$2 AND mark=true`,
+		projectID, odName,
+	).Scan(&odID)
+	if err == sql.ErrNoRows {
+		return nil, composeError(fmt.Sprintf("OD %q not found or not active", odName),
+			"先 list(type=ods) 看可用 OD 名")
+	}
+	if err != nil {
+		return nil, composeError("OD lookup DB error: "+err.Error(), "")
+	}
+	primary, err := loadODPropertyNames(ctx, db, odID)
+	if err != nil {
+		return nil, composeError("property lookup DB error: "+err.Error(), "")
+	}
+	if len(primary) == 0 {
+		return nil, composeError(fmt.Sprintf("OD %q has zero properties", odName),
+			"先 inspect(target=<OD>, mode=schema) 检查")
+	}
+	return &compositionResolver{
+		ctx:              ctx,
+		db:               db,
+		projectID:        projectID,
+		odName:           odName,
+		odProps:          map[string]map[string]bool{odName: primary},
+		primary:          primary,
+		odIDByName:       map[string]string{odName: odID},
+		referencedDimODs: map[string]bool{},
+	}, nil
+}
+
+// odID returns the cached primary OD id.
+func (r *compositionResolver) odID() string { return r.odIDByName[r.odName] }
+
+// resolveQualifiedProperty parses "OD.Prop" or bare "Prop" form. Returns
+// (resolvedRef, dimODName, errorMap). dimODName is "" when the reference
+// resolves on the primary OD. The resolvedRef preserves the original token so
+// the engine's stripObjectPrefix matches the right OD via spec.Objects
+// membership.
+func (r *compositionResolver) resolveQualifiedProperty(rawRef, ctxLabel string) (string, string, M) {
+	ref := strings.TrimSpace(rawRef)
+	if ref == "" {
+		return "", "", composeError(fmt.Sprintf("%s: property is required", ctxLabel), "")
+	}
+	// Strip date-granularity suffix early — engine handles that — but
+	// preserve it on the returned token so spec.GroupBy keeps "(月)".
+	bare := stripGranularitySuffix(ref)
+	dotIdx := strings.Index(bare, ".")
+	if dotIdx <= 0 {
+		// Bare prop → must be on primary.
+		if !r.primary[bare] {
+			return "", "", composeError(
+				fmt.Sprintf("%s: %q is not a property of primary OD %q", ctxLabel, bare, r.odName),
+				"available on primary: "+strings.Join(sortedKeys(r.primary), ", ")+
+					"  // 跨 OD 引用请用 'OD.Property' 形式（如 CUSTOMER.Country）")
+		}
+		return ref, "", nil
+	}
+	// Qualified OD.Prop form.
+	dimOD := strings.TrimSpace(bare[:dotIdx])
+	dimProp := strings.TrimSpace(bare[dotIdx+1:])
+	if dimOD == "" || dimProp == "" {
+		return "", "", composeError(fmt.Sprintf("%s: malformed OD.Property reference %q", ctxLabel, ref),
+			"形如 CUSTOMER.Country")
+	}
+	// If the qualifier IS the primary OD, treat as primary ref.
+	if dimOD == r.odName {
+		if !r.primary[dimProp] {
+			return "", "", composeError(
+				fmt.Sprintf("%s: %q is not a property of OD %q", ctxLabel, dimProp, r.odName),
+				"available: "+strings.Join(sortedKeys(r.primary), ", "))
+		}
+		return ref, "", nil
+	}
+	// Cross-OD ref. Lazy-load dim OD properties + validate.
+	if r.odProps[dimOD] == nil {
+		var dimID string
+		if e := r.db.QueryRowContext(r.ctx, `
+			SELECT id FROM ont_object_type
+			WHERE project_id=$1 AND name=$2 AND mark=true`,
+			r.projectID, dimOD,
+		).Scan(&dimID); e != nil {
+			if e == sql.ErrNoRows {
+				return "", "", composeError(
+					fmt.Sprintf("%s: dim OD %q not found or not active", ctxLabel, dimOD),
+					"看 catalog 列出来的 OD 名")
+			}
+			return "", "", composeError("dim OD lookup DB error: "+e.Error(), "")
+		}
+		props, perr := loadODPropertyNames(r.ctx, r.db, dimID)
+		if perr != nil {
+			return "", "", composeError("dim property lookup DB error: "+perr.Error(), "")
+		}
+		r.odProps[dimOD] = props
+		r.odIDByName[dimOD] = dimID
+	}
+	if !r.odProps[dimOD][dimProp] {
+		return "", "", composeError(
+			fmt.Sprintf("%s: %q is not a property of OD %q", ctxLabel, dimProp, dimOD),
+			"available on "+dimOD+": "+strings.Join(sortedKeys(r.odProps[dimOD]), ", "))
+	}
+	r.referencedDimODs[dimOD] = true
+	return ref, dimOD, nil
+}
+
+// referencedDimODsSorted returns the dim ODs touched by resolveQualifiedProperty
+// in deterministic (alphabetical) order, for stable spec.Objects assembly.
+func (r *compositionResolver) referencedDimODsSorted() []string {
+	return sortedKeys(r.referencedDimODs)
+}
+
+// applyRuntimeComposition resolves the function-call's groupBy / filters /
+// orderBy (plus reachability-derived requiredDims) onto spec, doing cross-OD
+// resolution, op whitelisting, and the low-cardinality value-domain guard. It
+// is shared by the pure composer (empty metric → runComposeQueryTool) and the
+// metric-name path (Mode A) so both honor identical runtime-composition
+// semantics. Referenced dim ODs are appended to spec.Objects in deterministic
+// order. Returns a composeError-style M (non-nil ⇒ error, caller returns it
+// directly).
+//
+// Note: requiredDims are merged into spec.GroupBy here (best-effort, skip on
+// resolve failure) — this is the completeness backstop for the composer path.
+// Mode A passes requiredDims=nil because it merges them into the IntentHint's
+// AutoGroupBy upstream (so they ride through the engine's intent enforcement
+// with the right MOVE/INJECT semantics).
+func applyRuntimeComposition(r *compositionResolver, args map[string]interface{}, requiredDims []string, spec *smartquery.QuerySpec) M {
+	// Validate + assemble groupBy. Each entry can be bare ("EmployeeID") or
+	// qualified ("CUSTOMER.Country"); the latter pulls CUSTOMER into
+	// spec.Objects automatically.
+	if rawGB, ok := args["groupBy"].([]interface{}); ok {
+		for i, raw := range rawGB {
+			s, ok := raw.(string)
+			if !ok {
+				return composeError(fmt.Sprintf("groupBy[%d] must be a string", i), "")
+			}
+			ref, _, errM := r.resolveQualifiedProperty(s, fmt.Sprintf("groupBy[%d]", i))
+			if errM != nil {
+				return errM
+			}
+			spec.GroupBy = append(spec.GroupBy, ref)
+		}
+	}
+
+	// Completeness contract: force the executed query's groupBy to include the
+	// question's required dimensions (resolved from recall by the reachability
+	// judge). For each reqDim not already in groupBy, resolve it via the same
+	// property pipeline; on resolve failure SKIP it (do not fail the whole query
+	// — we just can't inject that one dim). resolveQualifiedProperty already
+	// records the dim OD into referencedDimODs on success.
+	for _, reqDim := range requiredDims {
+		// Dedupe on the bare property name (case-insensitive) so a bare prop and
+		// its OD-qualified form ("OD.Prop" vs "Prop") count as the SAME column.
+		// This stops a duplicate groupBy (e.g. bare + qualified of one column)
+		// that the dense-SQL resolver treats as two columns → 0 rows.
+		nd := bareDimKey(reqDim)
+		already := false
+		for _, g := range spec.GroupBy {
+			if bareDimKey(g) == nd {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		ref, _, errM := r.resolveQualifiedProperty(reqDim, "requiredDim")
+		if errM != nil {
+			continue // can't inject this dim; leave the query as-is
+		}
+		spec.GroupBy = append(spec.GroupBy, ref)
+	}
+
+	// Validate + assemble filters. Same OD.Prop semantics as groupBy.
+	if rawFilters, ok := args["filters"].([]interface{}); ok {
+		for i, raw := range rawFilters {
+			fm, ok := raw.(map[string]interface{})
+			if !ok {
+				return composeError(fmt.Sprintf("filters[%d] must be an object", i), "")
+			}
+			ref, dimOD, errM := r.resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
+			if errM != nil {
+				return errM
+			}
+			op := strings.ToLower(strings.TrimSpace(StrVal(fm, "op")))
+			value := StrVal(fm, "value")
+			if op == "" {
+				op = "="
+			}
+			if !allowedOps[op] {
+				return composeError(
+					fmt.Sprintf("filters[%d].op=%q not allowed", i, op),
+					"whitelist: =, !=, >, <, >=, <=, in, not_in, like, between")
+			}
+			// Stage A — value-domain guard (defense-in-depth). For equality-type
+			// filters on a LOW-cardinality categorical property, reject a value
+			// that isn't in the property's known domain (from lakehouse_keyword),
+			// so the LLM can't silently run a fabricated value (e.g. "TBD" on a
+			// {Ready, Not ready} field). Range/like ops and high-cardinality
+			// props are skipped (domain unknown/too large → fail-open).
+			if value != "" && (op == "=" || op == "!=" || op == "in" || op == "not_in") {
+				owningOD := r.odName
+				if dimOD != "" {
+					owningOD = dimOD
+				}
+				if odID := r.odIDByName[owningOD]; odID != "" {
+					if domain, known := lowCardValueDomain(r.ctx, r.db, odID, bareFilterPropName(StrVal(fm, "property"))); known {
+						for _, v := range splitFilterValues(value, op) {
+							if v != "" && !valueInDomain(v, domain) {
+								return composeError(
+									fmt.Sprintf("filters[%d]: 值 %q 不在属性 %q 的已知值域内", i, v, bareFilterPropName(StrVal(fm, "property"))),
+									"该属性值域: "+strings.Join(domain, " | ")+
+										" —— 若用户的说法不在其中，请勿臆造映射；向用户澄清，或换一个属性/值。")
+							}
+						}
+					}
+				}
+			}
+			spec.Filters = append(spec.Filters, smartquery.FilterItem{
+				Prop:  ref,
+				Op:    op,
+				Value: value,
+			})
+		}
+	}
+
+	// Append referenced dim ODs to spec.Objects (deterministic order so SQL
+	// generation is stable across runs). Engine's ResolveJoinPath will
+	// traverse ont_causality(join_key) to find the JOIN path. Dedupe against
+	// objects already present (Mode A seeds spec.Objects from the intent).
+	existingObjs := map[string]bool{}
+	for _, o := range spec.Objects {
+		existingObjs[o] = true
+	}
+	for _, dim := range r.referencedDimODsSorted() {
+		if !existingObjs[dim] {
+			spec.Objects = append(spec.Objects, dim)
+			existingObjs[dim] = true
+		}
+	}
+
+	// Validate + assemble orderBy.
+	if rawOrder, ok := args["orderBy"].([]interface{}); ok {
+		for i, raw := range rawOrder {
+			om, ok := raw.(map[string]interface{})
+			if !ok {
+				return composeError(fmt.Sprintf("orderBy[%d] must be an object", i), "")
+			}
+			label := strings.TrimSpace(StrVal(om, "label"))
+			if label == "" {
+				// label is required so we don't dictate which column is the metric
+				return composeError(fmt.Sprintf("orderBy[%d].label required", i),
+					"label = result column name (例 \"Total_NetAmount\" 或 EmployeeID)")
+			}
+			dir := strings.ToUpper(strings.TrimSpace(StrVal(om, "dir")))
+			if dir != "ASC" && dir != "DESC" {
+				dir = "DESC"
+			}
+			spec.OrderBy = append(spec.OrderBy, smartquery.OrderByItem{
+				Prop: label,
+				Dir:  dir,
+			})
+		}
+	}
+
+	return nil
+}
+
 // runComposeQueryTool is the dispatchTool handler for compose_query.
 // Validates input, builds smartquery.QuerySpec without an IntentHint, and
 // dispatches to the same SQL engine strict-mode uses.
@@ -247,110 +542,15 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 			"白名单：" + strings.Join(allowed, " / "))
 	}
 
-	// Validate odName exists + is active.
-	var odID string
-	err := db.QueryRowContext(ctx, `
-		SELECT id FROM ont_object_type
-		WHERE project_id=$1 AND name=$2 AND mark=true`,
-		projectID, odName,
-	).Scan(&odID)
-	if err == sql.ErrNoRows {
-		return composeError(fmt.Sprintf("OD %q not found or not active", odName),
-			"先 list(type=ods) 看可用 OD 名")
+	// Validate odName exists + is active, and load its property set. The
+	// resolver also owns the cross-OD "OD.Prop" reference resolution shared
+	// with Mode A (applyRuntimeComposition below).
+	r, errM := newCompositionResolver(ctx, db, projectID, odName)
+	if errM != nil {
+		return errM
 	}
-	if err != nil {
-		return composeError("OD lookup DB error: "+err.Error(), "")
-	}
-
-	// Property cache per OD — primary loaded eagerly. Dim ODs are loaded
-	// lazily as filter/groupBy references the first time we see "OD.Prop".
-	odProps := map[string]map[string]bool{}
-	odIDByName := map[string]string{odName: odID}
-	primary, err := loadODPropertyNames(ctx, db, odID)
-	if err != nil {
-		return composeError("property lookup DB error: "+err.Error(), "")
-	}
-	if len(primary) == 0 {
-		return composeError(fmt.Sprintf("OD %q has zero properties", odName),
-			"先 inspect(target=<OD>, mode=schema) 检查")
-	}
-	odProps[odName] = primary
-
-	// Track which dim ODs the LLM referenced — they all need to land in
-	// spec.Objects so the engine's ResolveJoinPath finds JOIN edges via
-	// ont_causality(relation_type='join_key').
-	referencedDimODs := map[string]bool{}
-
-	// resolveQualifiedProperty parses "OD.Prop" or bare "Prop" form.
-	// Returns (resolvedRef, dimODName, errorMap). dimODName is "" when the
-	// reference resolves on the primary OD. The resolvedRef preserves the
-	// original token so the engine's `stripObjectPrefix` matches the right
-	// OD via spec.Objects membership.
-	resolveQualifiedProperty := func(rawRef, ctxLabel string) (string, string, M) {
-		ref := strings.TrimSpace(rawRef)
-		if ref == "" {
-			return "", "", composeError(fmt.Sprintf("%s: property is required", ctxLabel), "")
-		}
-		// Strip date-granularity suffix early — engine handles that — but
-		// preserve it on the returned token so spec.GroupBy keeps "(月)".
-		bare := stripGranularitySuffix(ref)
-		dotIdx := strings.Index(bare, ".")
-		if dotIdx <= 0 {
-			// Bare prop → must be on primary.
-			if !primary[bare] {
-				return "", "", composeError(
-					fmt.Sprintf("%s: %q is not a property of primary OD %q", ctxLabel, bare, odName),
-					"available on primary: "+strings.Join(sortedKeys(primary), ", ")+
-						"  // 跨 OD 引用请用 'OD.Property' 形式（如 CUSTOMER.Country）")
-			}
-			return ref, "", nil
-		}
-		// Qualified OD.Prop form.
-		dimOD := strings.TrimSpace(bare[:dotIdx])
-		dimProp := strings.TrimSpace(bare[dotIdx+1:])
-		if dimOD == "" || dimProp == "" {
-			return "", "", composeError(fmt.Sprintf("%s: malformed OD.Property reference %q", ctxLabel, ref),
-				"形如 CUSTOMER.Country")
-		}
-		// If the qualifier IS the primary OD, treat as primary ref.
-		if dimOD == odName {
-			if !primary[dimProp] {
-				return "", "", composeError(
-					fmt.Sprintf("%s: %q is not a property of OD %q", ctxLabel, dimProp, odName),
-					"available: "+strings.Join(sortedKeys(primary), ", "))
-			}
-			return ref, "", nil
-		}
-		// Cross-OD ref. Lazy-load dim OD properties + validate.
-		if odProps[dimOD] == nil {
-			var dimID string
-			if e := db.QueryRowContext(ctx, `
-				SELECT id FROM ont_object_type
-				WHERE project_id=$1 AND name=$2 AND mark=true`,
-				projectID, dimOD,
-			).Scan(&dimID); e != nil {
-				if e == sql.ErrNoRows {
-					return "", "", composeError(
-						fmt.Sprintf("%s: dim OD %q not found or not active", ctxLabel, dimOD),
-						"看 catalog 列出来的 OD 名")
-				}
-				return "", "", composeError("dim OD lookup DB error: "+e.Error(), "")
-			}
-			props, perr := loadODPropertyNames(ctx, db, dimID)
-			if perr != nil {
-				return "", "", composeError("dim property lookup DB error: "+perr.Error(), "")
-			}
-			odProps[dimOD] = props
-			odIDByName[dimOD] = dimID
-		}
-		if !odProps[dimOD][dimProp] {
-			return "", "", composeError(
-				fmt.Sprintf("%s: %q is not a property of OD %q", ctxLabel, dimProp, dimOD),
-				"available on "+dimOD+": "+strings.Join(sortedKeys(odProps[dimOD]), ", "))
-		}
-		referencedDimODs[dimOD] = true
-		return ref, dimOD, nil
-	}
+	primary := r.primary
+	odID := r.odID()
 
 	// Validate metric arg (the property the aggregator wraps). Metric arg
 	// is constrained to the primary OD only — cross-OD aggregation needs a
@@ -425,134 +625,11 @@ func runComposeQueryTool(ctx context.Context, db *sql.DB, projectID, userQuestio
 		DisplayMode: "table",
 	}
 
-	// Validate + assemble groupBy. Each entry can be bare ("EmployeeID") or
-	// qualified ("CUSTOMER.Country"); the latter pulls CUSTOMER into
-	// spec.Objects automatically.
-	if rawGB, ok := args["groupBy"].([]interface{}); ok {
-		for i, raw := range rawGB {
-			s, ok := raw.(string)
-			if !ok {
-				return composeError(fmt.Sprintf("groupBy[%d] must be a string", i), "")
-			}
-			ref, _, errM := resolveQualifiedProperty(s, fmt.Sprintf("groupBy[%d]", i))
-			if errM != nil {
-				return errM
-			}
-			spec.GroupBy = append(spec.GroupBy, ref)
-		}
-	}
-
-	// Completeness contract (Mode B): force the executed query's groupBy to
-	// include the question's required dimensions (resolved from recall by the
-	// reachability judge). For each reqDim not already in groupBy, resolve it
-	// via the same property pipeline; on resolve failure SKIP it (do not fail
-	// the whole query — we just can't inject that one dim). resolveQualifiedProperty
-	// already records the dim OD into referencedDimODs on success.
-	for _, reqDim := range requiredDims {
-		// Dedupe on the bare property name (case-insensitive) so a bare prop and
-		// its OD-qualified form ("OD.Prop" vs "Prop") count as the SAME column.
-		// This stops a duplicate groupBy (e.g. bare + qualified of one column)
-		// that the dense-SQL resolver treats as two columns → 0 rows.
-		nd := bareDimKey(reqDim)
-		already := false
-		for _, g := range spec.GroupBy {
-			if bareDimKey(g) == nd {
-				already = true
-				break
-			}
-		}
-		if already {
-			continue
-		}
-		ref, _, errM := resolveQualifiedProperty(reqDim, "requiredDim")
-		if errM != nil {
-			continue // can't inject this dim; leave the query as-is
-		}
-		spec.GroupBy = append(spec.GroupBy, ref)
-	}
-
-	// Validate + assemble filters. Same OD.Prop semantics as groupBy.
-	if rawFilters, ok := args["filters"].([]interface{}); ok {
-		for i, raw := range rawFilters {
-			fm, ok := raw.(map[string]interface{})
-			if !ok {
-				return composeError(fmt.Sprintf("filters[%d] must be an object", i), "")
-			}
-			ref, dimOD, errM := resolveQualifiedProperty(StrVal(fm, "property"), fmt.Sprintf("filters[%d]", i))
-			if errM != nil {
-				return errM
-			}
-			op := strings.ToLower(strings.TrimSpace(StrVal(fm, "op")))
-			value := StrVal(fm, "value")
-			if op == "" {
-				op = "="
-			}
-			if !allowedOps[op] {
-				return composeError(
-					fmt.Sprintf("filters[%d].op=%q not allowed", i, op),
-					"whitelist: =, !=, >, <, >=, <=, in, not_in, like, between")
-			}
-			// Stage A — value-domain guard (defense-in-depth). For equality-type
-			// filters on a LOW-cardinality categorical property, reject a value
-			// that isn't in the property's known domain (from lakehouse_keyword),
-			// so the LLM can't silently run a fabricated value (e.g. "TBD" on a
-			// {Ready, Not ready} field). Range/like ops and high-cardinality
-			// props are skipped (domain unknown/too large → fail-open).
-			if value != "" && (op == "=" || op == "!=" || op == "in" || op == "not_in") {
-				owningOD := odName
-				if dimOD != "" {
-					owningOD = dimOD
-				}
-				if odID := odIDByName[owningOD]; odID != "" {
-					if domain, known := lowCardValueDomain(ctx, db, odID, bareFilterPropName(StrVal(fm, "property"))); known {
-						for _, v := range splitFilterValues(value, op) {
-							if v != "" && !valueInDomain(v, domain) {
-								return composeError(
-									fmt.Sprintf("filters[%d]: 值 %q 不在属性 %q 的已知值域内", i, v, bareFilterPropName(StrVal(fm, "property"))),
-									"该属性值域: "+strings.Join(domain, " | ")+
-										" —— 若用户的说法不在其中，请勿臆造映射；向用户澄清，或换一个属性/值。")
-							}
-						}
-					}
-				}
-			}
-			spec.Filters = append(spec.Filters, smartquery.FilterItem{
-				Prop:  ref,
-				Op:    op,
-				Value: value,
-			})
-		}
-	}
-
-	// Append referenced dim ODs to spec.Objects (deterministic order so SQL
-	// generation is stable across runs). Engine's ResolveJoinPath will
-	// traverse ont_causality(join_key) to find the JOIN path.
-	for _, dim := range sortedKeys(referencedDimODs) {
-		spec.Objects = append(spec.Objects, dim)
-	}
-
-	// Validate + assemble orderBy.
-	if rawOrder, ok := args["orderBy"].([]interface{}); ok {
-		for i, raw := range rawOrder {
-			om, ok := raw.(map[string]interface{})
-			if !ok {
-				return composeError(fmt.Sprintf("orderBy[%d] must be an object", i), "")
-			}
-			label := strings.TrimSpace(StrVal(om, "label"))
-			if label == "" {
-				// label is required so we don't dictate which column is the metric
-				return composeError(fmt.Sprintf("orderBy[%d].label required", i),
-					"label = result column name (例 \"Total_NetAmount\" 或 EmployeeID)")
-			}
-			dir := strings.ToUpper(strings.TrimSpace(StrVal(om, "dir")))
-			if dir != "ASC" && dir != "DESC" {
-				dir = "DESC"
-			}
-			spec.OrderBy = append(spec.OrderBy, smartquery.OrderByItem{
-				Prop: label,
-				Dir:  dir,
-			})
-		}
+	// Resolve runtime groupBy / requiredDims / filters / orderBy onto the spec
+	// (cross-OD resolution, op whitelist, value-domain guard, dim-OD append).
+	// Shared with Mode A — keeps the two paths in lockstep.
+	if errM := applyRuntimeComposition(r, args, requiredDims, &spec); errM != nil {
+		return errM
 	}
 
 	// Validate limit.

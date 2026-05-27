@@ -46,13 +46,6 @@ import (
 var reflectEnabled = envFlagDefaultOn("USE_REFLECT")
 var reRecallEnabled = envFlagDefaultOn("USE_RE_RECALL")
 
-// metricFirstEnabled steers the lakehouse system prompt toward Mode B (度量优先,
-// 自由组合) — pick the metric's canonical_metric and write groupBy/filters
-// directly, reserving Mode A (intent preset) for cases that genuinely need the
-// preset's pivot. Default on; set USE_METRIC_FIRST to a falsey value to keep
-// the legacy prompt. Mode A is never hard-disabled — pivot still needs it.
-var metricFirstEnabled = envFlagDefaultOn("USE_METRIC_FIRST")
-
 // envFlagDefaultOn returns false only for an explicit falsey value; unset or
 // anything else is treated as enabled.
 func envFlagDefaultOn(name string) bool {
