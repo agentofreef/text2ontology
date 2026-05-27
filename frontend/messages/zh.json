@@ -247,7 +247,7 @@
         "label_hit_od": "命中 Od:",
         "label_intent": "口径:",
         "label_object": "对象:",
-        "label_metric": "度量:",
+        "label_metric": "口径:",
         "label_group": "分组:",
         "label_filter": "筛选:"
       },
@@ -522,7 +522,7 @@
       "tool_label_body": "本体：",
       "tool_label_keyword": "关键词：",
       "tool_label_object": "对象：",
-      "tool_label_metric": "度量：",
+      "tool_label_metric": "口径：",
       "tool_label_group": "分组：",
       "status_success": "成功",
       "status_fail": "失败",
@@ -611,7 +611,7 @@
       "lookup_body_label": "本体：",
       "lookup_kw_label": "关键词：",
       "smartquery_obj_label": "对象：",
-      "smartquery_metric_label": "度量：",
+      "smartquery_metric_label": "口径：",
       "smartquery_group_label": "分组："
     },
     "knowledge": {
