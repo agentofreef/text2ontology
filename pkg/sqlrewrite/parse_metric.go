@@ -292,9 +292,23 @@ func isAggregateExpr(expr string) bool {
 // stripSelectAlias splits a select item into (body, alias) by recognizing an
 // explicit `AS alias` suffix. A BARE trailing identifier (no AS) is left in
 // place — too risky to strip without confusing `from_date` with `as date`.
+//
+// Two patterns mirror the runtime resolver (lakehouse-sql-server/lakehouse
+// stripMetricAlias): PostgreSQL allows `as` glued directly to `)` / `"`, so we
+// accept a zero-space gap only when the body ends with one of those chars.
+// Otherwise we still require whitespace before `as` to avoid mis-splitting
+// names like `column_as`.
+var (
+	selectAliasTightRe = regexp.MustCompile(`(?is)^(.+?[)"])\s*as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+	selectAliasLooseRe = regexp.MustCompile(`(?is)^(.+?)\s+as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`)
+)
+
 func stripSelectAlias(item string) (string, string) {
 	s := strings.TrimSpace(item)
-	if m := regexp.MustCompile(`(?is)^(.+?)\s+as\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*$`).FindStringSubmatch(s); m != nil {
+	if m := selectAliasTightRe.FindStringSubmatch(s); m != nil {
+		return strings.TrimSpace(m[1]), strings.Trim(m[2], `"`)
+	}
+	if m := selectAliasLooseRe.FindStringSubmatch(s); m != nil {
 		return strings.TrimSpace(m[1]), strings.Trim(m[2], `"`)
 	}
 	return s, ""

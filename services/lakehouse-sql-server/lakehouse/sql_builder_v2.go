@@ -351,21 +351,35 @@ func aggExprV2(agg smartquery.ResolvedAggregate, alias string, multi bool) exp.E
 		if label == "" {
 			label = "Total_" + agg.Prop.Name
 		}
+		// Defensive numeric coercion — mirrors denseAggExpr in dense_sql.go.
+		// ont_property.data_type may say "int8" while the physical column landed
+		// as `text` (collector imports PBIX string-quoted numbers verbatim;
+		// ontology learning re-types via sample values). Without a cast,
+		// `sum(text)` errors out even when the values parse cleanly. We only
+		// cast when the FUNCTION needs numeric AND the declared property type
+		// is numeric — non-numeric properties hitting SUM/AVG were already
+		// rejected by the resolver, and COUNT/DISTINCTCOUNT are type-agnostic
+		// so we skip the cast there.
+		aggCol := interface{}(col)
+		if (fn == "SUM" || fn == "AVG" || fn == "AVERAGE" || fn == "MIN" || fn == "MAX") &&
+			isNumericType(agg.Prop.DataType) {
+			aggCol = goqu.Cast(col, "numeric")
+		}
 		switch fn {
 		case "SUM":
-			return goqu.SUM(col).As(goqu.I(label))
+			return goqu.SUM(aggCol).As(goqu.I(label))
 		case "AVG", "AVERAGE":
-			return goqu.AVG(col).As(goqu.I(label))
+			return goqu.AVG(aggCol).As(goqu.I(label))
 		case "MIN":
-			return goqu.MIN(col).As(goqu.I(label))
+			return goqu.MIN(aggCol).As(goqu.I(label))
 		case "MAX":
-			return goqu.MAX(col).As(goqu.I(label))
+			return goqu.MAX(aggCol).As(goqu.I(label))
 		case "COUNT":
 			return goqu.COUNT(col).As(goqu.I(label))
 		case "DISTINCTCOUNT":
 			return goqu.COUNT(goqu.L("DISTINCT ?", col)).As(goqu.I(label))
 		default:
-			return goqu.SUM(col).As(goqu.I(label))
+			return goqu.SUM(aggCol).As(goqu.I(label))
 		}
 	}
 	return goqu.COUNT(goqu.L("*")).As(goqu.I("Count"))
