@@ -33,18 +33,17 @@ func FormatContext(result RecallResult, tokens []string, question string) string
 
 	if len(result.MetricIntents) > 0 {
 		sb.WriteString("### 🎯 查询口径（Metric）\n\n")
-		sb.WriteString("以下口径已匹配到用户问题。**默认走 Mode B（自由组合）**：取口径的口径在 smartquery **顶层**自己拼一次查询；只有确实需要口径模板自带的 pivot 透视时，才用 intent 走 Mode A。\n\n")
+		sb.WriteString("以下口径已匹配到用户问题。**调用 smartquery 时，`metric` 字段必须填口径的「名字」**——就是下面每个 `口径:NAME` 里的那个 NAME（例如 `early_order_数量`）。\n")
+		sb.WriteString("🚫 **绝对不要**把口径的 canonical_metric（如 `sum(\"ORDER_QUANTITY\")`）抄进 metric，也不要自己写 `sum()/avg()/count()` 之类聚合表达式——那会被拒绝（METRIC_MUST_BE_NAME）。度量逻辑由口径背书、后端自动套用，你只负责「选哪个口径名 + 叠加什么维度/过滤」。\n\n")
 		for _, mi := range result.MetricIntents {
 			formatMetricIntent(&sb, mi, recalledOds)
 		}
-		sb.WriteString("**组合规则（Mode B，默认）**：\n")
-		sb.WriteString("- 把这些字段写在 smartquery **顶层**（odName/metric/filters/groupBy），**不要**放进 `params`\n")
-		sb.WriteString("- metric = 口径的 canonical_metric（函数名一字不差照抄，**严禁**替换为其它聚合）\n")
-		sb.WriteString("- filters = 口径的 canonical_filters **+** 用户提到的其它筛选条件\n")
-		sb.WriteString("- groupBy = 口径的 auto_group_by **+** 用户提到的其它分组维度（auto_group_by 不可省略）\n")
-		sb.WriteString("- objects 见上方口径块里给出的成品列表，不要自行删减\n")
-		sb.WriteString("- 回复时套用 response_template\n")
-		sb.WriteString("**仅当需要模板内置 pivot 时走 Mode A**：填 `intent` = 口径 name，按其 parameters 列表填 `params`；此时不要再在顶层写 metric/filters/groupBy（口径已包含）。\n\n")
+		sb.WriteString("**调用规则**：\n")
+		sb.WriteString("- `metric` = 口径名（`口径:` 后面的 NAME）；`odName` = 该口径块标注的 target Od。\n")
+		sb.WriteString("- 口径的度量 / 固定过滤(canonical_filters) / 基础维度(auto_group_by) 全部由**后端自动套用**，你不用也不要填。\n")
+		sb.WriteString("- 用户额外的筛选/分组/排序写进顶层 `filters`/`groupBy`/`orderBy`（property 跨 OD 用 `OD.Prop`），会**叠加**在口径之上；跨 OD 的 Od 后端会自动补进 objects。\n")
+		sb.WriteString("- **给了 groupBy 就以你的维度为准**（后端不再强加口径基础维度）；没给 groupBy 才用口径基础维度兜底。\n")
+		sb.WriteString("- 若口径声明了 `parameters`，按其 schema 填 `params`。回复时套用 response_template。\n\n")
 	}
 
 	// ── Od blocks (keyword → property → Od) ──
@@ -336,9 +335,11 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, _ []string) {
 		sb.WriteString(fmt.Sprintf("- **target Od**：`%s`（服务端自动写入 spec.Objects）\n", mi.ObjectName))
 	}
 
-	// Strict-mode call shape — show a copyable example with the actual intent
-	// name and any required params. Optional params show their default.
-	sb.WriteString(fmt.Sprintf("- **调用形式**：`{\"intent\":\"%s\",\"params\":{...}}`\n", mi.Name))
+	// New model: metric = 口径 NAME. Show what to put into smartquery.
+	sb.WriteString(fmt.Sprintf("- **metric 填**：`%s`（口径名，**不是** sum(...)）；`odName` = `%s`\n", mi.Name, mi.ObjectName))
+	if mi.CanonicalMetric != "" {
+		sb.WriteString(fmt.Sprintf("    - ℹ️ 该口径度量 `%s`（后端自动套用，不要抄进 metric）\n", mi.CanonicalMetric))
+	}
 
 	// Parameters schema — LLM consults this to decide what to fill into params.
 	// Renders as a small table so each row carries name/type/property/默认/必填/说明.
@@ -398,7 +399,7 @@ func formatMetricIntent(sb *strings.Builder, mi MetricIntent, _ []string) {
 				p.Name, p.Type, required, defaultStr, targetStr, desc))
 		}
 	} else {
-		sb.WriteString("- **parameters**：（无）— 直接 `{\"intent\":\"" + mi.Name + "\",\"params\":{}}`\n")
+		sb.WriteString("- **parameters**：（无）— metric 填 `" + mi.Name + "` 即可\n")
 	}
 
 	// Default shape (informational — server applies these automatically).
