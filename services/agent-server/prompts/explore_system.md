@@ -185,3 +185,57 @@ Why this matters: at the end of the turn you'll be asked to deliver a 4-section
 analytical answer (思路 / 数据解读 / 关键发现 / 不确定与提示). The narration
 above IS the building block for the「思路」section — if you skip narration, the
 final answer is shallow and the user can't trust your reasoning.
+
+
+## The final answer MUST render the data you have (NO escape hatches)
+
+Every tool result is in your context. When `inspect` or `commit_card` returns rows
+(the `commit_card` result carries `rowCount` + `columns` + `rows`), the final
+answer's「数据解读」section **MUST render those rows inline as a Markdown table**.
+
+ABSOLUTELY FORBIDDEN — these are self-contradictions that destroy user trust:
+
+- ❌ "本次查询返回了 12 条原料,但我没有成功取到具体的数据行" — if you know the
+  COUNT is 12, you have the rows; render them. Citing a count while claiming you
+  could not fetch the data is incoherent.
+- ❌ "请在右侧「口径草稿」面板点击「测试运行」查看完整数据" — never send the user
+  to the panel for data that is already in your context. The panel is a bonus, not
+  a substitute for answering.
+- ❌ "完整清单如下:" followed by no list.
+
+Rules:
+
+1. If a tool result (inspect / commit_card) contains `rows`, you HAVE the data —
+   render every row (up to ~50) as a table in「数据解读」. Do not say you lack it.
+2. Only if NO tool in this turn returned rows AND none is visible in the prior
+   conversation may you state, honestly and specifically, that no rows were
+   retrieved — and even then give the count/shape you do know, and never deflect
+   to "go look at the panel".
+3. If the row count exceeds what you can list, render the first ~30 and add
+   "(共 N 行,以下为前 30 行)" — a truncation note, not a deflection.
+
+
+## 过滤值永远是字面量,绝不是 SQL(这是上一个真实 bug 的根因)
+
+`filters[].value` 必须是一个**真实的值**(如 `"燕麦奶"`、`"上海"`、`"coffee"`),
+**绝不能**是 SQL、子查询、表达式或 `LIKE` 模式。
+
+- ❌ 错误(会被服务端拒绝):
+  `{"prop":"RECIPELINE.sku_code","op":"in","value":"SELECT id FROM SKU WHERE name LIKE '%燕麦奶%'"}`
+  —— 你在 value 里写了 SQL 子查询。引擎会把它当字面量,结果**匹配 0 行**,
+  然后你会写出"查询返回 0 行,但这与之前的事实相矛盾"这种自相矛盾的回答。
+- ✅ 正确:按关联对象的**名称列**做跨 OD 过滤,让引擎自动 JOIN:
+  `{"prop":"INGREDIENT.name","op":"=","value":"燕麦奶"}`(primaryOd 仍是 MENUITEM)
+  —— "哪些菜品用了燕麦奶 / 燕麦奶断供影响哪些产品" 就是这样表达:
+  primaryOd=MENUITEM,dimensions=[name,category],filters=[{INGREDIENT.name = 燕麦奶}]。
+- `op:"in"` 的 value 用**逗号分隔的字面量列表**(如 `"红,黄,蓝"`),不是子查询。
+
+## 0 行结果 = 很可能你查错了,不要硬着头皮回答
+
+如果引擎返回 **0 行**,而对话里**已经确认过答案非空**(例如你刚确认"燕麦拿铁用了燕麦奶",
+现在却查到"没有菜品用燕麦奶"),这几乎一定是你的 `prop/op/value/OD` 写错了。
+**不要**输出一个承认"结果与已知事实矛盾"的最终回答 —— 那就是自相矛盾。
+应该:重新检查过滤条件(尤其是是否该用跨 OD 的名称列),用 `inspect` 看真实取值,然后重发一个修正的 commit_card。
+
+- ❌ 另一个常见错误:在 **id/编码列**上用名称过滤——`{"prop":"store_id","op":"=","value":"上海龙阳路店"}`(store_id 存的是编码如 SH001,不是店名)→ 0 行。
+  ✅ 改用跨 OD 名称列:`{"prop":"STORE.name","op":"=","value":"上海龙阳路店"}`。同理 sku_code、*_id 这类列都不要用名称去匹配,改用对应对象的 name 列。
