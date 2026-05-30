@@ -312,14 +312,31 @@ func dateGranExpr(col exp.Expression, format string) exp.LiteralExpression {
 // raw-SQL escape hatch except for date granularity (which uses parameter
 // placeholders, not string concat).
 func selectExprsV2(rq *ResolvedLakehouseQuery, alias string, multi bool) []interface{} {
+	// Detect output-label collisions among groupBy dims. When two joined ODs
+	// expose a same-named column (e.g. INGREDIENT.name AND MENUITEM.name both
+	// → "name"), projecting both as the bare name silently clobbers one in the
+	// result rows. Colliding dims get an OD-qualified label ("INGREDIENT.name")
+	// so each survives; non-colliding dims keep the bare name (no change to the
+	// common single-OD / no-collision case → response templates + pivots that
+	// reference the bare label are unaffected).
+	labelCount := map[string]int{}
+	for _, gb := range rq.GroupByCols {
+		if gb.Granularity == "" {
+			labelCount[gb.Prop.Name]++
+		}
+	}
 	var out []interface{}
 	for _, gb := range rq.GroupByCols {
 		col := propCol(gb.Prop, alias, multi)
 		if gb.Granularity != "" {
 			out = append(out, dateGranExpr(col, gb.Granularity).As(goqu.I(gb.OutputLabel)))
-		} else {
-			out = append(out, col.As(goqu.I(gb.Prop.Name)))
+			continue
 		}
+		label := gb.Prop.Name
+		if labelCount[label] > 1 && gb.Prop.ObjectName != "" {
+			label = gb.Prop.ObjectName + "." + gb.Prop.Name
+		}
+		out = append(out, col.As(goqu.I(label)))
 	}
 	for _, agg := range rq.Aggregates {
 		out = append(out, aggExprV2(agg, alias, multi))

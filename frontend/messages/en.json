@@ -273,7 +273,9 @@
       "header": {
         "mode_query": "Query",
         "mode_builder": "Builder",
+        "mode_explore": "Explore",
         "mode_analyst": "Analyst",
+        "title_explore": "Metric Workshop",
         "branch_label": "Clarification branch",
         "memory_btn": "Memory",
         "memory_title": "View this thread's accumulated memory (Thread Memory Ledger)",
@@ -288,7 +290,8 @@
         "agent_llm_bound_tooltip": "Bound · {vendor} / {modelName} (click to switch or unbind)",
         "agent_llm_unbound_tooltip": "Currently falls back to active model — select to bind explicitly",
         "title_lakehouse": "Lakehouse Agent",
-        "title_builder": "Ontology Builder"
+        "title_builder": "Ontology Builder",
+        "title_explore_chat": "Explore · AI Co-author"
       },
       "graph_toolbar": {
         "layout_current": "Current",
@@ -362,6 +365,35 @@
       "thread": {
         "load_fail": "Failed to load conversation",
         "main_title": "Main thread"
+      },
+      "explore": {
+        "input_placeholder": "Describe the question you want to analyze…",
+        "commit_card": {
+          "accept_button": "Adopt",
+          "accepted_bubble": "Adopted: {name}",
+          "error_label": "Adoption failed",
+          "edit_name_label": "Name",
+          "edit_display_name_label": "Display name",
+          "edit_trigger_keywords_label": "Trigger keywords",
+          "readonly_canonical_label": "canonical_metric",
+          "readonly_sql_label": "querySql",
+          "readonly_parameters_label": "Parameters",
+          "readonly_primary_od_label": "Primary OD",
+          "readonly_auto_group_by_label": "Default GROUP BY",
+          "readonly_response_template_label": "Response template",
+          "readonly_description_label": "Description",
+          "accepting": "Adopting…",
+          "blocked_reason": "Not ready to adopt: {reason}"
+        },
+        "thread_list": {
+          "new_button": "New chat",
+          "empty": "No explore threads yet",
+          "loading": "Loading…",
+          "title_fallback": "New chat"
+        },
+        "error": {
+          "stream_failed": "Stream interrupted, please retry"
+        }
       }
     },
     "annotations": {

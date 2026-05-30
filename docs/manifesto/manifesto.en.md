@@ -59,8 +59,8 @@ This is the real reason "AI chat with your data" demos have flooded social media
 What an ontology is:
 - **Human-crafted**: built by ontology curators in collaboration with AI, not pre-existing
 - **Versioned**: lives in Postgres tables with full CRUD, mark states, audit logs
-- **Deterministic**: given the same parameters, Metric Intent produces the same SQL every time
-- **Auditable**: any decision-maker can open `lakehouse_metric_intent` and read, in plain sight, what "early order" means in your company
+- **Deterministic**: given the same parameters, a Metric produces the same SQL every time
+- **Auditable**: any decision-maker can open `lakehouse_metric` and read, in plain sight, what "early order" means in your company
 
 It is not schema — **schema is physical fact; ontology is business fact**.
 It is not a traditional semantic layer — those assume you build first; **ontology is constructed incrementally with AI**.
@@ -70,7 +70,27 @@ It is not a prompt description — prompts cannot be versioned, audited, or CRUD
 
 **This is why enterprises will pay for the latter — trust has a home.**
 
-**Text-to-SQL dies on multi-table queries; the ontology route removes multi-table from the picture entirely.** Letting the LLM freely write SQL falls off a cliff past three tables, because the LLM has to decide "which tables + how to JOIN + how to filter and aggregate" all at once, and any single step going wrong takes the whole answer down. The ontology route lets the LLM **pick OD, pick Intent, pick Keyword from a pre-connected OD network** — three finite-set selections, not generation. The SQL is assembled downstream by the SmartQuery engine along the Links between ODs. **The LLM never sees a JOIN.** This is the engineering payoff of "the LLM is only a constrained executor."
+**Text-to-SQL dies on multi-table queries; the ontology route removes multi-table from the picture entirely.** Letting the LLM freely write SQL falls off a cliff past three tables, because the LLM has to decide "which tables + how to JOIN + how to filter and aggregate" all at once, and any single step going wrong takes the whole answer down. The ontology route lets the LLM **pick OD, pick Metric, pick Keyword from a pre-connected OD network** — three finite-set selections, not generation. The SQL is assembled downstream by the SmartQuery engine along the Links between ODs. **The LLM never sees a JOIN.** This is the engineering payoff of "the LLM is only a constrained executor."
+
+### The Metric: what gives "oracle" its teeth
+
+The ontology is a whole graph — objects, relationships, knowledge, trigger words. But in any single question, **the only thing that is truly under-determined is the number itself**: "early order = which status?" The thing that pins that number down has a precise name — the **Metric** (口径, *caliber*): a single, minimal measure defined on one OD. It is the legally-binding definition of that number inside your organization.
+
+The hard rule: **every aggregated measure must be endorsed by an authorized Metric. Otherwise the system refuses to run (`NO_AUTHORIZED_METRIC`) — it does not fabricate an unbacked number to paper over the gap.** Only two outcomes remain: the value its Metric defines, or "that Metric does not exist." **"Confidently wrong" is structurally eliminated.**
+
+This upgrades the ontology from a *semantic layer* into a **compiler**: well-formed questions (Metric-backed) compile deterministically to SQL; ill-formed ones are rejected with an error, not silently mis-compiled. **Data analysis has a type system for the first time.**
+
+### The North Star is auditability, not accuracy
+
+But to say what it actually *compiles*, you have to correct a North Star the entire field got wrong.
+
+Every "AI chat with your data" product optimizes for **accuracy**. Yet in a domain with no oracle, accuracy is **not a directly optimizable target** — you cannot even decide whether *this* answer is right. So this system's North Star was never accuracy. It is **auditability** — a plainer, scarier question: **how do I know this answer is wrong?**
+
+An "accurate" answer you cannot check is **more dangerous** than a possibly-wrong answer you can point at and refute. An LLM says "12.3%"; even if it is right 95% of the time, you cannot tell *in the moment* whether this is the wrong 5%. A Metric-backed number is different — it **points at a definition you can open, read, and refute**: you see "early order = `status='CONFIRMED'`", you say "no, we also count SHIPPED", you change that one row, and every future query is corrected.
+
+Popper, paraphrased: **an unfalsifiable claim is worthless for decisions.** The compiler's gift to data analysis was never correctness — it is **falsifiability**. This is exactly why *consistency over correctness*: correctness cannot be optimized directly, but consistency can — and consistency is the precondition for auditability.
+
+> This section is the heart of the manifesto; the full argument is in ["The Compiler for Data Analysis"](../essays/data-analysis-compiler.en.md).
 
 ---
 
@@ -98,7 +118,7 @@ Traditional semantic layers demand months of upfront investment. We reject that 
 
 Do not expect the first query to return a correct answer. The intelligence of an ontology system is **accumulated, not granted** by the model.
 
-Every time a user asks, the ontology curator should review the LLM's tokenization output — supplement missing keywords, correct wrong aliases, adjust Intent priorities. Every correction makes the system more accurate next time.
+Every time a user asks, the ontology curator should review the LLM's tokenization output — supplement missing keywords, correct wrong aliases, adjust Metric priorities. Every correction makes the system more accurate next time.
 
 **Skip correction, and the system stays at cold start forever. Practice correction, and error rate compounds downward week by week.**
 
@@ -126,11 +146,11 @@ We do not claim this system never errs. We claim its **error model is a differen
 
 | Error dimension | Text2SQL (LLM writes SQL directly) | text2ontology (ontology path) |
 |---|---|---|
-| Error space | Unbounded — any plausible-looking SQL | Bounded — only from `aliases[]` ∪ `intent.priority` ∪ `causality(join_key)` finite set |
+| Error space | Unbounded — any plausible-looking SQL | Bounded — only from `aliases[]` ∪ `metric.priority` ∪ `causality(join_key)` finite set |
 | Error localization | Not localizable (LLM is a black box) | Precisely localizable: `agent_step` shows which tier (EXACT/FUZZY/VEC) and which keyword id |
 | Error fix | Edit a prompt → impact unknown | Edit one DB row → impact bounded, all future queries fixed |
 | Error reproducibility | Not reproducible (LLMs are non-deterministic) | Fully reproducible (fixed ontology snapshot → fixed SQL) |
-| Error audit | Cannot prove "why I trusted this" | Can point to an Intent row and say "the CFO signed off on this definition in Q3" |
+| Error audit | Cannot prove "why I trusted this" | Can point to a Metric row and say "the CFO signed off on this definition in Q3" |
 
 **Bounded error is acceptable error. Unbounded hallucination is not.**
 
@@ -162,7 +182,7 @@ Import direction is strictly unidirectional, enforced by CI. Full architecture i
 
 - **Seven-image deployment** (6 Go services + nginx-served frontend), four-layer hexagonal, CI-enforced unidirectional imports
 - **Two agent modes**: query / build, each with its own tool surface and data targets
-- **Metric Intent system**: trigger word → complete query template (metric / filters / auto_group_by / pivot), zero-code additions
+- **Metric system**: trigger word → complete query template (measure / filters / auto_group_by / pivot), zero-code additions
 - **Thread Memory Ledger**: cross-turn structured memory, token waste reduced by an order of magnitude
 - **Per-step agent logging** (`agent_step`): every agent decision is replayable
 
@@ -170,7 +190,7 @@ Code is fully open-source under Apache 2.0. Fork, critique, reuse.
 
 ### Still in progress (honest status)
 
-**Principle 7 ("auditable") is currently half-implemented.** Agent-side decision logs (`agent_step`) and the builder-mode "propose → human activate" flow are both shipped. But **full version control of the ontology itself — who changed which Intent field at what time, what was the prior value, whether it can be rolled back — is not yet written**. This is the top priority on the v0.2 roadmap.
+**Principle 7 ("auditable") is currently half-implemented.** Agent-side decision logs (`agent_step`) and the builder-mode "propose → human activate" flow are both shipped. But **full version control of the ontology itself — who changed which Metric field at what time, what was the prior value, whether it can be rolled back — is not yet written**. This is the top priority on the v0.2 roadmap.
 
 Other principles are largely in place, but each has edge cases to refine.
 
