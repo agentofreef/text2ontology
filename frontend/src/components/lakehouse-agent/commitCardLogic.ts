@@ -75,7 +75,9 @@ export interface MetricSavePayload {
   name: string
   displayName: string
   description: string
-  level: 'simple'
+  // enumerate cards have no measure → persisted as level='sql' (querySql runs
+  // verbatim; backend fills canonical_metric with the '(sql)' sentinel).
+  level: 'simple' | 'sql'
   canonicalMetric: string
   autoGroupBy: string[]
   parameters: Array<{ name: string; type: string; optional: boolean; description?: string }>
@@ -89,12 +91,15 @@ export function buildSavePayload(
   m: CommitCardPayload,
   opts: { promote?: boolean } = {},
 ): MetricSavePayload {
+  const isEnumerate = m.intent === 'enumerate'
   const canonical = stripAlias(m.canonicalMetric || '')
   return {
     name: m.name,
     displayName: m.displayName,
     description: m.description || '',
-    level: 'simple',
+    // enumerate → level='sql' (the querySql is the complete query incl. any
+    // DISTINCT / cross-OD JOIN / scope filter); aggregate → level='simple'.
+    level: isEnumerate ? 'sql' : 'simple',
     canonicalMetric: canonical,
     autoGroupBy: m.autoGroupBy ?? [],
     parameters: (m.parameters ?? []).map((p) => ({
@@ -116,7 +121,9 @@ export function buildSavePayload(
 // human-readable reason. Drives the 采纳 button's enabled/disabled state.
 export function promoteBlocker(m: CommitCardPayload): string | null {
   if (!m.primaryOd) return '主 OD 未填'
-  if (!m.canonicalMetric) return 'canonical_metric 未填'
+  // enumerate cards list distinct dimension values — they have NO measure, so
+  // canonical_metric is intentionally empty. Only aggregate cards need it.
+  if (m.intent !== 'enumerate' && !m.canonicalMetric) return 'canonical_metric 未填'
   if (!m.querySql) return 'querySql 未填'
   if (!m.triggerKeywords || m.triggerKeywords.length === 0) {
     return '召回 KW 为空(LLM 找不到这条口径)'
