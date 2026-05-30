@@ -129,9 +129,15 @@ embedding, streaming, thinking-model detection), `observability` (OTel + Prometh
   `X-On-Behalf-Of` headers, enforced by `pkg/authmw`. Public routes use HMAC-signed bearer tokens.
 - **SSE streaming** (agent responses, ingest progress) requires `http.Flusher`. `pkg/authmw`'s
   `statusRecorder` forwards `Flush()` so SSE survives the auth middleware — don't break that.
-- **Two agent modes**, distinguished by `agent_type` on the thread (immutable once set):
-  `lakehouse` (NL → SmartQuery → answer) and `builder` (interview-driven OD/Intent/Link creation with a
-  `mark=false → human activate` lifecycle; ≥3-turn interview gate before proposing).
+- **Three agent modes**, distinguished by `agent_type` on the thread (immutable once set):
+  `lakehouse` (NL → SmartQuery → answer); `builder` (interview-driven OD/Intent/Link creation with a
+  `mark=false → human activate` lifecycle; ≥3-turn interview gate before proposing); and `explore`
+  (chat-first 口径 co-authoring — `services/agent-server/handler/handler_agent_explore.go`). In explore
+  the LLM emits a **structured** `commit_card` spec (`intent` aggregate/enumerate + `measure{agg,column}`
+  + `dimensions[]` + `filters[]`), never SQL; the SmartQuery engine compiles it. Tools: `lookup`,
+  `inspect` (live `SELECT DISTINCT` value-domain introspection), `smartquery`, `commit_card`. Cross-OD
+  `OD.column` refs in dimensions/filters are allowed — the engine joins via `ont_link_type`. The same
+  founding invariant holds: the LLM selects structure, the compiler emits SQL.
 - **pgvector**: vector columns are `vector(1024)` with bge-large-zh embeddings.
 - **SQL identifier safety**: dynamic identifiers go through `pq.QuoteIdentifier` (prior SQL-injection
   fixes). Don't string-concatenate table/column names into queries.

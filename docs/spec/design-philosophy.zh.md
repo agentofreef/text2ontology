@@ -187,6 +187,10 @@ Text2SQL 失败的真正原因不是 LLM 不会写 SQL,是 **LLM 在多表场景
 
 **关键约束**:Query 不能写 SQL。LLM 只能提供 intent 和 params,不能自由拼 SQL 字符串。这是"本体先于查询"的工程兑现 —— **LLM 永远只是 deterministic 路径上的填空者**。
 
+### 探索模式把同一不变量用到了「创作口径」上
+
+Query 是拿既有口径回答问题;**探索模式**(`agent_type=explore`)则是分析师与 agent **共创一条新口径**的地方。同一条铁律成立:LLM 永不写 SQL。它吐出一个**结构化 spec** —— `intent`(aggregate / enumerate)、`measure {agg, column}`、`dimensions[]`、`filters[]` —— 由 SmartQuery 引擎编译(跨 OD 的 `OD.列名` 引用按 Link 自动拼 JOIN)。专设的 `inspect` 工具让 agent 在落定前先看某列的**真实取值域**(`SELECT DISTINCT`),把 filter 建立在真实数据上而非猜测。于是「创作口径」同样是有限集选择 + 确定性编译,而非自由 SQL 生成。
+
 ---
 
 ## 五、四个设计原则

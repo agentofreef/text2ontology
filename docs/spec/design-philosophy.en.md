@@ -189,6 +189,18 @@ The entire tool surface is two tools. Minimalism is the design philosophy.
 
 **Key constraint**: Query cannot take SQL. The LLM may only supply `intent` and `params` — it cannot assemble SQL strings freely. This is the engineering payoff of "ontology before query" — **the LLM is forever a slot-filler on a deterministic path**.
 
+### Explore mode applies the same invariant to *authoring* a metric
+
+Query answers questions against existing 口径. **Explore mode** (`agent_type=explore`)
+is where the analyst and the agent *co-author a new 口径*. The same rule holds:
+the LLM never writes SQL. It emits a **structured spec** — `intent`
+(aggregate | enumerate), `measure {agg, column}`, `dimensions[]`, `filters[]` —
+and the SmartQuery engine compiles it (resolving cross-OD `OD.column` references
+into JOINs via the curated Links). A dedicated `inspect` tool lets the agent read
+the *actual* value domain of a column (`SELECT DISTINCT`) before it commits, so it
+grounds filters in real data instead of guessing. Authoring a metric is thus also
+finite-set selection + deterministic compilation — not free-form SQL generation.
+
 ---
 
 ## 5. Four design principles
