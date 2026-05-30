@@ -244,6 +244,14 @@ func runExploreTurn(
 
 	// ── LLM loop ──
 	emittedCardThisTurn := false
+	// zeroRowRetries bounds how many times a commit_card that compiled + ran
+	// fine but matched 0 rows is bounced back for self-correction before we
+	// accept the empty result. 0 rows is almost always a wrong filter (e.g. an
+	// id/code column filtered by a human-readable name); bouncing it lets the
+	// LLM fix the spec, and the cap guarantees a genuinely-empty result still
+	// terminates instead of looping forever.
+	zeroRowRetries := 0
+	const maxZeroRowRetries = 2
 	nudgedThisTurn := false
 	// Consecutive failed smartquery / tool calls — if we hit this without
 	// emitting a card, the LLM is stuck in a broken-tool retry spiral. Nudge
@@ -384,11 +392,16 @@ func runExploreTurn(
 				llmMessages = append(llmMessages, llmclient.BuildToolResultMessage(tc.ID, string(resJSON)))
 				continue
 			}
-			payload, exec, emitErr := emitCommitCard(ctx, db, projectID, lastLookupResult, tc.Arguments, sendSSEFull)
+			payload, exec, emitErr := emitCommitCard(ctx, db, projectID, lastLookupResult, tc.Arguments, zeroRowRetries >= maxZeroRowRetries, sendSSEFull)
 			if emitErr != nil {
 				// Structural-validation / column-resolution / engine-execution
 				// failure — feed the addressable error back so the LLM emits a
 				// corrected structured spec next round (no SQL text to repair).
+				// A ZERO_ROWS bounce rides the same machinery; count it so a
+				// genuinely-empty result is accepted once the budget is spent.
+				if strings.HasPrefix(emitErr.Error(), "ZERO_ROWS:") {
+					zeroRowRetries++
+				}
 				resJSON, _ := json.Marshal(M{"error": emitErr.Error()})
 				llmMessages = append(llmMessages, llmclient.BuildToolResultMessage(tc.ID, string(resJSON)))
 				continue
@@ -459,10 +472,13 @@ func runExploreTurn(
 			tc := toolCalls[0]
 			llmMessages = append(llmMessages, llmclient.BuildAssistantToolCallMessage([]llmclient.ToolCallResult{tc}))
 			sendSSEFull("function_call", M{"name": tc.Name, "arguments": tc.Arguments})
-			payload, exec, emitErr := emitCommitCard(ctx, db, projectID, lastLookupResult, tc.Arguments, sendSSEFull)
+			payload, exec, emitErr := emitCommitCard(ctx, db, projectID, lastLookupResult, tc.Arguments, zeroRowRetries >= maxZeroRowRetries, sendSSEFull)
 			if emitErr != nil {
 				// Feed the addressable error back so the next attempt fixes the
 				// structured spec (wrong column / bad measure / exec error).
+				if strings.HasPrefix(emitErr.Error(), "ZERO_ROWS:") {
+					zeroRowRetries++
+				}
 				log.Printf("EXPLORE-AGENT: forced round attempt %d emit failed: %v", attempt, emitErr)
 				resJSON, _ := json.Marshal(M{"error": emitErr.Error()})
 				llmMessages = append(llmMessages, llmclient.BuildToolResultMessage(tc.ID, string(resJSON)))
@@ -576,6 +592,7 @@ func emitCommitCard(
 	projectID string,
 	lastLookup M,
 	rawArgs map[string]interface{},
+	allowEmpty bool,
 	sendSSEFull func(string, M),
 ) (contracts.CommitCardPayload, *draftExecResult, error) {
 	payload, err := commitCardPayloadFromArgs(rawArgs)
@@ -614,6 +631,20 @@ func emitCommitCard(
 		if cerr != nil {
 			return contracts.CommitCardPayload{}, nil, fmt.Errorf("filters[%d].prop: %v", i, cerr)
 		}
+		// Reject a filter VALUE that smells like raw SQL (a subquery / statement
+		// terminator / comment). The explore LLM must never hand-write SQL; when
+		// it sneaks a subquery into a value (e.g. value="SELECT id FROM SKU WHERE
+		// name LIKE '%X%'") the engine quotes it as a literal, the query silently
+		// matches 0 rows, and the agent ships a self-contradictory empty answer.
+		// Turning it into an addressable error lets the forced-retry loop self-correct.
+		if v := strings.ToLower(strings.TrimSpace(payload.Filters[i].Value)); strings.Contains(v, ";") || strings.Contains(v, "--") || strings.Contains(v, "/*") || (strings.Contains(v, "select ") && strings.Contains(v, " from ")) {
+			return contracts.CommitCardPayload{}, nil, fmt.Errorf(
+				"filters[%d].value %q 看起来是 SQL — 过滤值必须是纯字面量(如 \"燕麦奶\"),"+
+					"绝不能是 SQL 或子查询。要按关联对象过滤,请把 prop 设为该对象的名称列(跨 OD,"+
+					"如 \"INGREDIENT.name\" 或 \"SKU.name\"),op 用 \"=\",value 用纯名称,引擎会自动 JOIN;"+
+					"多个值用 op \"in\" + 逗号分隔的字面量列表。",
+				i, payload.Filters[i].Value)
+		}
 		payload.Filters[i].Prop = col
 	}
 
@@ -627,6 +658,20 @@ func emitCommitCard(
 		// Execution/validation failure → surface to the LLM for self-correction
 		// (the caller feeds emitErr back as a tool result and retries).
 		return contracts.CommitCardPayload{}, nil, eerr
+	}
+	// Zero-row soft failure: the spec compiled + ran but matched nothing. This
+	// is almost always a wrong filter — most often an id/code column (store_id,
+	// sku_code, *_id) filtered by a human-readable NAME. Bounce it back BEFORE
+	// persisting the draft (so no orphan lakehouse_metric row and no commit_card
+	// SSE on the retry rounds) and let the LLM re-emit with the cross-OD name
+	// column. allowEmpty=true once the caller's retry budget is spent, so a
+	// genuinely-empty result is still accepted and the turn terminates.
+	if exec != nil && len(exec.rows) == 0 && !allowEmpty {
+		return contracts.CommitCardPayload{}, nil, fmt.Errorf(
+			"ZERO_ROWS: 该 commit_card 编译并执行成功，但返回 0 行。0 行通常意味着过滤条件写错了——" +
+				"最常见的是你在 ID/编码列(如 store_id、sku_code、*_id)上用了人类可读的名称做过滤。" +
+				"请改用跨 OD 的【名称列】(例如 STORE.name='上海龙阳路店'、INGREDIENT.name='燕麦奶')，" +
+				"必要时先用 inspect 查看该列的真实取值确认。若你已核实过滤正确、数据本就为空，原样重发即可，系统会接受空结果。")
 	}
 	payload.QuerySql = exec.sql
 	payload.CanonicalMetric = exec.canonicalMetric
@@ -1298,7 +1343,7 @@ func emitStubCommitCard(
 		"responseTemplate": "{{total}}",
 		"description":      "Phase 4a deterministic stub (NEVER ships to prod)",
 	}
-	payload, _, err := emitCommitCard(ctx, db, projectID, lastLookup, stubArgs, sendSSEFull)
+	payload, _, err := emitCommitCard(ctx, db, projectID, lastLookup, stubArgs, true, sendSSEFull)
 	if err != nil {
 		log.Printf("EXPLORE-AGENT(stub): emit failed: %v", err)
 		sendSSEFull("error", M{"content": "stub emit failed: " + err.Error()})

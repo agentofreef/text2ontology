@@ -312,7 +312,7 @@ func TestTwoCommitCardsPerThread(t *testing.T) {
 			"measure":         map[string]interface{}{"agg": "COUNT"},
 			"triggerKeywords": []interface{}{"k1-" + suffix, "k2-" + suffix},
 		}
-		_, _, err := emitCommitCard(context.Background(), db, projectID, nil, args, cap.sender())
+		_, _, err := emitCommitCard(context.Background(), db, projectID, nil, args, true, cap.sender())
 		if err != nil {
 			t.Fatalf("emit %s: %v", suffix, err)
 		}
@@ -359,7 +359,7 @@ func TestBranchedExploreEmitsCard(t *testing.T) {
 		"measure":         map[string]interface{}{"agg": "COUNT"},
 		"triggerKeywords": []interface{}{"child-a", "child-b"},
 	}
-	_, _, err := emitCommitCard(context.Background(), db, projectID, nil, args, cap.sender())
+	_, _, err := emitCommitCard(context.Background(), db, projectID, nil, args, true, cap.sender())
 	if err != nil {
 		t.Fatalf("branched emit failed: %v", err)
 	}
