@@ -45,7 +45,9 @@
       "header": {
         "mode_query": "查询",
         "mode_builder": "构造",
+        "mode_explore": "探索",
         "mode_analyst": "分析师",
+        "title_explore": "口径工坊",
         "branch_label": "澄清分支",
         "memory_btn": "记忆",
         "memory_title": "查看本线程累计记忆（Thread Memory Ledger）",

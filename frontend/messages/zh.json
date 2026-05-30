@@ -273,7 +273,9 @@
       "header": {
         "mode_query": "查询",
         "mode_builder": "构造",
+        "mode_explore": "探索",
         "mode_analyst": "分析师",
+        "title_explore": "口径工坊",
         "branch_label": "澄清分支",
         "memory_btn": "记忆",
         "memory_title": "查看本线程累计记忆（Thread Memory Ledger）",
@@ -288,7 +290,8 @@
         "agent_llm_bound_tooltip": "已绑定 · {vendor} / {modelName}（点击切换或解绑）",
         "agent_llm_unbound_tooltip": "当前回退到 active 模型 — 选择以显式绑定",
         "title_lakehouse": "Lakehouse Agent",
-        "title_builder": "本体构造助手"
+        "title_builder": "本体构造助手",
+        "title_explore_chat": "探索 · AI 共创"
       },
       "graph_toolbar": {
         "layout_current": "当前",
@@ -362,6 +365,35 @@
       "thread": {
         "load_fail": "加载对话失败",
         "main_title": "主对话"
+      },
+      "explore": {
+        "input_placeholder": "描述你想分析的问题…",
+        "commit_card": {
+          "accept_button": "采纳",
+          "accepted_bubble": "已采纳: {name}",
+          "error_label": "采纳失败",
+          "edit_name_label": "名称",
+          "edit_display_name_label": "显示名",
+          "edit_trigger_keywords_label": "召回关键词",
+          "readonly_canonical_label": "canonical_metric",
+          "readonly_sql_label": "querySql",
+          "readonly_parameters_label": "参数",
+          "readonly_primary_od_label": "主 OD",
+          "readonly_auto_group_by_label": "默认 GROUP BY",
+          "readonly_response_template_label": "回答模板",
+          "readonly_description_label": "释义",
+          "accepting": "采纳中…",
+          "blocked_reason": "尚不可采纳: {reason}"
+        },
+        "thread_list": {
+          "new_button": "新对话",
+          "empty": "暂无探索对话",
+          "loading": "加载中…",
+          "title_fallback": "新对话"
+        },
+        "error": {
+          "stream_failed": "对话流中断,请重试"
+        }
       }
     },
     "annotations": {

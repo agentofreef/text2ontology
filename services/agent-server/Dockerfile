@@ -27,6 +27,12 @@ RUN addgroup -S app && adduser -S -G app -u 10001 app
 
 COPY --from=builder /service /service
 
+# Ship the editable system prompts and point the handler at them, so the rich
+# explore_system.md (not just the inline Go fallback) drives the LLM. Without
+# this the container silently fell back to the compiled-in const.
+COPY --from=builder /build/services/agent-server/prompts /prompts
+ENV EXPLORE_SYSTEM_PROMPT_PATH=/prompts/explore_system.md
+
 EXPOSE 8092
 
 USER app

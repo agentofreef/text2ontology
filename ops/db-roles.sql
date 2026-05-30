@@ -142,6 +142,20 @@ SELECT pg_temp.grant_if_exists('GRANT', 'SELECT', ARRAY[
     'llm_config', 'llm_role_binding',
     'user', 'project'
   ], 'agent_server_user');
+-- NOTE (explore-mode grant, 2026-05-29): agent-server's explore handler
+-- (services/agent-server/handler/handler_agent_explore.go::emitCommitCard)
+-- pre-creates a mark=false row in lakehouse_metric directly via tx.Exec
+-- INSERT, then writes triggers to lakehouse_keyword via UpdateMetricTriggers
+-- in the same transaction. This bypasses the backend-api PUT path (which is
+-- only invoked at user-clicks-采纳 time to flip mark=true). Without these
+-- writes the explore handler logs "forced final round emit failed: insert
+-- lakehouse_metric: pq: permission denied for table lakehouse_metric" and
+-- the right-rail DraftCanvas never receives a commit_card event. Additively
+-- widens the SELECT-only grant above to INSERT/UPDATE/DELETE for the
+-- explore-mode write path; lakehouse-mode reads continue to use SELECT.
+SELECT pg_temp.grant_if_exists('GRANT', 'INSERT, UPDATE, DELETE',
+  ARRAY['lakehouse_metric', 'lakehouse_keyword'],
+  'agent_server_user');
 -- NOTE (grant-gap fix): MissionAct tables. agent-server is the SOLE owner of
 -- ont_mission — pkg/mission.Store upserts it (INSERT … ON CONFLICT DO UPDATE)
 -- and SELECTs by id/thread; the thread SELECT also backs

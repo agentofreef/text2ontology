@@ -710,7 +710,7 @@ ALTER TABLE ont_agent_thread ADD COLUMN IF NOT EXISTS agent_type VARCHAR(10) DEF
 ALTER TABLE ont_agent_thread DROP CONSTRAINT IF EXISTS agent_type_chk;
 ALTER TABLE ont_agent_thread
   ADD CONSTRAINT agent_type_chk
-  CHECK (agent_type IN ('lakehouse','builder'));
+  CHECK (agent_type IN ('lakehouse','builder','explore'));
 
 -- thread_state stores session state (todoItems, loadedSkills, sessionId) as JSONB
 ALTER TABLE ont_agent_thread ADD COLUMN IF NOT EXISTS thread_state JSONB DEFAULT '{}';

@@ -211,9 +211,19 @@ func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCor
 	// would otherwise strip the suffix and route the resolver to an unrelated
 	// property in another Od via Tier-3 fuzzy global matching.
 	for _, g := range spec.GroupBy {
-		_, propName := smartquery.StripObjectPrefix(g)
+		odName, propName := smartquery.StripObjectPrefix(g)
 		if propName == "" {
 			propName = g
+		}
+		// OD-qualified ("INGREDIENT.name") → bind to THAT OD, not whatever OD
+		// the global resolver happens to pick for a shared column name.
+		if odName != "" {
+			if pi, err := resolvePropertyInOD(db, spec.ProjectID, odName, propName, allProps); err == nil {
+				rq.GroupByCols = append(rq.GroupByCols, smartquery.ResolvedGroupBy{
+					Prop: pi, Granularity: "", OutputLabel: pi.Name, OriginalToken: g,
+				})
+				continue
+			}
 		}
 		if pi, err := resolvePropertyLakehouse(db, spec.ProjectID, propName, allProps); err == nil {
 			rq.GroupByCols = append(rq.GroupByCols, smartquery.ResolvedGroupBy{
@@ -233,11 +243,19 @@ func ResolveQuery(db *sql.DB, spec smartquery.QuerySpec, corrector *LakehouseCor
 
 	// 4. Resolve filters (with keyword correction + structured tracking).
 	for _, f := range spec.Filters {
-		_, propName := smartquery.StripObjectPrefix(f.Prop)
+		odName, propName := smartquery.StripObjectPrefix(f.Prop)
 		if propName == "" {
 			propName = f.Prop
 		}
-		pi, err := resolvePropertyLakehouse(db, spec.ProjectID, propName, allProps)
+		var pi smartquery.PropertyInfo
+		var err error
+		// OD-qualified filter ("MENUITEM.name") → bind to THAT OD first.
+		if odName != "" {
+			pi, err = resolvePropertyInOD(db, spec.ProjectID, odName, propName, allProps)
+		}
+		if odName == "" || err != nil {
+			pi, err = resolvePropertyLakehouse(db, spec.ProjectID, propName, allProps)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -613,6 +631,33 @@ func LoadSingleObject(db *sql.DB, projectID, objName string) (ObjectInfo, error)
 // Tier 2: global exact across all objects in version
 // Tier 3: fuzzy substring with length guard (≤1.5x)
 // Tier 4: hard error with available properties
+// resolvePropertyInOD binds a property to a SPECIFIC OD, used when the caller's
+// token was OD-qualified ("INGREDIENT.name"). Without this, a qualified column
+// fell through to resolvePropertyLakehouse's global Tier-2 match, which does
+// `ORDER BY LENGTH(ot.name) LIMIT 1` and silently bound to the shortest-named
+// OD that happened to share the column name (e.g. INGREDIENT.name → MENUITEM.name).
+// On a miss within the named OD it returns an error so the caller can fall back.
+func resolvePropertyInOD(db *sql.DB, projectID, odName, propName string, localProps []smartquery.PropertyInfo) (smartquery.PropertyInfo, error) {
+	// Tier 1: local exact (object + property), case-insensitive.
+	for _, p := range localProps {
+		if strings.EqualFold(p.ObjectName, odName) && strings.EqualFold(p.Name, propName) {
+			return p, nil
+		}
+	}
+	// Tier 2: DB exact, constrained to the named OD.
+	var oID, oName, pName, pDT string
+	row := db.QueryRow(`
+		SELECT ot.id, ot.name, p.name, COALESCE(p.data_type,'')
+		FROM ont_property p
+		JOIN ont_object_type ot ON ot.id = p.object_type_id
+		WHERE ot.project_id = $1 AND LOWER(ot.name) = LOWER($2) AND LOWER(p.name) = LOWER($3)
+		LIMIT 1`, projectID, odName, propName)
+	if err := row.Scan(&oID, &oName, &pName, &pDT); err == nil {
+		return smartquery.PropertyInfo{Name: pName, DataType: pDT, TableName: oName, ColumnName: pName, ObjectName: oName, ObjectID: oID}, nil
+	}
+	return smartquery.PropertyInfo{}, fmt.Errorf("property %q not found in OD %q", propName, odName)
+}
+
 func resolvePropertyLakehouse(db *sql.DB, projectID, name string, localProps []smartquery.PropertyInfo) (smartquery.PropertyInfo, error) {
 	// Tier 1: local exact match (case-insensitive).
 	for _, p := range localProps {

@@ -360,6 +360,16 @@ func HandleLakehouseMetricByID(db *sql.DB) http.HandlerFunc {
 				}
 			}
 
+			// Explore-mode CommitCard 采纳 path: ?dryRun=true short-circuits
+			// after applyParsedBareSQL + validateIntentRemote pass. The row is
+			// NOT updated; the caller (frontend CommitCard.tsx) issues a second
+			// PUT without dryRun to actually flip mark=true and persist edits.
+			// See .omc/plans/plan-explore-chat-redesign-final.md Step 5.
+			if r.URL.Query().Get("dryRun") == "true" {
+				JsonResp(w, M{"ok": true, "dryRun": true})
+				return
+			}
+
 			filtersJSON := jsonArrayBytes(body["canonicalFilters"])
 			paramsJSON := jsonArrayBytes(body["parameters"])
 			planArg := jsonObjOrNil(body["plan"])

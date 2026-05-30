@@ -446,6 +446,8 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		if !IsValidUUID(threadID) {
 			if mode == "builder" {
 				agentType = "builder"
+			} else if mode == "explore" {
+				agentType = "explore"
 			}
 			title := userQuestion
 			if len([]rune(title)) > 50 {
@@ -468,6 +470,35 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		// nil + no-op when the flag is off. Best-effort: never fails the turn.
 		// See mission_shadow.go.
 		shadowM := newShadowMission(ctx, db, threadID, projectID, userQuestion)
+
+		// ── agentPolicy decision ──
+		// Centralises the scattered `agentType ==` checks (lakehouse vs builder
+		// vs explore) into a single switch so adding a new agent_type is a
+		// 5-line edit rather than a grep-hunt. Explore mode short-circuits the
+		// whole lakehouse loop and dispatches to runExploreTurn — explore's
+		// tool surface is lookup + smartquery + commit_card (handled in
+		// handler_agent_explore.go), not the lakehouse synthesizer pipeline.
+		type agentPolicy struct {
+			useLakehouseLedger bool
+			useBuilderTools    bool
+			useExploreTools    bool
+			allowsCommitCard   bool
+			missionActEnabled  bool
+		}
+		var policy agentPolicy
+		switch agentType {
+		case "lakehouse":
+			policy = agentPolicy{useLakehouseLedger: true, missionActEnabled: missionActEnabled}
+		case "builder":
+			policy = agentPolicy{useBuilderTools: true}
+		case "explore":
+			policy = agentPolicy{useExploreTools: true, allowsCommitCard: true}
+		}
+		if policy.useExploreTools {
+			// Explore mode bypasses lakehouse/builder LLM loop entirely.
+			runExploreTurn(ctx, db, threadID, projectID, userQuestion, nil, sendSSEFull, llmclient.NewLiveClient())
+			return
+		}
 
 		// ── Branch-thread detection ──
 		// If this thread has parent_thread_id in thread_state, it's a clarification
@@ -537,7 +568,7 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		var builderLedgerOldVersion int
 		var builderContextMD string
 
-		if !isBranchThread && agentType == "lakehouse" {
+		if !isBranchThread && policy.useLakehouseLedger {
 			// Load ledger; lazy-rebuild if this is a legacy thread with prior
 			// steps but no ledger yet.
 			l, err := ledger.Load(ctx, db, threadID)
@@ -592,7 +623,7 @@ func handleAgentStreamLakehouse(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Builder ledger — loaded for builder threads (parallel to the query ledger block above).
-		if !isBranchThread && agentType == "builder" {
+		if !isBranchThread && policy.useBuilderTools {
 			bl, err := builder_ledger.Load(ctx, db, threadID)
 			if err != nil {
 				log.Printf("BUILDER-AGENT: builder_ledger.Load error (continuing with empty ledger): %v", err)
@@ -859,7 +890,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// Builder threads use a different prompt + tool set (see handler_agent_builder.go).
 		// Placed AFTER the isBranchThread check so a branch-of-builder still gets the
 		// branch seed prompt; not a current code path but consistent with intent.
-		if agentType == "builder" {
+		if policy.useBuilderTools {
 			systemPrompt = builderSystemPrompt(projectName)
 		}
 
@@ -867,7 +898,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// Confirmed learned facts provide cross-cutting business knowledge that should
 		// guide smartquery decisions. Skip placeholder when no facts exist. Only
 		// lakehouse (query) mode needs this — builder does not run smartquery.
-		if agentType == "lakehouse" {
+		if policy.useLakehouseLedger {
 			olIndex := BuildOlIndex(db, projectID, "")
 			if !strings.HasPrefix(olIndex, "暂无学习事实") {
 				systemPrompt += "\n\n" + olIndex
@@ -881,7 +912,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		for i, m := range messages {
 			content := m.Content
 			if i == len(messages)-1 && m.Role == "user" {
-				if agentType == "builder" && builderContextMD != "" {
+				if policy.useBuilderTools && builderContextMD != "" {
 					content = builderContextMD + "\n\n---\n\n" + m.Content
 				} else if recallContextMD != "" {
 					content = recallContextMD + "\n\n---\n\n" + m.Content
@@ -892,7 +923,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 
 		// Define tools for native tool_call path
 		var v2Tools []llmclient.ToolDef
-		if agentType == "builder" {
+		if policy.useBuilderTools {
 			v2Tools = builderV2Tools()
 		} else {
 			// Lakehouse Agent (查询模式) 工具表 — 仅 lookup + smartquery。
@@ -1193,7 +1224,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		var requiredDims []string
 
 		dispatchTool := func(name string, args map[string]interface{}) M {
-			if agentType == "builder" {
+			if policy.useBuilderTools {
 				if !builderToolNames[name] {
 					return M{
 						"error":            fmt.Sprintf("工具 %q 在构造模式 (builder) 不可用", name),
@@ -1447,7 +1478,7 @@ tN 是**本轮**的编号，每一轮都从 t1 重新开始。
 		// through to the normal loop unchanged. Only active when
 		// USE_MISSION_ACT is on AND agentType is "lakehouse" (builder has no
 		// recall Intents to gate against).
-		if missionActEnabled && agentType == "lakehouse" {
+		if policy.missionActEnabled {
 			// Prior-turn history for the judge: the conversation the frontend
 			// sent, minus the latest message (that's the current question). Its
 			// assistant content is the FINAL answer text, never tool I/O — so
@@ -4474,7 +4505,7 @@ func handleLakehouseAgentThreads(db *sql.DB) http.HandlerFunc {
 				title = "新对话"
 			}
 			agentType := StrVal(body, "agentType")
-			if agentType != "lakehouse" && agentType != "builder" {
+			if agentType != "lakehouse" && agentType != "builder" && agentType != "explore" {
 				agentType = "lakehouse"
 			}
 			var id string
@@ -4492,7 +4523,7 @@ func handleLakehouseAgentThreads(db *sql.DB) http.HandlerFunc {
 		// GET — agent_type is optional. Empty/invalid value omits the filter
 		// so callers without a preference see both modes (history page).
 		agentType := r.URL.Query().Get("agent_type")
-		if agentType != "lakehouse" && agentType != "builder" {
+		if agentType != "lakehouse" && agentType != "builder" && agentType != "explore" {
 			agentType = ""
 		}
 		search := r.URL.Query().Get("search")

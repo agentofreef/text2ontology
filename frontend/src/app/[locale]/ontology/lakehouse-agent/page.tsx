@@ -3,7 +3,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Suspense } from 'react'
 import { useTranslations } from 'next-intl'
 import { useStyleMode } from '@/lib/style-mode'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
+import { useLocale } from 'next-intl'
+import { ExploreChat } from '@/components/lakehouse-agent/ExploreChat'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { getApiBase, getApiBaseFor, api } from '@/lib/api'
@@ -14,7 +16,7 @@ import { llmDisplay } from '@/lib/llmDisplay'
 import { CyberLoader } from '@/components/ui/CyberLoader'
 import {
   Send, Bot, User, ChevronDown, ChevronRight, BookOpen, FileText, Database, Play,
-  Maximize2, Minimize2, Link2, GitBranch, Check, X, Square, Brain, History, ExternalLink
+  Link2, GitBranch, Check, X, Square, Brain, History, ExternalLink
 } from 'lucide-react'
 import { ResultViewer } from '@/components/ui/ResultViewer'
 import { BuilderProposeOdCard } from '@/components/lakehouse-agent/BuilderProposeOdCard'
@@ -704,6 +706,8 @@ function LakehouseAgentChat() {
   const tw = useTranslations('workbench')
   const industrial = useStyleMode().mode === 'industrial'
   const searchParams = useSearchParams()
+  const router = useRouter()
+  const locale = useLocale()
   const { currentProject } = useProject()
   const msg = useMessage()
 
@@ -776,7 +780,10 @@ function LakehouseAgentChat() {
     | { kind: 'pop'; targetId: string }
   const pendingBranchSwitch = useRef<PendingSwitch | null>(null)
 
-  const [graphFullscreen, setGraphFullscreen] = useState(false)
+  // Graph-fullscreen feature removed from the header (per product directive).
+  // Kept as a const so the right-pane width + chat-visibility expressions below
+  // still resolve (always the non-fullscreen layout).
+  const graphFullscreen = false
   const [graphLayoutMode, setGraphLayoutMode] = useState<GraphLayoutMode>('circular-od')
   // Right pane tabs. 任务 (mission/reachability + the question's live 分词) is the
   // default and leads, since the agent forcibly tokenizes + judges reachability
@@ -1189,6 +1196,18 @@ function LakehouseAgentChat() {
             >
               {industrial ? t('header.mode_builder').toString().toUpperCase() : t('header.mode_builder')}
             </button>
+            {/* Explore — URL-driven; wrapper dispatches to ExploreChat on
+                ?mode=explore, so we don't touch local `mode` state here. */}
+            <button
+              onClick={() => router.push(`/${locale}/ontology/lakehouse-agent?mode=explore`)}
+              className={
+                industrial
+                  ? `font-mono text-[10px] tracking-[0.18em] px-3 py-1 transition-colors border-l border-ink text-ink-muted hover:text-ink`
+                  : `text-xs px-3 py-1 transition-colors border-l border-gray-200 text-gray-500 hover:text-gray-800 hover:bg-gray-50`
+              }
+            >
+              {industrial ? t('header.mode_explore').toString().toUpperCase() : t('header.mode_explore')}
+            </button>
           </div>
           {branchStack.length > 0 && (
             <div className="flex items-center gap-1.5 text-xs border-l border-gray-200 pl-3 ml-1">
@@ -1267,10 +1286,6 @@ function LakehouseAgentChat() {
               </label>
             )
           })()}
-          <Button variant="ghost" size="sm" onClick={() => setGraphFullscreen(!graphFullscreen)}>
-            {graphFullscreen ? <Minimize2 className="h-3.5 w-3.5 mr-1" /> : <Maximize2 className="h-3.5 w-3.5 mr-1" />}
-            {graphFullscreen ? t('header.graph_exit_fullscreen') : t('header.graph_fullscreen')}
-          </Button>
           <Button variant="ghost" size="sm" onClick={startNewThread}>{t('header.new_thread')}</Button>
           <button onClick={openHistory} className="border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-500 hover:text-gray-800 hover:border-gray-400 transition-colors">{t('header.history')}</button>
         </div>
@@ -1879,10 +1894,23 @@ function LakehouseAgentChat() {
   )
 }
 
+// URL-driven dispatch: the ?mode= query param decides which top-level
+// experience renders. Explore is a wholly distinct paradigm (metric
+// construction workshop), not a variant of the chat, so it gets its own
+// component instead of conditionally branching inside the chat shell.
+// useSearchParams is reactive to Next router updates, so router.push from
+// either side re-renders this dispatcher.
+function LakehouseAgentDispatch() {
+  const searchParams = useSearchParams()
+  const mode = searchParams.get('mode')
+  if (mode === 'explore') return <ExploreChat />
+  return <LakehouseAgentChat />
+}
+
 export default function LakehouseAgentPage() {
   return (
     <Suspense fallback={<div className="flex h-64 items-center justify-center"><CyberLoader /></div>}>
-      <LakehouseAgentChat />
+      <LakehouseAgentDispatch />
     </Suspense>
   )
 }
